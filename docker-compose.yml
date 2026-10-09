@@ -1,0 +1,48 @@
+services:
+  mongodb:
+    image: mongo:7
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    volumes:
+      - kahbi-mongo:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  api:
+    build:
+      context: ./server
+    restart: unless-stopped
+    environment:
+      PORT: 3000
+      MONGODB_URI: mongodb://mongodb:27017/kahbi
+      JWT_SECRET: ${JWT_SECRET:-local-development-secret-change-before-deploy}
+      CLIENT_ORIGIN: http://localhost:4200
+      CURRENCY: QAR
+      DEFAULT_SERVICE_RADIUS_KM: ${DEFAULT_SERVICE_RADIUS_KM:-20}
+      RESTAURANT_ACCEPTANCE_SLA_MINUTES: ${RESTAURANT_ACCEPTANCE_SLA_MINUTES:-5}
+      CUSTOMER_CANCELLATION_WINDOW_MINUTES: ${CUSTOMER_CANCELLATION_WINDOW_MINUTES:-5}
+      DEFAULT_DELIVERY_FEE: ${DEFAULT_DELIVERY_FEE:-0}
+      CUSTOMER_ADMIN_FEE: ${CUSTOMER_ADMIN_FEE:-0}
+      RESTAURANT_COMMISSION_PERCENT: ${RESTAURANT_COMMISSION_PERCENT:-12}
+      WHATSAPP_MODE: demo
+    ports:
+      - "3000:3000"
+    depends_on:
+      mongodb:
+        condition: service_healthy
+
+  web:
+    build:
+      context: ./client
+    restart: unless-stopped
+    ports:
+      - "4200:4200"
+    depends_on:
+      - api
+
+volumes:
+  kahbi-mongo:
