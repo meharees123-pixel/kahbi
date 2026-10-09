@@ -1,0 +1,220 @@
+const mongoose = require("mongoose");
+const bcrypt = require("bcryptjs");
+
+const { Schema } = mongoose;
+
+const UserSchema = new Schema(
+  {
+    name: { type: String, required: true, trim: true, maxlength: 100 },
+    email: { type: String, required: true, unique: true, lowercase: true, trim: true },
+    phone: { type: String, trim: true, default: "" },
+    passwordHash: { type: String, required: true, select: false },
+    role: {
+      type: String,
+      enum: ["CUSTOMER", "RESTAURANT_OWNER", "RESTAURANT_MANAGER", "RESTAURANT_STAFF", "ADMIN", "SUPER_ADMIN"],
+      required: true
+    },
+    restaurantId: { type: Schema.Types.ObjectId, ref: "Restaurant", default: null },
+    status: { type: String, enum: ["ACTIVE", "SUSPENDED", "DEACTIVATED"], default: "ACTIVE" },
+    demo: { type: Boolean, default: false }
+  },
+  { timestamps: true }
+);
+UserSchema.methods.setPassword = async function setPassword(password) {
+  this.passwordHash = await bcrypt.hash(password, 12);
+};
+UserSchema.methods.verifyPassword = function verifyPassword(password) {
+  return bcrypt.compare(password, this.passwordHash);
+};
+
+const RestaurantSchema = new Schema(
+  {
+    name: { type: String, required: true, trim: true },
+    hotelName: { type: String, default: "" },
+    cuisine: { type: [String], default: [] },
+    description: { type: String, default: "" },
+    address: { type: String, required: true },
+    latitude: { type: Number, default: null },
+    longitude: { type: Number, default: null },
+    serviceRadiusKm: { type: Number, default: null },
+    phone: { type: String, default: "" },
+    whatsapp: { type: String, default: "" },
+    email: { type: String, default: "" },
+    preparationMinutes: { type: Number, default: 35, min: 1 },
+    minOrder: { type: Number, default: 0, min: 0 },
+    maxOrder: { type: Number, default: 1000, min: 1 },
+    status: {
+      type: String,
+      enum: ["DRAFT", "PENDING_REVIEW", "APPROVED", "REJECTED", "SUSPENDED"],
+      default: "PENDING_REVIEW"
+    },
+    availability: { type: String, enum: ["OPEN", "CLOSED", "TEMPORARILY_UNAVAILABLE", "PAUSED"], default: "OPEN" },
+    demo: { type: Boolean, default: false },
+    category: { type: String, default: "Restaurant" },
+    ratingAverage: { type: Number, default: 0 },
+    ratingCount: { type: Number, default: 0 }
+  },
+  { timestamps: true }
+);
+
+const MenuItemSchema = new Schema(
+  {
+    restaurantId: { type: Schema.Types.ObjectId, ref: "Restaurant", required: true, index: true },
+    category: { type: String, required: true, trim: true },
+    name: { type: String, required: true, trim: true },
+    description: { type: String, default: "" },
+    price: { type: Number, required: true, min: 0 },
+    currency: { type: String, default: "QAR" },
+    availability: { type: String, enum: ["AVAILABLE", "UNAVAILABLE", "TEMPORARILY_UNAVAILABLE"], default: "AVAILABLE" },
+    active: { type: Boolean, default: true },
+    bestSeller: { type: Boolean, default: false },
+    chefRecommended: { type: Boolean, default: false },
+    preparationMinutes: { type: Number, default: 15, min: 1 },
+    demo: { type: Boolean, default: false }
+  },
+  { timestamps: true }
+);
+
+const OrderSchema = new Schema(
+  {
+    reference: { type: String, required: true, unique: true },
+    idempotencyKey: { type: String, required: true, unique: true },
+    customerId: { type: Schema.Types.ObjectId, ref: "User", default: null, index: true },
+    guest: {
+      name: { type: String, default: "" },
+      phone: { type: String, default: "" }
+    },
+    restaurantId: { type: Schema.Types.ObjectId, ref: "Restaurant", required: true, index: true },
+    restaurantName: { type: String, required: true },
+    items: [{
+      menuItemId: { type: Schema.Types.ObjectId, ref: "MenuItem", required: true },
+      name: { type: String, required: true },
+      unitPrice: { type: Number, required: true },
+      quantity: { type: Number, required: true, min: 1 },
+      lineTotal: { type: Number, required: true },
+      instructions: { type: String, default: "" }
+    }],
+    address: { type: String, required: true },
+    latitude: { type: Number, default: null },
+    longitude: { type: Number, default: null },
+    subtotal: { type: Number, required: true },
+    discount: { type: Number, default: 0 },
+    deliveryFee: { type: Number, default: 0 },
+    adminFee: { type: Number, default: 0 },
+    tax: { type: Number, default: 0 },
+    total: { type: Number, required: true },
+    currency: { type: String, default: "QAR" },
+    promotionCode: { type: String, default: "" },
+    paymentMethod: { type: String, default: "CASH_TO_RESTAURANT" },
+    paymentStatus: { type: String, enum: ["NOT_REQUIRED", "PENDING", "PAID", "FAILED", "REFUNDED", "PARTIALLY_REFUNDED"], default: "NOT_REQUIRED" },
+    status: { type: String, default: "RESTAURANT_PENDING", index: true },
+    estimatedPreparationMinutes: { type: Number, default: 35 },
+    cancellationReason: { type: String, default: "" },
+    rejectionReason: { type: String, default: "" },
+    commissionRate: { type: Number, default: 0 },
+    commissionAmount: { type: Number, default: 0 },
+    statusHistory: [{
+      previousStatus: { type: String, default: "" },
+      status: { type: String, required: true },
+      changedBy: { type: String, default: "SYSTEM" },
+      role: { type: String, default: "SYSTEM" },
+      reason: { type: String, default: "" },
+      createdAt: { type: Date, default: Date.now }
+    }],
+    completedAt: { type: Date, default: null }
+  },
+  { timestamps: true }
+);
+OrderSchema.index({ customerId: 1, createdAt: -1 });
+OrderSchema.index({ restaurantId: 1, status: 1, createdAt: -1 });
+
+const BillingTransactionSchema = new Schema({
+  orderId: { type: Schema.Types.ObjectId, ref: "Order", required: true, unique: true },
+  restaurantId: { type: Schema.Types.ObjectId, ref: "Restaurant", required: true, index: true },
+  customerId: { type: Schema.Types.ObjectId, ref: "User", default: null },
+  transactionType: { type: String, default: "ORDER_COMPLETED" },
+  grossAmount: { type: Number, required: true },
+  commissionRate: { type: Number, required: true },
+  commissionAmount: { type: Number, required: true },
+  adminFee: { type: Number, default: 0 },
+  advertisementFee: { type: Number, default: 0 },
+  promotionFee: { type: Number, default: 0 },
+  netRestaurantAmount: { type: Number, required: true },
+  currency: { type: String, default: "QAR" },
+  status: { type: String, default: "RECORDED" }
+}, { timestamps: true });
+
+const PromotionSchema = new Schema({
+  code: { type: String, required: true, unique: true, uppercase: true },
+  restaurantId: { type: Schema.Types.ObjectId, ref: "Restaurant", default: null },
+  title: { type: String, required: true },
+  description: { type: String, default: "" },
+  discountType: { type: String, enum: ["PERCENTAGE", "FIXED_AMOUNT"], default: "PERCENTAGE" },
+  discountValue: { type: Number, required: true, min: 0 },
+  minimumOrder: { type: Number, default: 0 },
+  maximumDiscount: { type: Number, default: 1000 },
+  usageLimit: { type: Number, default: 0 },
+  usageCount: { type: Number, default: 0 },
+  startsAt: { type: Date, default: Date.now },
+  endsAt: { type: Date, default: null },
+  active: { type: Boolean, default: true },
+  demo: { type: Boolean, default: false }
+}, { timestamps: true });
+
+const AdvertisementSchema = new Schema({
+  title: { type: String, required: true, trim: true, maxlength: 120 },
+  description: { type: String, default: "", maxlength: 500 },
+  placement: { type: String, enum: ["HOME_BANNER", "RESTAURANT_LISTING", "RESTAURANT_PAGE"], default: "HOME_BANNER" },
+  priority: { type: Number, default: 0 },
+  sponsoredLabel: { type: String, default: "Sponsored" },
+  startsAt: { type: Date, default: Date.now },
+  endsAt: { type: Date, default: null },
+  active: { type: Boolean, default: true },
+  demo: { type: Boolean, default: false }
+}, { timestamps: true });
+
+const AdvertisementEventSchema = new Schema({
+  advertisementId: { type: Schema.Types.ObjectId, ref: "Advertisement", required: true, index: true },
+  eventType: { type: String, enum: ["IMPRESSION", "CLICK"], required: true },
+  createdAt: { type: Date, default: Date.now, index: true }
+}, { versionKey: false });
+
+const RatingSchema = new Schema({
+  orderId: { type: Schema.Types.ObjectId, ref: "Order", required: true, unique: true },
+  customerId: { type: Schema.Types.ObjectId, ref: "User", required: true },
+  restaurantId: { type: Schema.Types.ObjectId, ref: "Restaurant", required: true },
+  stars: { type: Number, required: true, min: 1, max: 5 },
+  comment: { type: String, default: "", maxlength: 1000 }
+}, { timestamps: true });
+
+const AuditSchema = new Schema({
+  userId: { type: Schema.Types.ObjectId, ref: "User", default: null },
+  role: { type: String, default: "SYSTEM" },
+  action: { type: String, required: true },
+  entity: { type: String, required: true },
+  entityId: { type: String, default: "" },
+  details: { type: Schema.Types.Mixed, default: {} }
+}, { timestamps: true });
+
+const MessageLogSchema = new Schema({
+  orderId: { type: Schema.Types.ObjectId, ref: "Order", default: null },
+  recipient: { type: String, required: true },
+  direction: { type: String, default: "OUTBOUND" },
+  template: { type: String, required: true },
+  status: { type: String, enum: ["NOT_CONFIGURED", "QUEUED", "SENT", "DELIVERED", "FAILED"], default: "NOT_CONFIGURED" },
+  error: { type: String, default: "WhatsApp provider is not configured; demo mode only." }
+}, { timestamps: true });
+
+module.exports = {
+  User: mongoose.model("User", UserSchema),
+  Restaurant: mongoose.model("Restaurant", RestaurantSchema),
+  MenuItem: mongoose.model("MenuItem", MenuItemSchema),
+  Order: mongoose.model("Order", OrderSchema),
+  BillingTransaction: mongoose.model("BillingTransaction", BillingTransactionSchema),
+  Promotion: mongoose.model("Promotion", PromotionSchema),
+  Advertisement: mongoose.model("Advertisement", AdvertisementSchema),
+  AdvertisementEvent: mongoose.model("AdvertisementEvent", AdvertisementEventSchema),
+  Rating: mongoose.model("Rating", RatingSchema),
+  AuditLog: mongoose.model("AuditLog", AuditSchema),
+  MessageLog: mongoose.model("MessageLog", MessageLogSchema)
+};
