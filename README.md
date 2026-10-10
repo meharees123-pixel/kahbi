@@ -5,7 +5,7 @@ KABHI is a Qatar-focused ordering platform MVP. It keeps customer ordering, rest
 ## Run with Docker (recommended)
 
 1. Install Docker Desktop and start Docker.
-2. From this directory, run `docker compose up --build`.
+2. Optionally configure `MONGODB_URI` in the root `.env` to use a remote MongoDB cluster instead of the bundled local database. From this directory, run `docker compose up --build`.
 3. In another terminal, seed the database with `docker compose exec api npm run seed`.
 4. Open [http://localhost:4200](http://localhost:4200). The API health endpoint is [http://localhost:3000/api/health](http://localhost:3000/api/health).
 
@@ -21,8 +21,8 @@ The first seed inserts a clearly labeled demo restaurant, menu, promotion, and a
 
 Requirements: Node.js 22.22.3+ (or 24.15.0+) and MongoDB 7+.
 
-1. Copy `.env.example` to `.env` and set a private `JWT_SECRET`.
-2. Start MongoDB locally.
+1. Copy `.env.example` to `.env`, set a private `JWT_SECRET`, and set `MONGODB_URI` to your MongoDB connection string. The URI is read by the API and seed command; `.env` is gitignored.
+2. Start MongoDB locally if using the default local URI.
 3. Run `npm run install:all` to install the root, API, and Angular dependencies (kept in separate packages for Windows compatibility).
 4. Run `npm run seed` once.
 5. Run `npm run dev`; the Angular UI is at `http://localhost:4200` and API at `http://localhost:3000`.

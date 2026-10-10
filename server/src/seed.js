@@ -1,4 +1,4 @@
-require("dotenv").config();
+require("./config");
 const mongoose = require("mongoose");
 const { User, Restaurant, MenuItem, Promotion, Advertisement } = require("./models");
 

@@ -18,7 +18,7 @@ services:
     restart: unless-stopped
     environment:
       PORT: 3000
-      MONGODB_URI: mongodb://mongodb:27017/kahbi
+      MONGODB_URI: ${MONGODB_URI:-mongodb://mongodb:27017/kahbi}
       JWT_SECRET: ${JWT_SECRET:-local-development-secret-change-before-deploy}
       CLIENT_ORIGIN: http://localhost:4200
       CURRENCY: QAR
