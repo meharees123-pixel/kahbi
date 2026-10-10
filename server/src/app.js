@@ -370,6 +370,55 @@ app.get("/api/restaurant/me", auth(), roles(...restaurantRoles), asyncRoute(asyn
   res.json({ restaurant });
 }));
 
+app.patch("/api/restaurant/me", auth(), roles("RESTAURANT_OWNER", "RESTAURANT_MANAGER"), asyncRoute(async (req, res) => {
+  const restaurant = await restaurantForUser(req.user);
+  const fields = ["name", "hotelName", "cuisine", "description", "address", "latitude", "longitude", "serviceRadiusKm", "phone", "whatsapp", "email", "preparationMinutes", "minOrder", "maxOrder", "category"];
+  const updates = {};
+  for (const field of fields) {
+    if (Object.hasOwn(req.body, field)) updates[field] = req.body[field];
+  }
+  if (typeof updates.name !== "undefined" && (!String(updates.name).trim() || String(updates.name).length > 120)) {
+    return res.status(400).json({ error: "Restaurant name is required and must be 120 characters or fewer." });
+  }
+  if (typeof updates.address !== "undefined" && (!String(updates.address).trim() || String(updates.address).length > 300)) {
+    return res.status(400).json({ error: "A valid restaurant address is required." });
+  }
+  if (typeof updates.cuisine !== "undefined") {
+    updates.cuisine = (Array.isArray(updates.cuisine) ? updates.cuisine : String(updates.cuisine).split(","))
+      .map((value) => String(value).trim()).filter(Boolean).slice(0, 12);
+  }
+  for (const field of ["latitude", "longitude", "serviceRadiusKm", "preparationMinutes", "minOrder", "maxOrder"]) {
+    if (typeof updates[field] !== "undefined" && updates[field] !== null) {
+      updates[field] = Number(updates[field]);
+      if (!Number.isFinite(updates[field])) return res.status(400).json({ error: `${field} must be a valid number.` });
+    }
+  }
+  const latitude = Object.hasOwn(updates, "latitude") ? updates.latitude : restaurant.latitude;
+  const longitude = Object.hasOwn(updates, "longitude") ? updates.longitude : restaurant.longitude;
+  if ((latitude === null) !== (longitude === null)
+    || (latitude !== null && (!isValidCoordinate(latitude, -90, 90) || !isValidCoordinate(longitude, -180, 180)))) {
+    return res.status(400).json({ error: "Provide both valid map coordinates, or leave both blank." });
+  }
+  if (typeof updates.serviceRadiusKm !== "undefined" && (updates.serviceRadiusKm < 1 || updates.serviceRadiusKm > 250)) {
+    return res.status(400).json({ error: "Service radius must be between 1 and 250 km." });
+  }
+  if (typeof updates.preparationMinutes !== "undefined" && (updates.preparationMinutes < 1 || updates.preparationMinutes > 600)) {
+    return res.status(400).json({ error: "Preparation time must be between 1 and 600 minutes." });
+  }
+  if (typeof updates.minOrder !== "undefined" && updates.minOrder < 0) return res.status(400).json({ error: "Minimum order cannot be negative." });
+  if (typeof updates.maxOrder !== "undefined" && updates.maxOrder < 1) return res.status(400).json({ error: "Maximum order must be greater than zero." });
+  if ((updates.minOrder ?? restaurant.minOrder) > (updates.maxOrder ?? restaurant.maxOrder)) {
+    return res.status(400).json({ error: "Maximum order must be at least the minimum order." });
+  }
+  if (typeof updates.phone !== "undefined" && updates.phone && !validatePhone(String(updates.phone))) return res.status(400).json({ error: "Enter a valid restaurant phone number." });
+  if (typeof updates.whatsapp !== "undefined" && updates.whatsapp && !validatePhone(String(updates.whatsapp))) return res.status(400).json({ error: "Enter a valid WhatsApp number." });
+  if (typeof updates.email !== "undefined" && updates.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(updates.email))) return res.status(400).json({ error: "Enter a valid restaurant email." });
+  Object.assign(restaurant, updates);
+  await restaurant.save();
+  await writeAudit({ user: req.user, action: "RESTAURANT_PROFILE_UPDATED", entity: "Restaurant", entityId: restaurant._id });
+  res.json({ restaurant });
+}));
+
 app.get("/api/restaurant/orders", auth(), roles(...restaurantRoles), asyncRoute(async (req, res) => {
   const restaurant = await restaurantForUser(req.user);
   const orders = await Order.find({ restaurantId: restaurant._id }).sort({ createdAt: -1 }).limit(100).lean();
@@ -410,22 +459,70 @@ app.patch("/api/restaurant/availability", auth(), roles(...restaurantRoles), asy
 
 app.patch("/api/restaurant/menu/:id", auth(), roles(...restaurantRoles), asyncRoute(async (req, res) => {
   const restaurant = await restaurantForUser(req.user);
-  const availability = String(req.body.availability || "");
-  if (!["AVAILABLE", "UNAVAILABLE", "TEMPORARILY_UNAVAILABLE"].includes(availability)) return res.status(400).json({ error: "Choose a valid menu item availability." });
+  if (req.user.role === "RESTAURANT_STAFF" && Object.keys(req.body).some((field) => field !== "availability")) {
+    return res.status(403).json({ error: "Restaurant staff can update menu availability but cannot edit menu details." });
+  }
   const item = await MenuItem.findOne({ _id: req.params.id, restaurantId: restaurant._id });
   if (!item) return res.status(404).json({ error: "Menu item not found." });
-  const previous = item.availability;
-  item.availability = availability;
+  const fields = ["name", "category", "description", "price", "availability", "preparationMinutes", "bestSeller", "chefRecommended"];
+  const updates = {};
+  for (const field of fields) {
+    if (Object.hasOwn(req.body, field)) updates[field] = req.body[field];
+  }
+  if (typeof updates.name !== "undefined" && !String(updates.name).trim()) return res.status(400).json({ error: "Item name is required." });
+  if (typeof updates.category !== "undefined" && !String(updates.category).trim()) return res.status(400).json({ error: "Item category is required." });
+  if (typeof updates.price !== "undefined") {
+    updates.price = Number(updates.price);
+    if (!Number.isFinite(updates.price) || updates.price <= 0) return res.status(400).json({ error: "Item price must be greater than zero." });
+    updates.price = roundMoney(updates.price);
+  }
+  if (typeof updates.availability !== "undefined" && !["AVAILABLE", "UNAVAILABLE", "TEMPORARILY_UNAVAILABLE"].includes(String(updates.availability))) {
+    return res.status(400).json({ error: "Choose a valid menu item availability." });
+  }
+  if (typeof updates.preparationMinutes !== "undefined") {
+    updates.preparationMinutes = Number(updates.preparationMinutes);
+    if (!Number.isInteger(updates.preparationMinutes) || updates.preparationMinutes < 1 || updates.preparationMinutes > 600) {
+      return res.status(400).json({ error: "Item preparation time must be between 1 and 600 minutes." });
+    }
+  }
+  for (const field of ["bestSeller", "chefRecommended"]) {
+    if (typeof updates[field] !== "undefined" && typeof updates[field] !== "boolean") return res.status(400).json({ error: `${field} must be true or false.` });
+  }
+  Object.assign(item, updates);
   await item.save();
-  await writeAudit({ user: req.user, action: "MENU_AVAILABILITY_CHANGED", entity: "MenuItem", entityId: item._id, details: { previous, availability } });
+  await writeAudit({ user: req.user, action: "MENU_ITEM_UPDATED", entity: "MenuItem", entityId: item._id });
   res.json({ item });
 }));
 
-app.post("/api/restaurant/menu", auth(), roles(...restaurantRoles), asyncRoute(async (req, res) => {
+app.delete("/api/restaurant/menu/:id", auth(), roles("RESTAURANT_OWNER", "RESTAURANT_MANAGER"), asyncRoute(async (req, res) => {
+  const restaurant = await restaurantForUser(req.user);
+  const item = await MenuItem.findOneAndUpdate(
+    { _id: req.params.id, restaurantId: restaurant._id, active: true },
+    { $set: { active: false } },
+    { new: true }
+  );
+  if (!item) return res.status(404).json({ error: "Menu item not found." });
+  await writeAudit({ user: req.user, action: "MENU_ITEM_ARCHIVED", entity: "MenuItem", entityId: item._id });
+  res.json({ item });
+}));
+
+app.post("/api/restaurant/menu", auth(), roles("RESTAURANT_OWNER", "RESTAURANT_MANAGER"), asyncRoute(async (req, res) => {
   const restaurant = await restaurantForUser(req.user);
   const { name, category, price, description } = req.body;
   if (!name || !category || !Number.isFinite(Number(price)) || Number(price) <= 0) return res.status(400).json({ error: "Item name, category and a positive price are required." });
-  const item = await MenuItem.create({ restaurantId: restaurant._id, name: String(name).trim(), category: String(category).trim(), description: String(description || ""), price: roundMoney(Number(price)), currency });
+  const preparationMinutes = Number(req.body.preparationMinutes || 15);
+  if (!Number.isInteger(preparationMinutes) || preparationMinutes < 1 || preparationMinutes > 600) return res.status(400).json({ error: "Item preparation time must be between 1 and 600 minutes." });
+  const item = await MenuItem.create({
+    restaurantId: restaurant._id,
+    name: String(name).trim(),
+    category: String(category).trim(),
+    description: String(description || ""),
+    price: roundMoney(Number(price)),
+    preparationMinutes,
+    bestSeller: req.body.bestSeller === true,
+    chefRecommended: req.body.chefRecommended === true,
+    currency
+  });
   await writeAudit({ user: req.user, action: "MENU_ITEM_CREATED", entity: "MenuItem", entityId: item._id, details: { name: item.name, price: item.price } });
   res.status(201).json({ item });
 }));
@@ -472,9 +569,25 @@ app.get("/api/admin/summary", auth(), roles("ADMIN", "SUPER_ADMIN"), asyncRoute(
 }));
 
 app.get("/api/admin/restaurants", auth(), roles("ADMIN", "SUPER_ADMIN"), asyncRoute(async (req, res) => {
-  const query = req.query.status ? { status: String(req.query.status) } : {};
-  const restaurants = await Restaurant.find(query).sort({ createdAt: -1 }).limit(100).lean();
-  res.json({ restaurants });
+  const query = req.query.status && req.query.status !== "ALL" ? { status: String(req.query.status) } : {};
+  if (req.query.search) {
+    const search = String(req.query.search).slice(0, 80).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    query.$or = [
+      { name: { $regex: search, $options: "i" } },
+      { hotelName: { $regex: search, $options: "i" } },
+      { address: { $regex: search, $options: "i" } },
+      { cuisine: { $elemMatch: { $regex: search, $options: "i" } } },
+      { email: { $regex: search, $options: "i" } }
+    ];
+  }
+  const requestedPage = Number(req.query.page || 1);
+  if (!Number.isSafeInteger(requestedPage) || requestedPage < 1) return res.status(400).json({ error: "Page must be a positive whole number." });
+  const limit = Math.min(100, Math.max(1, Number.parseInt(req.query.limit, 10) || 50));
+  const total = await Restaurant.countDocuments(query);
+  const totalPages = Math.max(1, Math.ceil(total / limit));
+  const page = Math.min(requestedPage, totalPages);
+  const restaurants = await Restaurant.find(query).sort({ createdAt: -1 }).skip((page - 1) * limit).limit(limit).lean();
+  res.json({ restaurants, total, page, limit, totalPages });
 }));
 
 app.get("/api/admin/customers", auth(), roles("ADMIN", "SUPER_ADMIN"), asyncRoute(async (_req, res) => {
@@ -504,6 +617,23 @@ app.patch("/api/admin/restaurants/:id/status", auth(), roles("ADMIN", "SUPER_ADM
   if (status !== "APPROVED") restaurant.availability = "CLOSED";
   await restaurant.save();
   await writeAudit({ user: req.user, action: "RESTAURANT_REVIEWED", entity: "Restaurant", entityId: restaurant._id, details: { previousStatus, status } });
+  res.json({ restaurant });
+}));
+
+app.patch("/api/admin/restaurants/:id/availability", auth(), roles("ADMIN", "SUPER_ADMIN"), asyncRoute(async (req, res) => {
+  const availability = String(req.body.availability || "");
+  if (!["OPEN", "CLOSED", "TEMPORARILY_UNAVAILABLE", "PAUSED"].includes(availability)) {
+    return res.status(400).json({ error: "Choose a valid restaurant availability." });
+  }
+  const restaurant = await Restaurant.findById(req.params.id);
+  if (!restaurant) return res.status(404).json({ error: "Restaurant not found." });
+  if (availability === "OPEN" && restaurant.status !== "APPROVED") {
+    return res.status(409).json({ error: "Approve the restaurant before setting it open." });
+  }
+  const previous = restaurant.availability;
+  restaurant.availability = availability;
+  await restaurant.save();
+  await writeAudit({ user: req.user, action: "ADMIN_RESTAURANT_AVAILABILITY_CHANGED", entity: "Restaurant", entityId: restaurant._id, details: { previous, availability } });
   res.json({ restaurant });
 }));
 

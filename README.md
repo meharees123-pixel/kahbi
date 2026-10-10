@@ -34,8 +34,9 @@ Production API: `npm start`. Production Angular build: `npm run build`.
 - Browse approved restaurants and menus as a guest, search and filter by cuisine/status, and add menu items to a single-restaurant cart.
 - Check out with a guest's name, Qatar mobile/WhatsApp number, and delivery address, or sign in as a customer. The API validates restaurant and item availability, quantities, service radius, promotion and all amounts before creating an order. An idempotency key prevents duplicate submissions.
 - Track a guest order by its order reference and phone number; signed-in customers have private order history and may rate completed orders.
-- Sign in as the restaurant owner to view only that restaurant's orders and advance valid order states through accept, prepare, ready, delivery, and completion. Menu availability can be changed from the restaurant view.
-- Sign in as admin to view live database metrics, approve/reject/suspend restaurants, and monitor orders. Billing snapshots and audit events are recorded for completed orders and administrative decisions.
+- Use the single sign-in screen for customer, restaurant, or admin accounts. The chosen portal is checked against the authenticated role; server endpoints independently enforce authorization and restaurant ownership.
+- Sign in as a restaurant owner or manager to manage the restaurant profile, Qatar address and optional delivery radius, contact information, preparation estimates, QAR order limits, menu descriptions/prices/availability, featured dish labels, and restaurant-scoped orders. Staff accounts can process orders and update item availability but cannot edit business/menu details.
+- Sign in as admin to review a paginated, searchable directory of all restaurants, approve/reject/suspend/reactivate listings, set approved restaurant availability, view live platform metrics, manage customers and promotions, and monitor orders. Billing snapshots and audit events are recorded for completed orders and administrative decisions.
 - Admins can manage customer account status, promotions and sponsored home banners. Served banner impressions are recorded; click/conversion analytics are not enabled.
 - Restaurant onboarding is available from the sign-in screen. New restaurants remain private until admin approval.
 
@@ -45,7 +46,7 @@ Production API: `npm start`. Production Angular build: `npm run build`.
 - Payment method is cash/direct payment to the restaurant. No order is marked paid without a payment provider confirmation.
 - WhatsApp runs in demo/log-only mode. The application records notification intent and makes no claim that an external message was sent or delivered. A WhatsApp Business provider, approved templates, webhook endpoint, credentials, and delivery/retry handling must be configured before enabling live messaging. Credentials belong only in server environment variables.
 - Browser geolocation is optional; the customer can enter a delivery address manually. No map/geocoding provider is bundled.
-- This MVP does not yet include saved customer addresses, bulk menu upload, password reset, admin user/permission management, or an online payment gateway. Restaurant profile editing and configurable settings UI are also deferred; operational rates and rules are configured through server environment variables.
+- This MVP does not yet include saved customer addresses, bulk menu upload, password reset, admin user/permission management, or an online payment gateway. Operational rates and rules are configured through server environment variables.
 - Demo accounts are for local development only. Change the JWT secret and replace/remove demo accounts before deployment. Use HTTPS, a managed MongoDB, secret storage, backups, and an appropriate operational review before production use.
 
 ## Security and data boundaries

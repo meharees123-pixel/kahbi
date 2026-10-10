@@ -23,12 +23,37 @@ interface Restaurant {
   category: string;
   preparationMinutes: number;
   minOrder: number;
+  maxOrder: number;
   status: string;
   availability: string;
+  phone?: string;
+  whatsapp?: string;
+  email?: string;
+  latitude?: number | null;
+  longitude?: number | null;
+  serviceRadiusKm?: number | null;
   ratingAverage: number;
   ratingCount: number;
   distanceKm?: number | null;
   demo?: boolean;
+}
+
+interface RestaurantProfileDraft {
+  name: string;
+  hotelName: string;
+  cuisine: string;
+  description: string;
+  address: string;
+  latitude: number | null;
+  longitude: number | null;
+  serviceRadiusKm: number | null;
+  phone: string;
+  whatsapp: string;
+  email: string;
+  preparationMinutes: number;
+  minOrder: number;
+  maxOrder: number;
+  category: string;
 }
 
 interface MenuItem {
@@ -37,6 +62,7 @@ interface MenuItem {
   description: string;
   category: string;
   price: number;
+  preparationMinutes?: number;
   availability: string;
   bestSeller: boolean;
   chefRecommended: boolean;
@@ -124,6 +150,13 @@ export class AppComponent implements OnInit {
   restaurantOrders: Order[] = [];
   restaurantMenu: MenuItem[] = [];
   pendingRestaurants: Restaurant[] = [];
+  adminRestaurants: Restaurant[] = [];
+  adminRestaurantStatus = 'ALL';
+  adminRestaurantSearch = '';
+  adminRestaurantPage = 1;
+  adminRestaurantTotal = 0;
+  adminRestaurantTotalPages = 1;
+  readonly adminRestaurantPageSize = 50;
   allOrders: Order[] = [];
   metrics: { [key: string]: number } = {};
   messageLogs: { template: string; status: string; recipient: string }[] = [];
@@ -147,6 +180,7 @@ export class AppComponent implements OnInit {
   trackedOrder: Order | null = null;
   authEmail = '';
   authPassword = '';
+  loginPortal: 'CUSTOMER' | 'RESTAURANT' | 'ADMIN' = 'CUSTOMER';
   signupName = '';
   signupPhone = '';
   signupRestaurant = false;
@@ -157,6 +191,12 @@ export class AppComponent implements OnInit {
   newItemCategory = '';
   newItemPrice = 0;
   newItemDescription = '';
+  newItemPreparationMinutes = 15;
+  newItemBestSeller = false;
+  newItemChefRecommended = false;
+  editingMenuItemId = '';
+  menuItemDraft = this.emptyMenuItemDraft();
+  restaurantProfileDraft: RestaurantProfileDraft = this.emptyRestaurantProfile();
   newPromotionCode = '';
   newPromotionTitle = '';
   newPromotionDiscount = 10;
@@ -202,6 +242,14 @@ export class AppComponent implements OnInit {
     return this.user?.role === 'CUSTOMER';
   }
 
+  get isRestaurantUser(): boolean {
+    return Boolean(this.user?.role.startsWith('RESTAURANT_'));
+  }
+
+  get isAdminUser(): boolean {
+    return this.user?.role === 'ADMIN' || this.user?.role === 'SUPER_ADMIN';
+  }
+
   headers(): HttpHeaders {
     const token = localStorage.getItem(this.tokenKey);
     return token ? new HttpHeaders({ Authorization: `Bearer ${token}` }) : new HttpHeaders();
@@ -223,6 +271,66 @@ export class AppComponent implements OnInit {
       this.view = 'home';
       this.loadRestaurants();
     }
+  }
+
+  private emptyRestaurantProfile(): RestaurantProfileDraft {
+    return {
+      name: '',
+      hotelName: '',
+      cuisine: '',
+      description: '',
+      address: '',
+      latitude: null,
+      longitude: null,
+      serviceRadiusKm: null,
+      phone: '',
+      whatsapp: '',
+      email: '',
+      preparationMinutes: 35,
+      minOrder: 0,
+      maxOrder: 1000,
+      category: 'Restaurant'
+    };
+  }
+
+  private emptyMenuItemDraft(): { name: string; category: string; description: string; price: number; availability: string; preparationMinutes: number; bestSeller: boolean; chefRecommended: boolean } {
+    return { name: '', category: '', description: '', price: 0, availability: 'AVAILABLE', preparationMinutes: 15, bestSeller: false, chefRecommended: false };
+  }
+
+  private setRestaurantProfile(restaurant: Restaurant): void {
+    this.restaurantProfileDraft = {
+      name: restaurant.name,
+      hotelName: restaurant.hotelName || '',
+      cuisine: restaurant.cuisine.join(', '),
+      description: restaurant.description || '',
+      address: restaurant.address,
+      latitude: restaurant.latitude ?? null,
+      longitude: restaurant.longitude ?? null,
+      serviceRadiusKm: restaurant.serviceRadiusKm ?? null,
+      phone: restaurant.phone || '',
+      whatsapp: restaurant.whatsapp || '',
+      email: restaurant.email || '',
+      preparationMinutes: restaurant.preparationMinutes,
+      minOrder: restaurant.minOrder,
+      maxOrder: restaurant.maxOrder || 1000,
+      category: restaurant.category || 'Restaurant'
+    };
+  }
+
+  selectDemoLogin(portal: 'CUSTOMER' | 'RESTAURANT' | 'ADMIN'): void {
+    this.loginPortal = portal;
+    this.authEmail = portal === 'CUSTOMER'
+      ? 'customer@kahbi.demo'
+      : portal === 'RESTAURANT'
+        ? 'restaurant@kahbi.demo'
+        : 'admin@kahbi.demo';
+    this.authPassword = 'Demo123!';
+  }
+
+  private roleMatchesLoginPortal(user: User): boolean {
+    if (this.loginPortal === 'CUSTOMER') return user.role === 'CUSTOMER';
+    if (this.loginPortal === 'RESTAURANT') return user.role.startsWith('RESTAURANT_');
+    return user.role === 'ADMIN' || user.role === 'SUPER_ADMIN';
   }
 
   loadRestaurants(): void {
@@ -374,15 +482,25 @@ export class AppComponent implements OnInit {
   }
 
   signIn(): void {
+    this.error = '';
+    this.loading = true;
     this.http.post<{ token: string; user: User }>(`${this.api}/auth/login`, { email: this.authEmail, password: this.authPassword }).subscribe({
       next: ({ token, user }) => {
+        this.loading = false;
+        if (!this.roleMatchesLoginPortal(user)) {
+          this.error = 'That account belongs to a different KABHI portal. Choose the matching account type and try again.';
+          return;
+        }
         localStorage.setItem(this.tokenKey, token);
         this.user = user;
         this.error = '';
         this.notice = `Welcome, ${user.name}.`;
         this.loadRoleLanding();
       },
-      error: (error) => this.showError(error)
+      error: (error) => {
+        this.loading = false;
+        this.showError(error);
+      }
     });
   }
 
@@ -435,6 +553,7 @@ export class AppComponent implements OnInit {
     this.http.get<{ restaurant: Restaurant }>(`${this.api}/restaurant/me`, { headers: this.headers() }).subscribe({
       next: ({ restaurant }) => {
         this.selectedRestaurant = restaurant;
+        this.setRestaurantProfile(restaurant);
         this.http.get<{ orders: Order[] }>(`${this.api}/restaurant/orders`, { headers: this.headers() }).subscribe({
           next: ({ orders }) => (this.restaurantOrders = orders),
           error: (error) => this.showError(error)
@@ -469,6 +588,21 @@ export class AppComponent implements OnInit {
     });
   }
 
+  saveRestaurantProfile(): void {
+    const body = {
+      ...this.restaurantProfileDraft,
+      cuisine: this.restaurantProfileDraft.cuisine.split(',').map((entry) => entry.trim()).filter(Boolean)
+    };
+    this.http.patch<{ restaurant: Restaurant }>(`${this.api}/restaurant/me`, body, { headers: this.headers() }).subscribe({
+      next: ({ restaurant }) => {
+        this.selectedRestaurant = restaurant;
+        this.setRestaurantProfile(restaurant);
+        this.notice = 'Restaurant profile saved.';
+      },
+      error: (error) => this.showError(error)
+    });
+  }
+
   changeItemAvailability(item: MenuItem, availability: string): void {
     this.http.patch(`${this.api}/restaurant/menu/${item._id}`, { availability }, { headers: this.headers() }).subscribe({
       next: () => this.loadRestaurantPortal(),
@@ -481,17 +615,70 @@ export class AppComponent implements OnInit {
       name: this.newItemName,
       category: this.newItemCategory,
       price: this.newItemPrice,
-      description: this.newItemDescription
+      description: this.newItemDescription,
+      preparationMinutes: this.newItemPreparationMinutes,
+      bestSeller: this.newItemBestSeller,
+      chefRecommended: this.newItemChefRecommended
     }, { headers: this.headers() }).subscribe({
       next: () => {
         this.newItemName = '';
         this.newItemCategory = '';
         this.newItemPrice = 0;
         this.newItemDescription = '';
+        this.newItemPreparationMinutes = 15;
+        this.newItemBestSeller = false;
+        this.newItemChefRecommended = false;
         this.loadRestaurantPortal();
       },
       error: (error) => this.showError(error)
     });
+  }
+
+  editMenuItem(item: MenuItem): void {
+    this.editingMenuItemId = item._id;
+    this.menuItemDraft = {
+      name: item.name,
+      category: item.category,
+      description: item.description || '',
+      price: item.price,
+      availability: item.availability,
+      preparationMinutes: item.preparationMinutes || 15,
+      bestSeller: item.bestSeller,
+      chefRecommended: item.chefRecommended
+    };
+  }
+
+  saveMenuItem(item: MenuItem): void {
+    this.http.patch(`${this.api}/restaurant/menu/${item._id}`, this.menuItemDraft, { headers: this.headers() }).subscribe({
+      next: () => {
+        this.editingMenuItemId = '';
+        this.menuItemDraft = this.emptyMenuItemDraft();
+        this.notice = `${item.name} updated.`;
+        this.loadRestaurantPortal();
+      },
+      error: (error) => this.showError(error)
+    });
+  }
+
+  cancelMenuItemEdit(): void {
+    this.editingMenuItemId = '';
+    this.menuItemDraft = this.emptyMenuItemDraft();
+  }
+
+  archiveMenuItem(item: MenuItem): void {
+    if (!window.confirm(`Remove ${item.name} from your menu? Existing order records will be kept.`)) return;
+    this.http.delete(`${this.api}/restaurant/menu/${item._id}`, { headers: this.headers() }).subscribe({
+      next: () => {
+        this.notice = `${item.name} removed from your menu.`;
+        this.loadRestaurantPortal();
+      },
+      error: (error) => this.showError(error)
+    });
+  }
+
+  goToRestaurantMenu(): void {
+    if (this.view !== 'restaurantPortal') this.loadRestaurantPortal();
+    setTimeout(() => document.getElementById('restaurant-menu')?.scrollIntoView({ behavior: 'smooth' }), 0);
   }
 
   loadAdmin(): void {
@@ -522,10 +709,70 @@ export class AppComponent implements OnInit {
       next: ({ customers }) => (this.customers = customers),
       error: (error) => this.showError(error)
     });
+    this.loadAdminRestaurants();
     this.http.get<{ promotions: Promotion[]; advertisements: Advertisement[] }>(`${this.api}/admin/marketing`, { headers: this.headers() }).subscribe({
       next: (data) => {
         this.promotions = data.promotions;
         this.advertisements = data.advertisements;
+      },
+      error: (error) => this.showError(error)
+    });
+  }
+
+  loadAdminRestaurants(): void {
+    const query = new URLSearchParams({
+      page: String(this.adminRestaurantPage),
+      limit: String(this.adminRestaurantPageSize),
+      status: this.adminRestaurantStatus
+    });
+    if (this.adminRestaurantSearch.trim()) query.set('search', this.adminRestaurantSearch.trim());
+    this.http.get<{ restaurants: Restaurant[]; total: number; totalPages: number }>(`${this.api}/admin/restaurants?${query.toString()}`, { headers: this.headers() }).subscribe({
+      next: (data) => {
+        this.adminRestaurants = data.restaurants;
+        this.adminRestaurantTotal = data.total;
+        this.adminRestaurantTotalPages = data.totalPages;
+      },
+      error: (error) => this.showError(error)
+    });
+  }
+
+  setAdminRestaurantStatus(status: string): void {
+    this.adminRestaurantStatus = status;
+    this.adminRestaurantPage = 1;
+    this.loadAdminRestaurants();
+  }
+
+  searchAdminRestaurants(): void {
+    this.adminRestaurantPage = 1;
+    this.loadAdminRestaurants();
+  }
+
+  changeAdminRestaurantPage(page: number): void {
+    this.adminRestaurantPage = Math.max(1, Math.min(this.adminRestaurantTotalPages, page));
+    this.loadAdminRestaurants();
+  }
+
+  goToAdminRestaurants(): void {
+    this.view = 'adminPortal';
+    setTimeout(() => document.getElementById('admin-restaurants')?.scrollIntoView({ behavior: 'smooth' }), 0);
+  }
+
+  updateAdminRestaurantStatus(restaurant: Restaurant, status: string): void {
+    if (status !== 'APPROVED' && !window.confirm(`Change ${restaurant.name} status to ${this.statusLabel(status)}?`)) return;
+    this.http.patch(`${this.api}/admin/restaurants/${restaurant._id}/status`, { status }, { headers: this.headers() }).subscribe({
+      next: () => {
+        this.notice = `${restaurant.name} marked ${this.statusLabel(status)}.`;
+        this.loadAdmin();
+      },
+      error: (error) => this.showError(error)
+    });
+  }
+
+  updateAdminRestaurantAvailability(restaurant: Restaurant, availability: string): void {
+    this.http.patch(`${this.api}/admin/restaurants/${restaurant._id}/availability`, { availability }, { headers: this.headers() }).subscribe({
+      next: () => {
+        this.notice = `${restaurant.name} availability set to ${this.statusLabel(availability)}.`;
+        this.loadAdminRestaurants();
       },
       error: (error) => this.showError(error)
     });
