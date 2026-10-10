@@ -2,14 +2,17 @@
 
 KABHI is a Qatar-focused ordering platform MVP. It keeps customer ordering, restaurant operations, and administration in separate server-authorized roles. Restaurants remain responsible for preparation and delivery; the platform does not dispatch couriers.
 
-## Run with Docker (recommended)
+## Run locally with Docker (one command)
 
-1. Install Docker Desktop and start Docker.
-2. From this directory, run `docker compose up --build`.
-3. In another terminal, seed the database with `docker compose exec api npm run seed`.
-4. Open [http://localhost:4200](http://localhost:4200). The API health endpoint is [http://localhost:3000/api/health](http://localhost:3000/api/health).
+Install and start Docker Desktop, then run this from the project directory:
 
-The first seed inserts a clearly labeled demo restaurant, menu, promotion, and accounts. Seeding is safe to repeat. Demo passwords are `Demo123!`:
+```sh
+npm run local
+```
+
+This starts MongoDB, seeds the demo data, and launches the API and web app. Open [http://localhost:4200](http://localhost:4200). The API health endpoint is [http://localhost:3000/api/health](http://localhost:3000/api/health). Stop the stack with `Ctrl+C`.
+
+The first startup seeds a clearly labeled demo restaurant, menu, promotion, and accounts. Seeding is safe to repeat. Demo passwords are `Demo123!`:
 
 | Role | Email |
 | --- | --- |
@@ -17,15 +20,14 @@ The first seed inserts a clearly labeled demo restaurant, menu, promotion, and a
 | Restaurant owner | `restaurant@kahbi.demo` |
 | Admin | `admin@kahbi.demo` |
 
-## Run locally without Docker
+## Run without Docker
 
-Requirements: Node.js 22.22.3+ (or 24.15.0+) and MongoDB 7+.
+Requirements: Node.js 22.22.3+ (or 24.15.0+) and MongoDB 7+ running locally.
 
-1. Copy `.env.example` to `.env` and set a private `JWT_SECRET`.
-2. Start MongoDB locally.
-3. Run `npm run install:all` to install the root, API, and Angular dependencies (kept in separate packages for Windows compatibility).
-4. Run `npm run seed` once.
-5. Run `npm run dev`; the Angular UI is at `http://localhost:4200` and API at `http://localhost:3000`.
+1. Copy `.env.example` to `.env` (the server and seeder load this root file) and set a private `JWT_SECRET`.
+2. Run `npm run install:all` to install the root, API, and Angular dependencies.
+3. Run `npm run seed` once to create demo data.
+4. Run `npm run dev`; the Angular UI is at `http://localhost:4200` and API at `http://localhost:3000`.
 
 Production API: `npm start`. Production Angular build: `npm run build`.
 
@@ -35,7 +37,7 @@ Production API: `npm start`. Production Angular build: `npm run build`.
 - Check out with a guest's name, Qatar mobile/WhatsApp number, and delivery address, or sign in as a customer. The API validates restaurant and item availability, quantities, service radius, promotion and all amounts before creating an order. An idempotency key prevents duplicate submissions.
 - Track a guest order by its order reference and phone number; signed-in customers have private order history and may rate completed orders.
 - Sign in as the restaurant owner to view only that restaurant's orders and advance valid order states through accept, prepare, ready, delivery, and completion. Menu availability can be changed from the restaurant view.
-- Sign in as admin to view live database metrics, approve/reject/suspend restaurants, and monitor orders. Billing snapshots and audit events are recorded for completed orders and administrative decisions.
+- Sign in as admin to view live database metrics, manage restaurants from a searchable card directory with a separate profile/menu editor, approve/reject/suspend restaurants, and accept/reject or advance orders through their valid lifecycle. Billing snapshots and audit events are recorded for completed orders and administrative decisions.
 - Admins can manage customer account status, promotions and sponsored home banners. Served banner impressions are recorded; click/conversion analytics are not enabled.
 - Restaurant onboarding is available from the sign-in screen. New restaurants remain private until admin approval.
 
@@ -56,6 +58,7 @@ Passwords are hashed, API access uses expiring signed tokens, and role checks ar
 
 | Command | Purpose |
 | --- | --- |
+| `npm run local` | Start the Docker development stack and seed demo data |
 | `npm run dev` | Start API and Angular development server |
 | `npm run seed` | Insert/update safe demo data |
 | `npm test` | Run backend business-rule tests |

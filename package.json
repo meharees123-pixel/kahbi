@@ -6,6 +6,7 @@
     "dev": "concurrently -k -n api,web -c blue,green \"npm:dev:api\" \"npm:dev:web\"",
     "dev:api": "npm run dev --prefix server",
     "dev:web": "npm run start --prefix client",
+    "local": "docker compose up --build",
     "build": "npm run build --prefix client",
     "start": "npm run start --prefix server",
     "seed": "npm run seed --prefix server",

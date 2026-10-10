@@ -4,17 +4,29 @@
       <span class="brand-mark">K</span><span>KABHI</span>
     </a>
     <nav class="top-nav">
-      <button class="nav-link" (click)="view = 'home'; loadRestaurants()">Discover</button>
-      <button class="nav-link" (click)="view = 'track'; trackedOrder = null">Track order</button>
-      <button class="nav-link" *ngIf="isCustomer" (click)="loadMyOrders()">My orders</button>
+      <ng-container *ngIf="!user || isCustomer">
+        <button class="nav-link" (click)="view = 'home'; loadRestaurants()">Discover</button>
+        <button class="nav-link" (click)="view = 'track'; trackedOrder = null">Track order</button>
+        <button class="nav-link" *ngIf="isCustomer" (click)="loadMyOrders()">My orders</button>
+      </ng-container>
+      <button class="nav-link" *ngIf="isRestaurantUser" (click)="loadRestaurantPortal()">Restaurant dashboard</button>
+      <button class="nav-link" *ngIf="isAdminUser" (click)="loadAdmin()">Admin dashboard</button>
     </nav>
     <div class="nav-actions">
-      <button class="icon-button" *ngIf="cartCount" (click)="openCart()">Cart <span class="cart-count">{{ cartCount }}</span></button>
+      <button class="icon-button" *ngIf="(!user || isCustomer) && cartCount" (click)="openCart()">Cart <span class="cart-count">{{ cartCount }}</span></button>
       <span class="signed-user" *ngIf="user">{{ user.name }}</span>
       <button class="button button-dark button-small" *ngIf="!user" (click)="view = 'login'; error = ''">Sign in</button>
       <button class="button button-quiet button-small" *ngIf="user" (click)="logout()">Sign out</button>
     </div>
   </header>
+
+  <div class="global-loader" *ngIf="loadingIndicator.isLoading()" role="status" aria-live="polite" aria-label="Working">
+    <div class="global-loader-card">
+      <span class="global-loader-spinner" aria-hidden="true"></span>
+      <strong>Working on it</strong>
+      <span>Please wait while we complete your request.</span>
+    </div>
+  </div>
 
   <main>
     <div class="flash error" *ngIf="error">{{ error }}</div>
@@ -57,7 +69,8 @@
       <div class="restaurant-grid" *ngIf="restaurants.length; else noRestaurants">
         <article class="restaurant-card" *ngFor="let restaurant of restaurants" (click)="openRestaurant(restaurant)">
           <div class="restaurant-cover" [class.cover-closed]="restaurant.availability !== 'OPEN'">
-            <div class="cover-initial">{{ restaurant.name.slice(0, 1) }}</div>
+            <img *ngIf="restaurant.imageData; else restaurantInitial" class="restaurant-cover-image" [src]="restaurant.imageData" [alt]="restaurant.name">
+            <ng-template #restaurantInitial><div class="cover-initial">{{ restaurant.name.slice(0, 1) }}</div></ng-template>
             <span class="status-pill" [class.status-open]="restaurant.availability === 'OPEN'">{{ restaurant.availability === 'OPEN' ? 'Open now' : statusLabel(restaurant.availability) }}</span>
             <span class="demo-pill" *ngIf="restaurant.demo">DEMO</span>
           </div>
@@ -73,12 +86,13 @@
 
     <section class="content-section restaurant-page" *ngIf="view === 'restaurant' && selectedRestaurant">
       <button class="back-link" (click)="view = 'home'; loadRestaurants()">← All restaurants</button>
-      <div class="restaurant-banner"><span class="banner-emblem">{{ selectedRestaurant.name.slice(0, 1) }}</span><div><span class="eyebrow">{{ selectedRestaurant.cuisine.join(' · ') }}</span><h1>{{ selectedRestaurant.name }}</h1><p>{{ selectedRestaurant.description }}</p><span class="status-pill" [class.status-open]="selectedRestaurant.availability === 'OPEN'">{{ statusLabel(selectedRestaurant.availability) }}</span><span class="restaurant-eta"> · {{ selectedRestaurant.preparationMinutes }}–{{ selectedRestaurant.preparationMinutes + 10 }} min · Min. {{ money(selectedRestaurant.minOrder) }}</span></div></div>
+      <div class="restaurant-banner"><img *ngIf="selectedRestaurant.imageData; else restaurantBannerInitial" class="banner-emblem banner-image" [src]="selectedRestaurant.imageData" [alt]="selectedRestaurant.name"><ng-template #restaurantBannerInitial><span class="banner-emblem">{{ selectedRestaurant.name.slice(0, 1) }}</span></ng-template><div><span class="eyebrow">{{ selectedRestaurant.cuisine.join(' · ') }}</span><h1>{{ selectedRestaurant.name }}</h1><p>{{ selectedRestaurant.description }}</p><span class="status-pill" [class.status-open]="selectedRestaurant.availability === 'OPEN'">{{ statusLabel(selectedRestaurant.availability) }}</span><span class="restaurant-eta"> · {{ selectedRestaurant.preparationMinutes }}–{{ selectedRestaurant.preparationMinutes + 10 }} min · Min. {{ money(selectedRestaurant.minOrder) }}</span></div></div>
       <div class="feature-badges"><span>✦ Restaurant-managed delivery</span><span>◷ {{ selectedRestaurant.preparationMinutes }} min prep</span><span *ngIf="promotions.length">✳ Offers available</span></div>
       <div class="menu-layout">
         <div><div class="section-heading compact"><div><span class="eyebrow">FROM THE KITCHEN</span><h2>Menu</h2></div></div>
           <div class="menu-list">
             <article class="menu-card" *ngFor="let item of menu">
+              <img *ngIf="item.imageData" class="menu-item-image" [src]="item.imageData" [alt]="item.name" loading="lazy">
               <div class="menu-copy"><div class="menu-badges"><span *ngIf="item.bestSeller" class="dish-badge bestseller">BEST SELLER</span><span *ngIf="item.chefRecommended" class="dish-badge chef">CHEF'S PICK</span></div><h3>{{ item.name }}</h3><p>{{ item.description || item.category }}</p><strong>{{ money(item.price) }}</strong></div>
               <button class="add-button" [disabled]="item.availability !== 'AVAILABLE' || selectedRestaurant.availability !== 'OPEN'" (click)="addToCart(item)">{{ item.availability === 'AVAILABLE' ? '+ Add' : 'Unavailable' }}</button>
             </article>
@@ -98,13 +112,13 @@
           <ng-template #emptyCart><div class="empty-state"><h3>Your cart is empty</h3><button class="button button-dark" (click)="view = 'home'">Explore restaurants</button></div></ng-template>
         </div>
         <aside class="checkout-card"><span class="eyebrow">DELIVERY DETAILS</span><h2>Where to?</h2>
-          <div class="form-field" *ngIf="!isCustomer"><label>Your name</label><input [(ngModel)]="guestName" placeholder="Full name" autocomplete="name"></div>
-          <div class="form-field" *ngIf="!isCustomer"><label>Mobile / WhatsApp</label><input [(ngModel)]="guestPhone" placeholder="+974 5XXX XXXX" autocomplete="tel"></div>
-          <div class="form-field"><label>Delivery address</label><textarea [(ngModel)]="deliveryAddress" placeholder="Building, street, zone, landmark" rows="3"></textarea></div>
+          <div class="form-field" *ngIf="!isCustomer"><label>Your name</label><input [(ngModel)]="guestName" placeholder="Full name" autocomplete="name" required></div>
+          <div class="form-field" *ngIf="!isCustomer"><label>Mobile / WhatsApp</label><input [(ngModel)]="guestPhone" placeholder="+974 5XXX XXXX" autocomplete="tel" type="tel" required></div>
+          <div class="form-field"><label>Delivery address</label><textarea [(ngModel)]="deliveryAddress" placeholder="Building, street, zone, landmark" rows="3" required minlength="5"></textarea></div>
           <div class="form-field"><label>Promotion code <span class="optional">optional</span></label><input [(ngModel)]="promotionCode" placeholder="e.g. KABHI10"></div>
           <div class="payment-note"><span>◉</span><div><strong>Pay restaurant directly</strong><small>Cash or direct payment on delivery</small></div></div>
           <div class="summary-row"><span>Subtotal</span><strong>{{ money(subtotal) }}</strong></div><div class="summary-row"><span>Fees & tax</span><strong>Confirmed by restaurant</strong></div><div class="summary-row total-row"><span>Total before delivery</span><strong>{{ money(subtotal) }}</strong></div>
-          <button class="button button-accent button-wide" [disabled]="loading || !cartItems.length || !deliveryAddress.trim()" (click)="placeOrder()">{{ loading ? 'Placing order…' : 'Place order' }} <span>→</span></button>
+          <button class="button button-accent button-wide" [disabled]="loading || !cartItems.length" (click)="placeOrder()">{{ loading ? 'Placing order…' : 'Place order' }} <span>→</span></button>
           <p class="fine-print">Your restaurant will confirm any delivery charge. Tax is not charged by KABHI.</p>
         </aside>
       </div>
@@ -164,6 +178,14 @@
     <section class="content-section portal" *ngIf="view === 'restaurantPortal'">
       <div class="portal-heading"><div><span class="eyebrow">RESTAURANT PORTAL · {{ selectedRestaurant?.name }}</span><h1>Service, simply.</h1></div><label class="availability-select">Restaurant status <select [ngModel]="selectedRestaurant?.availability" (ngModelChange)="changeAvailability($event)"><option value="OPEN">Open</option><option value="PAUSED">Paused</option><option value="CLOSED">Closed</option><option value="TEMPORARILY_UNAVAILABLE">Temporarily unavailable</option></select></label></div>
       <div class="portal-stats"><div><span>Incoming & active</span><strong>{{ restaurantOrders.length }}</strong></div><div><span>Restaurant responsibility</span><strong>Preparation + delivery</strong></div><div><span>Account</span><strong>{{ statusLabel(selectedRestaurant?.status || '') }}</strong></div></div>
+      <div class="portal-panel restaurant-image-manager">
+        <div><span class="eyebrow">CUSTOMER-FACING PHOTO</span><h2>Restaurant photo</h2><p class="muted">JPEG, PNG, or WebP · optimized to a maximum of 256 KB.</p></div>
+        <img *ngIf="restaurantImageDraft ?? selectedRestaurant?.imageData; else restaurantImagePlaceholder" class="restaurant-image-preview" [src]="restaurantImageDraft ?? selectedRestaurant?.imageData" [alt]="selectedRestaurant?.name || 'Restaurant photo preview'">
+        <ng-template #restaurantImagePlaceholder><div class="restaurant-image-placeholder">No restaurant photo yet</div></ng-template>
+        <label class="button button-dark button-small image-file-button">Choose photo<input type="file" accept="image/jpeg,image/png,image/webp" (change)="chooseRestaurantImage($event)"></label>
+        <button class="button button-accent button-small" *ngIf="restaurantImageDraft !== null" (click)="saveRestaurantImage()">Save photo</button>
+        <button class="text-button" *ngIf="selectedRestaurant?.imageData && restaurantImageDraft === null" (click)="removeRestaurantImage()">Remove photo</button>
+      </div>
       <div class="portal-columns">
         <div class="portal-panel"><div class="panel-heading"><div><span class="eyebrow">LIVE SERVICE</span><h2>Orders</h2></div><button class="text-button" (click)="loadRestaurantPortal()">Refresh ↻</button></div>
           <article class="portal-order" *ngFor="let order of restaurantOrders">
@@ -180,8 +202,12 @@
           <p class="muted" *ngIf="!restaurantOrders.length">No orders yet. New orders will appear here.</p>
         </div>
         <div class="portal-panel"><div class="panel-heading"><div><span class="eyebrow">YOUR KITCHEN</span><h2>Menu availability</h2></div></div>
-          <div class="availability-row" *ngFor="let item of restaurantMenu"><div><strong>{{ item.name }}</strong><small>{{ money(item.price) }} · {{ item.category }}</small></div><select [ngModel]="item.availability" (ngModelChange)="changeItemAvailability(item, $event)"><option value="AVAILABLE">Available</option><option value="UNAVAILABLE">Unavailable</option><option value="TEMPORARILY_UNAVAILABLE">Temporarily unavailable</option></select></div>
-          <div class="add-menu-form"><strong>Add an item</strong><input [(ngModel)]="newItemName" placeholder="Item name"><input [(ngModel)]="newItemCategory" placeholder="Category"><input [(ngModel)]="newItemPrice" type="number" min="0" placeholder="Price (QAR)"><input [(ngModel)]="newItemDescription" placeholder="Description"><button class="button button-accent" (click)="addMenuItem()">Add to menu</button></div>
+          <div class="availability-row menu-management-row" *ngFor="let item of restaurantMenu">
+            <img *ngIf="item.imageData" class="menu-management-image" [src]="item.imageData" [alt]="item.name">
+            <div><strong>{{ item.name }}</strong><small>{{ money(item.price) }} · {{ item.category }}</small><label class="image-file-button">Choose photo<input type="file" accept="image/jpeg,image/png,image/webp" (change)="chooseMenuImage(item._id, $event)"></label><button class="text-button image-action" *ngIf="menuImageDrafts[item._id] !== undefined" (click)="saveMenuImage(item)">Save photo</button><button class="text-button image-action" *ngIf="item.imageData && menuImageDrafts[item._id] === undefined" (click)="removeMenuImage(item)">Remove photo</button></div>
+            <select [ngModel]="item.availability" (ngModelChange)="changeItemAvailability(item, $event)"><option value="AVAILABLE">Available</option><option value="UNAVAILABLE">Unavailable</option><option value="TEMPORARILY_UNAVAILABLE">Temporarily unavailable</option></select>
+          </div>
+          <div class="add-menu-form"><strong>Add an item</strong><input [(ngModel)]="newItemName" placeholder="Item name"><input [(ngModel)]="newItemCategory" placeholder="Category"><input [(ngModel)]="newItemPrice" type="number" min="0" placeholder="Price (QAR)"><input [(ngModel)]="newItemDescription" placeholder="Description"><label class="image-file-button">Choose item photo<input type="file" accept="image/jpeg,image/png,image/webp" (change)="chooseNewItemImage($event)"></label><img *ngIf="newItemImageData" class="menu-management-image new-item-image" [src]="newItemImageData" alt="New item photo preview"><button class="button button-accent" (click)="addMenuItem()">Add to menu</button></div>
         </div>
       </div>
       <div class="portal-panel wide-panel"><div class="panel-heading"><div><span class="eyebrow">STATEMENTS</span><h2>Recent completed-order billing</h2></div></div><div class="admin-order-row" *ngFor="let transaction of restaurantBilling"><div><strong>{{ transaction.createdAt | date:'short' }}</strong><small>Gross {{ money(transaction.grossAmount, transaction.currency) }}</small></div><span>Commission {{ money(transaction.commissionAmount, transaction.currency) }}</span><strong>Net {{ money(transaction.netRestaurantAmount, transaction.currency) }}</strong></div><p class="muted" *ngIf="!restaurantBilling.length">Completed orders will appear here when billing is recorded.</p></div>
@@ -190,6 +216,10 @@
     <section class="content-section portal admin-portal" *ngIf="view === 'adminPortal'">
       <div class="portal-heading"><div><span class="eyebrow">KABHI ADMIN · LIVE DATABASE</span><h1>Platform overview.</h1></div><button class="button button-dark button-small" (click)="loadAdmin()">Refresh ↻</button></div>
       <div class="metrics-grid"><div class="metric-card"><span>Customers</span><strong>{{ metrics['customers'] || 0 }}</strong></div><div class="metric-card"><span>Approved restaurants</span><strong>{{ metrics['approvedRestaurants'] || 0 }}</strong></div><div class="metric-card"><span>Pending review</span><strong>{{ metrics['pendingRestaurants'] || 0 }}</strong></div><div class="metric-card"><span>Orders today</span><strong>{{ metrics['ordersToday'] || 0 }}</strong></div><div class="metric-card"><span>Completed orders</span><strong>{{ metrics['completedOrders'] || 0 }}</strong></div><div class="metric-card"><span>Rejected / timed out</span><strong>{{ metrics['rejectedOrders'] || 0 }}</strong></div><div class="metric-card"><span>Gross order value</span><strong>{{ money(metrics['grossOrderValue'] || 0) }}</strong></div><div class="metric-card"><span>Recorded commission</span><strong>{{ money(metrics['commission'] || 0) }}</strong></div><div class="metric-card"><span>Active promotions</span><strong>{{ metrics['activePromotions'] || 0 }}</strong></div><div class="metric-card"><span>Active sponsored banners</span><strong>{{ metrics['activeAdvertisements'] || 0 }}</strong></div><div class="metric-card"><span>Recorded banner impressions</span><strong>{{ metrics['advertisementImpressions'] || 0 }}</strong></div></div>
+      <div class="restaurant-management-entry">
+        <div><span class="eyebrow">RESTAURANT MANAGEMENT</span><strong>Manage every restaurant and menu from one place.</strong></div>
+        <button class="button button-accent" (click)="openAdminRestaurantList()">Open restaurant directory <span>→</span></button>
+      </div>
       <div class="portal-columns">
         <div class="portal-panel"><div class="panel-heading"><div><span class="eyebrow">ONBOARDING</span><h2>Needs review</h2></div></div>
           <div class="review-row" *ngFor="let restaurant of pendingRestaurants"><div><strong>{{ restaurant.name }}</strong><small>{{ restaurant.cuisine.join(' · ') }} · {{ restaurant.address }}</small></div><div><button class="button button-accent button-small" (click)="reviewRestaurant(restaurant, 'APPROVED')">Approve</button><button class="button button-outline-danger button-small" (click)="reviewRestaurant(restaurant, 'REJECTED')">Reject</button></div></div>
@@ -206,10 +236,59 @@
         </div>
       </div>
       <div class="portal-panel wide-panel"><div class="panel-heading"><div><span class="eyebrow">MONITORING</span><h2>Recent orders</h2></div><span class="muted">{{ allOrders.length }} latest</span></div>
-        <div class="admin-order-row" *ngFor="let order of allOrders"><div><strong>{{ order.reference }}</strong><small>{{ order.restaurantName }} · {{ order.createdAt | date:'short' }}</small></div><span class="order-status">{{ statusLabel(order.status) }}</span><strong>{{ money(order.total, order.currency) }}</strong></div>
+        <div class="admin-order-row admin-order-manage" *ngFor="let order of allOrders"><div><strong>{{ order.reference }}</strong><small>{{ order.restaurantName }} · {{ order.createdAt | date:'short' }} · {{ order.guest.name || 'Customer' }} · {{ order.guest.phone }}</small></div><span class="order-status">{{ statusLabel(order.status) }}</span><strong>{{ money(order.total, order.currency) }}</strong><div class="order-actions"><button class="button button-accent button-small" *ngFor="let action of adminOrderActions(order)" [class.button-outline-danger]="action.status === 'REJECTED'" (click)="adminOrderAction(order, action.status)">{{ action.label }}</button></div></div>
       </div>
       <div class="portal-panel wide-panel"><div class="panel-heading"><div><span class="eyebrow">GOVERNANCE</span><h2>Recent audit activity</h2></div></div><div class="log-row" *ngFor="let log of auditLogs"><span>{{ log.action }} · {{ log.entity }}</span><small>{{ log.createdAt | date:'short' }}</small></div></div>
       <div class="portal-panel wide-panel"><div class="panel-heading"><div><span class="eyebrow">FINANCE</span><h2>Recent billing transactions</h2></div></div><div class="admin-order-row" *ngFor="let transaction of billingTransactions"><div><strong>{{ transaction.createdAt | date:'short' }}</strong><small>{{ transaction.currency }} · gross {{ money(transaction.grossAmount, transaction.currency) }}</small></div><span>Commission {{ money(transaction.commissionAmount, transaction.currency) }}</span><strong>Net {{ money(transaction.netRestaurantAmount, transaction.currency) }}</strong></div><p class="muted" *ngIf="!billingTransactions.length">Billing entries are recorded when completed orders are closed.</p></div>
+    </section>
+
+    <section class="content-section portal admin-portal admin-restaurant-directory" *ngIf="view === 'adminRestaurantList'">
+      <button class="back-link" (click)="loadAdmin()">← Admin dashboard</button>
+      <div class="portal-heading"><div><span class="eyebrow">PLATFORM MANAGEMENT</span><h1>Restaurant directory.</h1><p class="muted">Select any restaurant to manage its profile, photos, menu, and availability.</p></div><button class="button button-dark button-small" (click)="openAdminRestaurantList()">Refresh ↻</button></div>
+      <div class="directory-toolbar">
+        <label class="directory-search"><span aria-hidden="true">⌕</span><input [(ngModel)]="adminRestaurantSearch" placeholder="Search by name, cuisine, address, or status" aria-label="Search restaurants"></label>
+        <span class="directory-count">{{ filteredAdminRestaurants.length }} of {{ adminRestaurants.length }} restaurants</span>
+      </div>
+      <div class="restaurant-admin-grid" *ngIf="filteredAdminRestaurants.length; else noAdminRestaurants">
+        <button class="restaurant-admin-card" *ngFor="let restaurant of filteredAdminRestaurants" (click)="selectAdminRestaurant(restaurant._id)">
+          <span class="restaurant-admin-cover">
+            <img *ngIf="restaurant.imageData; else adminRestaurantInitial" [src]="restaurant.imageData" [alt]="restaurant.name">
+            <ng-template #adminRestaurantInitial><span class="admin-restaurant-initial">{{ restaurant.name.slice(0, 1) }}</span></ng-template>
+            <span class="admin-status-chip" [class.status-live]="restaurant.status === 'APPROVED'">{{ statusLabel(restaurant.status) }}</span>
+          </span>
+          <span class="restaurant-admin-card-body"><strong>{{ restaurant.name }}</strong><span>{{ restaurant.cuisine.join(' · ') || 'Cuisine not set' }}</span><small>{{ restaurant.address }}</small><span class="admin-card-footer"><span>{{ statusLabel(restaurant.availability) }}</span><span>Manage →</span></span></span>
+        </button>
+      </div>
+      <ng-template #noAdminRestaurants><div class="empty-state"><div class="empty-icon">⌕</div><h3>{{ adminRestaurants.length ? 'No matching restaurants' : 'No restaurants yet' }}</h3><p>{{ adminRestaurants.length ? 'Try a different search.' : 'Add your first restaurant below.' }}</p></div></ng-template>
+      <details class="portal-panel add-restaurant-panel"><summary><span><strong>Add a restaurant</strong><small>New restaurants are approved and start closed until you are ready to open them.</small></span><span class="button button-dark button-small">Add restaurant +</span></summary>
+        <div class="admin-restaurant-create-form"><input [(ngModel)]="newAdminRestaurantName" placeholder="Restaurant name"><input [(ngModel)]="newAdminRestaurantCuisine" placeholder="Cuisines, comma separated"><input [(ngModel)]="newAdminRestaurantAddress" placeholder="Restaurant address"><input [(ngModel)]="newAdminRestaurantPhone" placeholder="Contact phone"><input [(ngModel)]="newAdminRestaurantEmail" type="email" placeholder="Contact email"><input [(ngModel)]="newAdminRestaurantDescription" placeholder="Description"><button class="button button-accent" (click)="createAdminRestaurant()">Create restaurant</button></div>
+      </details>
+    </section>
+
+    <section class="content-section portal admin-portal admin-restaurant-editor-page" *ngIf="view === 'adminRestaurantEditor' && adminRestaurant as managedRestaurant">
+      <button class="back-link" (click)="backToAdminRestaurantList()">← All restaurants</button>
+      <div class="portal-heading editor-page-heading"><div><span class="eyebrow">RESTAURANT MANAGEMENT</span><h1>{{ managedRestaurant.name }}.</h1><p class="muted">{{ managedRestaurant.cuisine.join(' · ') || 'Cuisine not set' }} · {{ managedRestaurant.address }}</p></div><span class="order-status">{{ statusLabel(managedRestaurant.status) }}</span></div>
+      <div class="admin-editor-grid">
+        <div class="portal-panel admin-profile-panel"><div class="panel-heading"><div><span class="eyebrow">PROFILE & SERVICE</span><h2>Restaurant details</h2></div></div>
+          <div class="admin-restaurant-form">
+            <label>Restaurant name<input [(ngModel)]="managedRestaurant.name" placeholder="Restaurant name"></label><label>Cuisines<input [(ngModel)]="adminCuisineDraft" placeholder="Cuisines, comma separated"></label><label>Address<input [(ngModel)]="managedRestaurant.address" placeholder="Address"></label><label>Phone<input [(ngModel)]="managedRestaurant.phone" placeholder="Phone"></label><label>Email<input [(ngModel)]="managedRestaurant.email" type="email" placeholder="Email"></label><label>Description<input [(ngModel)]="managedRestaurant.description" placeholder="Description"></label><label>Preparation time (minutes)<input [(ngModel)]="managedRestaurant.preparationMinutes" type="number" min="1" max="240"></label><label>Minimum order (QAR)<input [(ngModel)]="managedRestaurant.minOrder" type="number" min="0"></label>
+            <label>Availability<select [(ngModel)]="managedRestaurant.availability"><option value="OPEN">Open</option><option value="CLOSED">Closed</option><option value="PAUSED">Paused</option><option value="TEMPORARILY_UNAVAILABLE">Temporarily unavailable</option></select></label>
+            <label>Approval status<select [ngModel]="managedRestaurant.status" (ngModelChange)="updateAdminRestaurantStatus($event)"><option value="APPROVED">Approved</option><option value="REJECTED">Rejected</option><option value="SUSPENDED">Suspended</option></select></label>
+          </div>
+          <div class="admin-profile-actions"><button class="button button-dark" (click)="saveAdminRestaurant()">Save restaurant details</button><span class="fine-print">Changes are saved when you press Save.</span></div>
+          <div class="admin-image-row"><img *ngIf="adminRestaurantImageDraft || managedRestaurant.imageData" [src]="adminRestaurantImageDraft || managedRestaurant.imageData" [alt]="managedRestaurant.name"><span *ngIf="!adminRestaurantImageDraft && !managedRestaurant.imageData" class="muted">No restaurant photo yet</span><label class="button button-quiet button-small image-file-button">Choose photo<input type="file" accept="image/jpeg,image/png,image/webp" (change)="chooseAdminRestaurantImage($event)"></label><button class="button button-accent button-small" *ngIf="adminRestaurantImageDraft" (click)="saveAdminRestaurantImage()">Save photo</button><button class="text-button" *ngIf="managedRestaurant.imageData && !adminRestaurantImageDraft" (click)="removeAdminRestaurantImage()">Remove photo</button></div>
+        </div>
+        <div class="portal-panel admin-menu-panel"><div class="panel-heading"><div><span class="eyebrow">MENU MANAGEMENT</span><h2>Menu items <span class="menu-count">{{ adminMenu.length }}</span></h2></div></div>
+          <div class="admin-menu-editor">
+            <article class="admin-menu-item" *ngFor="let item of adminMenu" [class.admin-menu-inactive]="item.active === false">
+              <img *ngIf="adminMenuImageDrafts[item._id] || item.imageData; else adminMenuPlaceholder" class="menu-management-image" [src]="adminMenuImageDrafts[item._id] || item.imageData" [alt]="item.name"><ng-template #adminMenuPlaceholder><span class="menu-management-image menu-image-placeholder">Dish</span></ng-template>
+              <div class="admin-menu-item-fields"><strong *ngIf="item.active === false" class="inactive-item-label">Inactive — hidden from customers</strong><label>Item name<input [(ngModel)]="item.name" aria-label="Menu item name"></label><label>Category<input [(ngModel)]="item.category" aria-label="Menu item category"></label><label>Price (QAR)<input [(ngModel)]="item.price" type="number" min="0.01" step="0.01" aria-label="Menu item price"></label><label>Description<input [(ngModel)]="item.description" aria-label="Menu item description"></label><label>Availability<select [(ngModel)]="item.availability"><option value="AVAILABLE">Available</option><option value="UNAVAILABLE">Unavailable</option><option value="TEMPORARILY_UNAVAILABLE">Temporarily unavailable</option></select></label><label class="image-file-button button button-quiet button-small">Choose photo<input type="file" accept="image/jpeg,image/png,image/webp" (change)="chooseAdminMenuImage(item._id, $event)"></label><button class="button button-accent button-small" (click)="saveAdminMenuItem(item)">Save item</button><button class="text-button" *ngIf="item.imageData" (click)="removeAdminMenuImage(item)">Remove photo</button><button class="button button-quiet button-small" *ngIf="item.active === false" (click)="reactivateAdminMenuItem(item)">Restore item</button><button class="button button-outline-danger button-small" *ngIf="item.active !== false" (click)="removeAdminMenuItem(item)">Deactivate</button></div>
+            </article>
+            <div class="menu-empty-state" *ngIf="!adminMenu.length"><strong>No menu items yet</strong><span>Add your restaurant's first item below.</span></div>
+          </div>
+          <details class="add-menu-form admin-add-menu-form" open><summary><strong>Add menu item</strong><span class="muted">＋</span></summary><div class="admin-menu-create-form"><label>Item name<input [(ngModel)]="newAdminItemName" placeholder="e.g. Chicken biryani"></label><label>Category<input [(ngModel)]="newAdminItemCategory" placeholder="e.g. Main course"></label><label>Price (QAR)<input [(ngModel)]="newAdminItemPrice" type="number" min="0.01" step="0.01" placeholder="0.00"></label><label>Description<input [(ngModel)]="newAdminItemDescription" placeholder="Short description"></label><label class="image-file-button button button-quiet button-small">Choose item photo<input type="file" accept="image/jpeg,image/png,image/webp" (change)="chooseNewAdminItemImage($event)"></label><img *ngIf="newAdminItemImageData" class="menu-management-image new-item-image" [src]="newAdminItemImageData" alt="New menu item photo preview"><button class="button button-accent" (click)="addAdminMenuItem()">Add to menu</button></div></details>
+        </div>
+      </div>
     </section>
   </main>
   <footer class="footer"><a class="brand" href="#" (click)="$event.preventDefault(); view = 'home'"><span class="brand-mark">K</span><span>KABHI</span></a><span>Good food, from Qatar's own kitchens.</span><span class="footer-currency">QATAR · QAR</span></footer>

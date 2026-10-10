@@ -1,7 +1,9 @@
 import { CommonModule } from '@angular/common';
 import { HttpClient, HttpHeaders } from '@angular/common/http';
-import { Component, OnInit } from '@angular/core';
+import { ChangeDetectorRef, Component, OnInit } from '@angular/core';
 import { FormsModule } from '@angular/forms';
+import { finalize } from 'rxjs';
+import { LoadingIndicatorService } from './loading-indicator.service';
 
 interface User {
   id: string;
@@ -16,10 +18,13 @@ interface User {
 interface Restaurant {
   _id: string;
   name: string;
+  imageData?: string;
   hotelName?: string;
   cuisine: string[];
   description: string;
   address: string;
+  phone?: string;
+  email?: string;
   category: string;
   preparationMinutes: number;
   minOrder: number;
@@ -34,6 +39,8 @@ interface Restaurant {
 interface MenuItem {
   _id: string;
   name: string;
+  imageData?: string;
+  active?: boolean;
   description: string;
   category: string;
   price: number;
@@ -110,6 +117,9 @@ interface BillingRecord {
   templateUrl: './app.component.html'
 })
 export class AppComponent implements OnInit {
+  private readonly maxImageBytes = 256 * 1024;
+  private readonly maxSourceImageBytes = 10 * 1024 * 1024;
+  private readonly maxImagePixels = 40_000_000;
   private readonly api = 'http://localhost:3000/api';
   private readonly tokenKey = 'kahbi.session';
   view = 'home';
@@ -124,6 +134,11 @@ export class AppComponent implements OnInit {
   restaurantOrders: Order[] = [];
   restaurantMenu: MenuItem[] = [];
   pendingRestaurants: Restaurant[] = [];
+  adminRestaurants: Restaurant[] = [];
+  adminRestaurant: Restaurant | null = null;
+  adminCuisineDraft = '';
+  adminRestaurantSearch = '';
+  adminMenu: MenuItem[] = [];
   allOrders: Order[] = [];
   metrics: { [key: string]: number } = {};
   messageLogs: { template: string; status: string; recipient: string }[] = [];
@@ -163,8 +178,28 @@ export class AppComponent implements OnInit {
   newPromotionMinimum = 0;
   newAdvertisementTitle = '';
   newAdvertisementDescription = '';
+  restaurantImageDraft: string | null = null;
+  menuImageDrafts: Record<string, string> = {};
+  newItemImageData = '';
+  newAdminRestaurantName = '';
+  newAdminRestaurantCuisine = '';
+  newAdminRestaurantAddress = '';
+  newAdminRestaurantDescription = '';
+  newAdminRestaurantPhone = '';
+  newAdminRestaurantEmail = '';
+  adminRestaurantImageDraft = '';
+  adminMenuImageDrafts: Record<string, string> = {};
+  newAdminItemName = '';
+  newAdminItemCategory = '';
+  newAdminItemPrice = 0;
+  newAdminItemDescription = '';
+  newAdminItemImageData = '';
 
-  constructor(private readonly http: HttpClient) {}
+  constructor(
+    private readonly http: HttpClient,
+    private readonly changeDetector: ChangeDetectorRef,
+    readonly loadingIndicator: LoadingIndicatorService
+  ) {}
 
   ngOnInit(): void {
     const token = localStorage.getItem(this.tokenKey);
@@ -202,6 +237,23 @@ export class AppComponent implements OnInit {
     return this.user?.role === 'CUSTOMER';
   }
 
+  get isRestaurantUser(): boolean {
+    return this.user?.role.startsWith('RESTAURANT_') ?? false;
+  }
+
+  get isAdminUser(): boolean {
+    return this.user?.role === 'ADMIN' || this.user?.role === 'SUPER_ADMIN';
+  }
+
+  get filteredAdminRestaurants(): Restaurant[] {
+    const query = this.adminRestaurantSearch.trim().toLowerCase();
+    if (!query) return this.adminRestaurants;
+    return this.adminRestaurants.filter((restaurant) =>
+      [restaurant.name, restaurant.address, restaurant.status, restaurant.availability, ...restaurant.cuisine]
+        .some((value) => value?.toLowerCase().includes(query))
+    );
+  }
+
   headers(): HttpHeaders {
     const token = localStorage.getItem(this.tokenKey);
     return token ? new HttpHeaders({ Authorization: `Bearer ${token}` }) : new HttpHeaders();
@@ -209,6 +261,7 @@ export class AppComponent implements OnInit {
 
   private showError(error: { error?: { error?: string } }): void {
     this.error = error.error?.error || 'Could not complete that request. Please try again.';
+    this.changeDetector.markForCheck();
   }
 
   private loadRoleLanding(): void {
@@ -239,6 +292,7 @@ export class AppComponent implements OnInit {
         this.promotions = data.promotions;
         this.advertisements = data.advertisements;
         this.error = '';
+        this.changeDetector.markForCheck();
       },
       error: (error) => this.showError(error)
     });
@@ -274,6 +328,7 @@ export class AppComponent implements OnInit {
         this.menu = data.items;
         this.view = 'restaurant';
         this.error = '';
+        this.changeDetector.markForCheck();
       },
       error: (error) => this.showError(error)
     });
@@ -304,37 +359,58 @@ export class AppComponent implements OnInit {
 
   placeOrder(): void {
     if (!this.selectedRestaurant || !this.cartItems.length) return;
+    const address = this.deliveryAddress.trim();
+    if (address.length < 5) {
+      this.error = 'Enter a delivery address with at least 5 characters.';
+      return;
+    }
+    const guestName = this.guestName.trim();
+    const guestPhone = this.guestPhone.trim();
+    if (!this.isCustomer && !guestName) {
+      this.error = 'Enter your name for guest checkout.';
+      return;
+    }
+    if (!this.isCustomer && !/^\+?[0-9 ()-]{8,20}$/.test(guestPhone)) {
+      this.error = 'Enter a valid Qatar mobile or WhatsApp number.';
+      return;
+    }
     this.loading = true;
     this.error = '';
     const idempotencyKey = crypto.randomUUID();
     const body: { [key: string]: unknown } = {
       restaurantId: this.selectedRestaurant._id,
       items: this.cartItems.map(({ item, quantity }) => ({ menuItemId: item._id, quantity })),
-      address: this.deliveryAddress,
+      address,
       promotionCode: this.promotionCode || undefined,
       idempotencyKey,
-      guestName: this.guestName,
-      guestPhone: this.guestPhone
+      guestName,
+      guestPhone
     };
     if (this.deliveryLatitude !== null && this.deliveryLongitude !== null) {
       body['latitude'] = this.deliveryLatitude;
       body['longitude'] = this.deliveryLongitude;
     }
-    this.http.post<{ order: Order }>(`${this.api}/orders`, body, { headers: this.headers().set('Idempotency-Key', idempotencyKey) }).subscribe({
-      next: ({ order }) => {
+    this.http.post<{ order?: Order }>(`${this.api}/orders`, body, { headers: this.headers().set('Idempotency-Key', idempotencyKey) }).pipe(
+      finalize(() => {
         this.loading = false;
+        this.changeDetector.markForCheck();
+      })
+    ).subscribe({
+      next: (response) => {
+        if (!response?.order) {
+          this.error = 'The order was created, but the server returned an invalid response. Check your order history before retrying.';
+          return;
+        }
+        const { order } = response;
         this.cart = {};
         sessionStorage.removeItem('kahbi.cartRestaurant');
         this.trackedOrder = order;
         this.trackReference = order.reference;
         this.trackPhone = this.isCustomer ? this.user?.phone || '' : this.guestPhone;
         this.view = 'track';
-        this.notice = `Order ${order.reference} placed. Restaurant notifications are in demo mode.`;
+        this.notice = `Order ${order.reference} placed successfully. Restaurant notifications are in demo mode.`;
       },
-      error: (error) => {
-        this.loading = false;
-        this.showError(error);
-      }
+      error: (error) => this.showError(error)
     });
   }
 
@@ -476,18 +552,208 @@ export class AppComponent implements OnInit {
     });
   }
 
+  async chooseRestaurantImage(event: Event): Promise<void> {
+    const input = event.currentTarget as HTMLInputElement;
+    const file = input.files?.[0];
+    if (!file) return;
+    try {
+      this.restaurantImageDraft = await this.optimizeImage(file);
+      this.error = '';
+    } catch (error) {
+      this.showError({ error: { error: error instanceof Error ? error.message : 'Could not process this image.' } });
+    } finally {
+      input.value = '';
+      this.changeDetector.markForCheck();
+    }
+  }
+
+  async chooseMenuImage(itemId: string, event: Event): Promise<void> {
+    const input = event.currentTarget as HTMLInputElement;
+    const file = input.files?.[0];
+    if (!file) return;
+    try {
+      this.menuImageDrafts[itemId] = await this.optimizeImage(file);
+      this.error = '';
+    } catch (error) {
+      this.showError({ error: { error: error instanceof Error ? error.message : 'Could not process this image.' } });
+    } finally {
+      input.value = '';
+      this.changeDetector.markForCheck();
+    }
+  }
+
+  async chooseNewItemImage(event: Event): Promise<void> {
+    const input = event.currentTarget as HTMLInputElement;
+    const file = input.files?.[0];
+    if (!file) return;
+    try {
+      this.newItemImageData = await this.optimizeImage(file);
+      this.error = '';
+    } catch (error) {
+      this.showError({ error: { error: error instanceof Error ? error.message : 'Could not process this image.' } });
+    } finally {
+      input.value = '';
+      this.changeDetector.markForCheck();
+    }
+  }
+
+  async chooseAdminRestaurantImage(event: Event): Promise<void> {
+    const input = event.currentTarget as HTMLInputElement;
+    const file = input.files?.[0];
+    if (!file) return;
+    try {
+      this.adminRestaurantImageDraft = await this.optimizeImage(file);
+      this.error = '';
+    } catch (error) {
+      this.showError({ error: { error: error instanceof Error ? error.message : 'Could not process this image.' } });
+    } finally {
+      input.value = '';
+      this.changeDetector.markForCheck();
+    }
+  }
+
+  async chooseAdminMenuImage(itemId: string, event: Event): Promise<void> {
+    const input = event.currentTarget as HTMLInputElement;
+    const file = input.files?.[0];
+    if (!file) return;
+    try {
+      this.adminMenuImageDrafts[itemId] = await this.optimizeImage(file);
+      this.error = '';
+    } catch (error) {
+      this.showError({ error: { error: error instanceof Error ? error.message : 'Could not process this image.' } });
+    } finally {
+      input.value = '';
+      this.changeDetector.markForCheck();
+    }
+  }
+
+  async chooseNewAdminItemImage(event: Event): Promise<void> {
+    const input = event.currentTarget as HTMLInputElement;
+    const file = input.files?.[0];
+    if (!file) return;
+    try {
+      this.newAdminItemImageData = await this.optimizeImage(file);
+      this.error = '';
+    } catch (error) {
+      this.showError({ error: { error: error instanceof Error ? error.message : 'Could not process this image.' } });
+    } finally {
+      input.value = '';
+      this.changeDetector.markForCheck();
+    }
+  }
+
+  private async optimizeImage(file: File): Promise<string> {
+    if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) {
+      throw new Error('Choose a JPEG, PNG, or WebP image.');
+    }
+    if (file.size > this.maxSourceImageBytes) {
+      throw new Error('Choose an image smaller than 10 MB before optimization.');
+    }
+
+    let bitmap: ImageBitmap;
+    try {
+      bitmap = await createImageBitmap(file);
+    } catch {
+      throw new Error('This image could not be opened. Choose a valid image file.');
+    }
+    try {
+      if (bitmap.width * bitmap.height > this.maxImagePixels) {
+        throw new Error('This image has too many pixels. Choose a smaller image.');
+      }
+      const scale = Math.min(1, 1000 / Math.max(bitmap.width, bitmap.height));
+      let width = Math.max(1, Math.round(bitmap.width * scale));
+      let height = Math.max(1, Math.round(bitmap.height * scale));
+      const canvas = document.createElement('canvas');
+      const context = canvas.getContext('2d');
+      if (!context) throw new Error('Your browser could not prepare this image.');
+
+      for (let attempt = 0; attempt < 9; attempt += 1) {
+        canvas.width = width;
+        canvas.height = height;
+        context.fillStyle = '#ffffff';
+        context.fillRect(0, 0, width, height);
+        context.drawImage(bitmap, 0, 0, width, height);
+        const quality = [0.84, 0.72, 0.6][attempt % 3];
+        const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/jpeg', quality));
+        if (!blob) throw new Error('Your browser could not compress this image.');
+        if (blob.size <= this.maxImageBytes) {
+          return new Promise<string>((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => typeof reader.result === 'string' ? resolve(reader.result) : reject(new Error('Could not read the optimized image.'));
+            reader.onerror = () => reject(new Error('Could not read the optimized image.'));
+            reader.readAsDataURL(blob);
+          });
+        }
+        if (attempt % 3 === 2) {
+          width = Math.max(1, Math.round(width * 0.8));
+          height = Math.max(1, Math.round(height * 0.8));
+        }
+      }
+      throw new Error('This image could not be reduced below 256 KB. Choose a simpler or smaller image.');
+    } finally {
+      bitmap.close();
+    }
+  }
+
+  saveRestaurantImage(): void {
+    if (this.restaurantImageDraft === null) return;
+    this.http.patch<{ restaurant: Restaurant }>(`${this.api}/restaurant/profile/image`, { imageData: this.restaurantImageDraft }, { headers: this.headers() }).subscribe({
+      next: ({ restaurant }) => {
+        this.selectedRestaurant = restaurant;
+        this.restaurantImageDraft = null;
+        this.notice = 'Restaurant photo saved.';
+      },
+      error: (error) => this.showError(error)
+    });
+  }
+
+  removeRestaurantImage(): void {
+    this.http.patch<{ restaurant: Restaurant }>(`${this.api}/restaurant/profile/image`, { imageData: '' }, { headers: this.headers() }).subscribe({
+      next: ({ restaurant }) => {
+        this.selectedRestaurant = restaurant;
+        this.restaurantImageDraft = null;
+        this.notice = 'Restaurant photo removed.';
+      },
+      error: (error) => this.showError(error)
+    });
+  }
+
+  saveMenuImage(item: MenuItem): void {
+    const imageData = this.menuImageDrafts[item._id];
+    if (imageData === undefined) return;
+    this.updateMenuImage(item, imageData, 'Menu item photo saved.');
+  }
+
+  removeMenuImage(item: MenuItem): void {
+    this.updateMenuImage(item, '', 'Menu item photo removed.');
+  }
+
+  private updateMenuImage(item: MenuItem, imageData: string, notice: string): void {
+    this.http.patch<{ item: MenuItem }>(`${this.api}/restaurant/menu/${item._id}`, { imageData }, { headers: this.headers() }).subscribe({
+      next: ({ item: updatedItem }) => {
+        this.restaurantMenu = this.restaurantMenu.map((entry) => entry._id === updatedItem._id ? updatedItem : entry);
+        this.menu = this.menu.map((entry) => entry._id === updatedItem._id ? updatedItem : entry);
+        delete this.menuImageDrafts[updatedItem._id];
+        this.notice = notice;
+      },
+      error: (error) => this.showError(error)
+    });
+  }
+
   addMenuItem(): void {
     this.http.post(`${this.api}/restaurant/menu`, {
       name: this.newItemName,
       category: this.newItemCategory,
       price: this.newItemPrice,
-      description: this.newItemDescription
+      description: this.newItemDescription,
+      imageData: this.newItemImageData
     }, { headers: this.headers() }).subscribe({
       next: () => {
         this.newItemName = '';
         this.newItemCategory = '';
         this.newItemPrice = 0;
         this.newItemDescription = '';
+        this.newItemImageData = '';
         this.loadRestaurantPortal();
       },
       error: (error) => this.showError(error)
@@ -514,6 +780,7 @@ export class AppComponent implements OnInit {
       next: ({ messages }) => (this.messageLogs = messages),
       error: (error) => this.showError(error)
     });
+    this.loadAdminRestaurants();
     this.http.get<{ transactions: BillingRecord[] }>(`${this.api}/admin/billing`, { headers: this.headers() }).subscribe({
       next: ({ transactions }) => (this.billingTransactions = transactions),
       error: (error) => this.showError(error)
@@ -529,6 +796,236 @@ export class AppComponent implements OnInit {
       },
       error: (error) => this.showError(error)
     });
+  }
+
+  createAdminRestaurant(): void {
+    this.http.post<{ restaurant: Restaurant }>(`${this.api}/admin/restaurants`, {
+      name: this.newAdminRestaurantName,
+      cuisine: this.newAdminRestaurantCuisine,
+      address: this.newAdminRestaurantAddress,
+      description: this.newAdminRestaurantDescription,
+      phone: this.newAdminRestaurantPhone,
+      email: this.newAdminRestaurantEmail
+    }, { headers: this.headers() }).subscribe({
+      next: ({ restaurant }) => {
+        this.newAdminRestaurantName = '';
+        this.newAdminRestaurantCuisine = '';
+        this.newAdminRestaurantAddress = '';
+        this.newAdminRestaurantDescription = '';
+        this.newAdminRestaurantPhone = '';
+        this.newAdminRestaurantEmail = '';
+        this.adminRestaurant = restaurant;
+        this.adminCuisineDraft = restaurant.cuisine.join(', ');
+        this.adminRestaurantImageDraft = '';
+        this.adminMenu = [];
+        this.adminMenuImageDrafts = {};
+        this.view = 'adminRestaurantEditor';
+        this.notice = `${restaurant.name} added. Add its menu items here.`;
+        this.loadAdminRestaurants();
+      },
+      error: (error) => this.showError(error)
+    });
+  }
+
+  openAdminRestaurantList(): void {
+    this.view = 'adminRestaurantList';
+    this.adminRestaurantSearch = '';
+    this.loadAdminRestaurants();
+  }
+
+  private loadAdminRestaurants(): void {
+    this.http.get<{ restaurants: Restaurant[] }>(`${this.api}/admin/restaurants`, { headers: this.headers() }).subscribe({
+      next: ({ restaurants }) => {
+        this.adminRestaurants = restaurants;
+        if (this.adminRestaurant) {
+          this.adminRestaurant = restaurants.find((restaurant) => restaurant._id === this.adminRestaurant?._id) || null;
+          this.adminCuisineDraft = this.adminRestaurant?.cuisine.join(', ') || '';
+        }
+      },
+      error: (error) => this.showError(error)
+    });
+  }
+
+  selectAdminRestaurant(id: string): void {
+    this.adminRestaurant = this.adminRestaurants.find((restaurant) => restaurant._id === id) || null;
+    this.adminCuisineDraft = this.adminRestaurant?.cuisine.join(', ') || '';
+    this.adminRestaurantImageDraft = '';
+    this.adminMenuImageDrafts = {};
+    this.adminMenu = [];
+    if (!this.adminRestaurant) return;
+    this.view = 'adminRestaurantEditor';
+    this.http.get<{ items: MenuItem[] }>(`${this.api}/admin/restaurants/${this.adminRestaurant._id}/menu`, { headers: this.headers() }).subscribe({
+      next: ({ items }) => (this.adminMenu = items),
+      error: (error) => this.showError(error)
+    });
+  }
+
+  backToAdminRestaurantList(): void {
+    this.view = 'adminRestaurantList';
+    this.adminRestaurantImageDraft = '';
+    this.adminMenuImageDrafts = {};
+    this.loadAdminRestaurants();
+  }
+
+  saveAdminRestaurant(): void {
+    if (!this.adminRestaurant) return;
+    const restaurant = this.adminRestaurant;
+    this.http.patch<{ restaurant: Restaurant }>(`${this.api}/admin/restaurants/${restaurant._id}`, {
+      name: restaurant.name,
+      cuisine: this.adminCuisineDraft,
+      description: restaurant.description,
+      address: restaurant.address,
+      phone: restaurant.phone || '',
+      email: restaurant.email || '',
+      preparationMinutes: restaurant.preparationMinutes,
+      minOrder: restaurant.minOrder,
+      availability: restaurant.availability
+    }, { headers: this.headers() }).subscribe({
+      next: ({ restaurant: updated }) => {
+        this.adminRestaurant = updated;
+        this.adminCuisineDraft = updated.cuisine.join(', ');
+        this.adminRestaurants = this.adminRestaurants.map((entry) => entry._id === updated._id ? updated : entry);
+        this.notice = `${updated.name} details saved.`;
+      },
+      error: (error) => this.showError(error)
+    });
+  }
+
+  saveAdminRestaurantImage(): void {
+    if (!this.adminRestaurant || !this.adminRestaurantImageDraft) return;
+    this.http.patch<{ restaurant: Restaurant }>(`${this.api}/admin/restaurants/${this.adminRestaurant._id}`, { imageData: this.adminRestaurantImageDraft }, { headers: this.headers() }).subscribe({
+      next: ({ restaurant }) => {
+        this.adminRestaurant = restaurant;
+        this.adminCuisineDraft = restaurant.cuisine.join(', ');
+        this.adminRestaurants = this.adminRestaurants.map((entry) => entry._id === restaurant._id ? restaurant : entry);
+        this.adminRestaurantImageDraft = '';
+        this.notice = 'Restaurant photo saved.';
+      },
+      error: (error) => this.showError(error)
+    });
+  }
+
+  removeAdminRestaurantImage(): void {
+    if (!this.adminRestaurant) return;
+    this.http.patch<{ restaurant: Restaurant }>(`${this.api}/admin/restaurants/${this.adminRestaurant._id}`, { imageData: '' }, { headers: this.headers() }).subscribe({
+      next: ({ restaurant }) => {
+        this.adminRestaurant = restaurant;
+        this.adminCuisineDraft = restaurant.cuisine.join(', ');
+        this.adminRestaurants = this.adminRestaurants.map((entry) => entry._id === restaurant._id ? restaurant : entry);
+        this.adminRestaurantImageDraft = '';
+        this.notice = 'Restaurant photo removed.';
+      },
+      error: (error) => this.showError(error)
+    });
+  }
+
+  updateAdminRestaurantStatus(status: string): void {
+    if (!this.adminRestaurant) return;
+    this.http.patch<{ restaurant: Restaurant }>(`${this.api}/admin/restaurants/${this.adminRestaurant._id}`, { status }, { headers: this.headers() }).subscribe({
+      next: ({ restaurant }) => {
+        this.adminRestaurant = restaurant;
+        this.adminCuisineDraft = restaurant.cuisine.join(', ');
+        this.adminRestaurants = this.adminRestaurants.map((entry) => entry._id === restaurant._id ? restaurant : entry);
+        this.notice = `${restaurant.name} marked ${this.statusLabel(status)}.`;
+        this.loadAdminRestaurants();
+      },
+      error: (error) => this.showError(error)
+    });
+  }
+
+  addAdminMenuItem(): void {
+    if (!this.adminRestaurant) return;
+    this.http.post<{ item: MenuItem }>(`${this.api}/admin/restaurants/${this.adminRestaurant._id}/menu`, {
+      name: this.newAdminItemName,
+      category: this.newAdminItemCategory,
+      price: this.newAdminItemPrice,
+      description: this.newAdminItemDescription,
+      imageData: this.newAdminItemImageData
+    }, { headers: this.headers() }).subscribe({
+      next: ({ item }) => {
+        this.adminMenu = [...this.adminMenu, item];
+        this.newAdminItemName = '';
+        this.newAdminItemCategory = '';
+        this.newAdminItemPrice = 0;
+        this.newAdminItemDescription = '';
+        this.newAdminItemImageData = '';
+        this.notice = `${item.name} added to the menu.`;
+      },
+      error: (error) => this.showError(error)
+    });
+  }
+
+  saveAdminMenuItem(item: MenuItem): void {
+    const imageData = this.adminMenuImageDrafts[item._id];
+    const updates: { name: string; category: string; price: number; description: string; availability: string; imageData?: string; active: boolean } = {
+      name: item.name,
+      category: item.category,
+      price: item.price,
+      description: item.description,
+      availability: item.availability,
+      active: item.active !== false
+    };
+    if (imageData !== undefined) updates.imageData = imageData;
+    this.http.patch<{ item: MenuItem }>(`${this.api}/admin/menu/${item._id}`, updates, { headers: this.headers() }).subscribe({
+      next: ({ item: updated }) => {
+        this.adminMenu = this.adminMenu.map((entry) => entry._id === updated._id ? updated : entry);
+        delete this.adminMenuImageDrafts[updated._id];
+        this.notice = `${updated.name} updated.`;
+      },
+      error: (error) => this.showError(error)
+    });
+  }
+
+  removeAdminMenuImage(item: MenuItem): void {
+    this.http.patch<{ item: MenuItem }>(`${this.api}/admin/menu/${item._id}`, { imageData: '' }, { headers: this.headers() }).subscribe({
+      next: ({ item: updated }) => {
+        this.adminMenu = this.adminMenu.map((entry) => entry._id === updated._id ? updated : entry);
+        delete this.adminMenuImageDrafts[updated._id];
+        this.notice = `${updated.name} photo removed.`;
+      },
+      error: (error) => this.showError(error)
+    });
+  }
+
+  removeAdminMenuItem(item: MenuItem): void {
+    this.setAdminMenuItemActive(item, false);
+  }
+
+  reactivateAdminMenuItem(item: MenuItem): void {
+    this.setAdminMenuItemActive(item, true);
+  }
+
+  private setAdminMenuItemActive(item: MenuItem, active: boolean): void {
+    this.http.patch<{ item: MenuItem }>(`${this.api}/admin/menu/${item._id}`, { active }, { headers: this.headers() }).subscribe({
+      next: ({ item: updated }) => {
+        this.adminMenu = this.adminMenu.map((entry) => entry._id === updated._id ? updated : entry);
+        this.notice = `${updated.name} ${active ? 'restored to' : 'removed from'} the active menu.`;
+      },
+      error: (error) => this.showError(error)
+    });
+  }
+
+  adminOrderAction(order: Order, status: string): void {
+    this.http.patch<{ order: Order }>(`${this.api}/admin/orders/${order._id}/status`, { status }, { headers: this.headers() }).subscribe({
+      next: ({ order: updated }) => {
+        this.allOrders = this.allOrders.map((entry) => entry._id === updated._id ? updated : entry);
+        this.notice = `${order.reference} marked ${this.statusLabel(status)}.`;
+        this.loadAdmin();
+      },
+      error: (error) => this.showError(error)
+    });
+  }
+
+  adminOrderActions(order: Order): { status: string; label: string }[] {
+    const actions: Record<string, { status: string; label: string }[]> = {
+      RESTAURANT_PENDING: [{ status: 'ACCEPTED', label: 'Accept' }, { status: 'REJECTED', label: 'Reject' }, { status: 'CANCELLED', label: 'Cancel' }],
+      ACCEPTED: [{ status: 'PREPARING', label: 'Start preparing' }, { status: 'CANCELLED', label: 'Cancel' }],
+      PREPARING: [{ status: 'READY', label: 'Mark ready' }],
+      READY: [{ status: 'OUT_FOR_DELIVERY', label: 'Out for delivery' }],
+      OUT_FOR_DELIVERY: [{ status: 'DELIVERED', label: 'Mark delivered' }],
+      DELIVERED: [{ status: 'CLOSED', label: 'Complete order' }]
+    };
+    return actions[order.status] || [];
   }
 
   rateOrder(order: Order, stars: number): void {
