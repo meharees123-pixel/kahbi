@@ -3,10 +3,20 @@
     <a class="brand" href="#" (click)="$event.preventDefault(); view = 'home'; loadRestaurants()">
       <span class="brand-mark">K</span><span>KABHI</span>
     </a>
-    <nav class="top-nav">
-      <button class="nav-link" (click)="view = 'home'; loadRestaurants()">Discover</button>
-      <button class="nav-link" (click)="view = 'track'; trackedOrder = null">Track order</button>
-      <button class="nav-link" *ngIf="isCustomer" (click)="loadMyOrders()">My orders</button>
+    <nav class="top-nav" [class.portal-nav]="isRestaurantUser || isAdminUser">
+      <ng-container *ngIf="!user || isCustomer">
+        <button class="nav-link" (click)="view = 'home'; loadRestaurants()">Discover</button>
+        <button class="nav-link" (click)="view = 'track'; trackedOrder = null">Track order</button>
+        <button class="nav-link" *ngIf="isCustomer" (click)="loadMyOrders()">My orders</button>
+      </ng-container>
+      <ng-container *ngIf="isRestaurantUser">
+        <button class="nav-link" (click)="loadRestaurantPortal()">Restaurant dashboard</button>
+        <button class="nav-link" (click)="goToRestaurantMenu()">Menu & profile</button>
+      </ng-container>
+      <ng-container *ngIf="isAdminUser">
+        <button class="nav-link" (click)="loadAdmin()">Overview</button>
+        <button class="nav-link" (click)="goToAdminRestaurants()">All restaurants</button>
+      </ng-container>
     </nav>
     <div class="nav-actions">
       <button class="icon-button" *ngIf="cartCount" (click)="openCart()">Cart <span class="cart-count">{{ cartCount }}</span></button>
@@ -112,7 +122,7 @@
 
     <section class="content-section narrow-section" *ngIf="view === 'track'">
       <span class="eyebrow">YOUR FOOD, ON ITS WAY</span><h1>Track an order.</h1>
-      <div class="track-form"><div class="form-field"><label>Order reference</label><input [(ngModel)]="trackReference" placeholder="KAB-20261008-ABC123"></div><div class="form-field"><label>Checkout phone number</label><input [(ngModel)]="trackPhone" placeholder="+974 5XXX XXXX"></div><button class="button button-dark" (click)="trackOrder()">Find order</button></div>
+      <div class="track-form"><div class="form-field"><label>Order reference</label><input [(ngModel)]="trackReference" placeholder="KAB-20261008-ABC123"></div><div class="form-field" *ngIf="!isCustomer"><label>Checkout phone number</label><input [(ngModel)]="trackPhone" placeholder="+974 5XXX XXXX"></div><div class="form-field signed-track-note" *ngIf="isCustomer"><label>Secure account lookup</label><span>We'll find orders linked to your signed-in account.</span></div><button class="button button-dark" (click)="trackOrder()">Find order</button></div>
       <article class="order-track-card" *ngIf="trackedOrder">
         <div class="track-top"><div><span class="eyebrow">{{ trackedOrder.reference }}</span><h2>{{ trackedOrder.restaurantName }}</h2><p>{{ trackedOrder.createdAt | date:'medium' }}</p></div><span class="order-status">{{ statusLabel(trackedOrder.status) }}</span></div>
         <div class="timeline"><div class="timeline-item" *ngFor="let step of trackedOrder.statusHistory"><span class="timeline-dot"></span><div><strong>{{ statusLabel(step.status) }}</strong><small>{{ step.createdAt | date:'short' }}</small></div></div></div>
@@ -143,6 +153,15 @@
       <div class="auth-aside"><span class="brand-mark">K</span><span class="eyebrow">WELCOME TO KABHI</span><h2>Made for good<br><em>moments.</em></h2><p>Discover the kitchens worth knowing in Qatar.</p></div>
       <div class="auth-card">
         <span class="eyebrow">{{ view === 'login' ? 'YOUR ACCOUNT' : 'JOIN THE TABLE' }}</span><h1>{{ view === 'login' ? 'Welcome back.' : (signupRestaurant ? 'List your restaurant.' : 'Create an account.') }}</h1>
+        <div class="portal-picker" *ngIf="view === 'login'">
+          <span class="portal-picker-label">Choose your portal</span>
+          <div class="portal-picker-options">
+            <button type="button" [class.portal-choice-active]="loginPortal === 'CUSTOMER'" (click)="loginPortal = 'CUSTOMER'"><span>♡</span>Customer</button>
+            <button type="button" [class.portal-choice-active]="loginPortal === 'RESTAURANT'" (click)="loginPortal = 'RESTAURANT'"><span>⌂</span>Restaurant</button>
+            <button type="button" [class.portal-choice-active]="loginPortal === 'ADMIN'" (click)="loginPortal = 'ADMIN'"><span>▦</span>Admin</button>
+          </div>
+          <small>One secure sign-in. Your access follows your account role.</small>
+        </div>
         <div class="form-field" *ngIf="view === 'signup'"><label>{{ signupRestaurant ? 'Owner name' : 'Full name' }}</label><input [(ngModel)]="signupName" placeholder="Your name"></div>
         <div class="form-field" *ngIf="view === 'signup'"><label>Mobile / WhatsApp</label><input [(ngModel)]="signupPhone" placeholder="+974 5XXX XXXX"></div>
         <ng-container *ngIf="view === 'signup' && signupRestaurant">
@@ -152,18 +171,39 @@
           <p class="fine-print">Your application will be reviewed before the restaurant appears to customers.</p>
         </ng-container>
         <div class="form-field"><label>Email</label><input [(ngModel)]="authEmail" type="email" placeholder="you&#64;example.com" autocomplete="email"></div>
-        <div class="form-field"><label>Password</label><input [(ngModel)]="authPassword" type="password" placeholder="At least 10 characters" autocomplete="current-password"></div>
-        <button class="button button-accent button-wide" (click)="view === 'login' ? signIn() : signUp()">{{ view === 'login' ? 'Sign in' : 'Create account' }} <span>→</span></button>
+        <div class="form-field"><label>Password</label><input [(ngModel)]="authPassword" (keyup.enter)="view === 'login' ? signIn() : signUp()" type="password" placeholder="At least 10 characters" autocomplete="current-password"></div>
+        <button class="button button-accent button-wide" [disabled]="loading" (click)="view === 'login' ? signIn() : signUp()">{{ loading ? 'Signing in…' : (view === 'login' ? 'Sign in' : 'Create account') }} <span>→</span></button>
         <p class="auth-switch" *ngIf="view === 'login'">New to KABHI? <button class="text-button" (click)="view = 'signup'">Create an account</button></p>
         <p class="auth-switch" *ngIf="view === 'signup'">Already have an account? <button class="text-button" (click)="view = 'login'; signupRestaurant = false">Sign in</button></p>
         <button class="text-button restaurant-signup" *ngIf="view === 'signup'" (click)="signupRestaurant = !signupRestaurant">{{ signupRestaurant ? 'Sign up as a customer instead' : 'Own a restaurant? Apply to join' }}</button>
-        <div class="demo-logins" *ngIf="view === 'login'"><strong>Try the demo</strong><span>Customer · customer&#64;kahbi.demo</span><span>Restaurant · restaurant&#64;kahbi.demo</span><span>Admin · admin&#64;kahbi.demo</span><small>Password: Demo123!</small><button class="text-button" (click)="trackReference = ''; trackedOrder = null; view = 'track'">Track a guest order instead</button></div>
+        <div class="demo-logins" *ngIf="view === 'login'"><strong>Explore a demo portal</strong><div class="demo-login-buttons"><button type="button" (click)="selectDemoLogin('CUSTOMER')">Customer demo</button><button type="button" (click)="selectDemoLogin('RESTAURANT')">Restaurant demo</button><button type="button" (click)="selectDemoLogin('ADMIN')">Admin demo</button></div><small>Demo password: Demo123!</small><button class="text-button" (click)="trackReference = ''; trackedOrder = null; view = 'track'">Track a guest order instead</button></div>
       </div>
     </section>
 
     <section class="content-section portal" *ngIf="view === 'restaurantPortal'">
       <div class="portal-heading"><div><span class="eyebrow">RESTAURANT PORTAL · {{ selectedRestaurant?.name }}</span><h1>Service, simply.</h1></div><label class="availability-select">Restaurant status <select [ngModel]="selectedRestaurant?.availability" (ngModelChange)="changeAvailability($event)"><option value="OPEN">Open</option><option value="PAUSED">Paused</option><option value="CLOSED">Closed</option><option value="TEMPORARILY_UNAVAILABLE">Temporarily unavailable</option></select></label></div>
       <div class="portal-stats"><div><span>Incoming & active</span><strong>{{ restaurantOrders.length }}</strong></div><div><span>Restaurant responsibility</span><strong>Preparation + delivery</strong></div><div><span>Account</span><strong>{{ statusLabel(selectedRestaurant?.status || '') }}</strong></div></div>
+      <div class="portal-panel wide-panel profile-panel" *ngIf="user?.role !== 'RESTAURANT_STAFF'">
+        <div class="panel-heading"><div><span class="eyebrow">YOUR RESTAURANT</span><h2>Business profile & delivery area</h2></div><span class="muted">Keep your listing up to date for diners</span></div>
+        <div class="profile-form">
+          <div class="form-field"><label>Restaurant name</label><input [(ngModel)]="restaurantProfileDraft.name"></div>
+          <div class="form-field"><label>Hotel / group name <span class="optional">optional</span></label><input [(ngModel)]="restaurantProfileDraft.hotelName"></div>
+          <div class="form-field"><label>Restaurant category</label><input [(ngModel)]="restaurantProfileDraft.category"></div>
+          <div class="form-field"><label>Cuisines <span class="optional">comma separated</span></label><input [(ngModel)]="restaurantProfileDraft.cuisine"></div>
+          <div class="form-field profile-wide"><label>About your restaurant</label><textarea [(ngModel)]="restaurantProfileDraft.description" rows="2"></textarea></div>
+          <div class="form-field profile-wide"><label>Business address in Qatar</label><input [(ngModel)]="restaurantProfileDraft.address" placeholder="Building, street, zone, Doha"></div>
+          <div class="form-field"><label>Latitude <span class="optional">optional</span></label><input [(ngModel)]="restaurantProfileDraft.latitude" type="number" step="any" min="-90" max="90"></div>
+          <div class="form-field"><label>Longitude <span class="optional">optional</span></label><input [(ngModel)]="restaurantProfileDraft.longitude" type="number" step="any" min="-180" max="180"></div>
+          <div class="form-field"><label>Delivery radius (km)</label><input [(ngModel)]="restaurantProfileDraft.serviceRadiusKm" type="number" min="1" max="250"></div>
+          <div class="form-field"><label>Estimated prep time (minutes)</label><input [(ngModel)]="restaurantProfileDraft.preparationMinutes" type="number" min="1" max="600"></div>
+          <div class="form-field"><label>Minimum order (QAR)</label><input [(ngModel)]="restaurantProfileDraft.minOrder" type="number" min="0" step="0.5"></div>
+          <div class="form-field"><label>Maximum order (QAR)</label><input [(ngModel)]="restaurantProfileDraft.maxOrder" type="number" min="1" step="0.5"></div>
+          <div class="form-field"><label>Business phone</label><input [(ngModel)]="restaurantProfileDraft.phone" type="tel" placeholder="+974"></div>
+          <div class="form-field"><label>WhatsApp number</label><input [(ngModel)]="restaurantProfileDraft.whatsapp" type="tel" placeholder="+974"></div>
+          <div class="form-field"><label>Business email</label><input [(ngModel)]="restaurantProfileDraft.email" type="email"></div>
+          <div class="profile-form-action"><button class="button button-accent" (click)="saveRestaurantProfile()">Save profile</button></div>
+        </div>
+      </div>
       <div class="portal-columns">
         <div class="portal-panel"><div class="panel-heading"><div><span class="eyebrow">LIVE SERVICE</span><h2>Orders</h2></div><button class="text-button" (click)="loadRestaurantPortal()">Refresh ↻</button></div>
           <article class="portal-order" *ngFor="let order of restaurantOrders">
@@ -179,9 +219,25 @@
           </article>
           <p class="muted" *ngIf="!restaurantOrders.length">No orders yet. New orders will appear here.</p>
         </div>
-        <div class="portal-panel"><div class="panel-heading"><div><span class="eyebrow">YOUR KITCHEN</span><h2>Menu availability</h2></div></div>
-          <div class="availability-row" *ngFor="let item of restaurantMenu"><div><strong>{{ item.name }}</strong><small>{{ money(item.price) }} · {{ item.category }}</small></div><select [ngModel]="item.availability" (ngModelChange)="changeItemAvailability(item, $event)"><option value="AVAILABLE">Available</option><option value="UNAVAILABLE">Unavailable</option><option value="TEMPORARILY_UNAVAILABLE">Temporarily unavailable</option></select></div>
-          <div class="add-menu-form"><strong>Add an item</strong><input [(ngModel)]="newItemName" placeholder="Item name"><input [(ngModel)]="newItemCategory" placeholder="Category"><input [(ngModel)]="newItemPrice" type="number" min="0" placeholder="Price (QAR)"><input [(ngModel)]="newItemDescription" placeholder="Description"><button class="button button-accent" (click)="addMenuItem()">Add to menu</button></div>
+        <div class="portal-panel" id="restaurant-menu"><div class="panel-heading"><div><span class="eyebrow">YOUR KITCHEN</span><h2>Menu manager</h2></div><span class="muted">{{ restaurantMenu.length }} items</span></div>
+          <div class="availability-row menu-manager-row" *ngFor="let item of restaurantMenu">
+            <ng-container *ngIf="editingMenuItemId !== item._id; else menuEditForm">
+              <div><strong>{{ item.name }}</strong><small>{{ money(item.price) }} · {{ item.category }} · {{ item.preparationMinutes || 15 }} min</small><small>{{ item.bestSeller ? 'Best seller · ' : '' }}{{ item.chefRecommended ? 'Chef recommended' : '' }}</small></div>
+              <div class="menu-manager-actions"><select [ngModel]="item.availability" (ngModelChange)="changeItemAvailability(item, $event)"><option value="AVAILABLE">Available</option><option value="UNAVAILABLE">Unavailable</option><option value="TEMPORARILY_UNAVAILABLE">Temporarily unavailable</option></select><button class="text-button" *ngIf="user?.role !== 'RESTAURANT_STAFF'" (click)="editMenuItem(item)">Edit</button><button class="text-button danger-text" *ngIf="user?.role !== 'RESTAURANT_STAFF'" (click)="archiveMenuItem(item)">Remove</button></div>
+            </ng-container>
+            <ng-template #menuEditForm><div class="menu-edit-form">
+              <input [(ngModel)]="menuItemDraft.name" aria-label="Item name">
+              <input [(ngModel)]="menuItemDraft.category" aria-label="Category">
+              <input [(ngModel)]="menuItemDraft.price" type="number" min="0.01" step="0.5" aria-label="Price in QAR">
+              <input [(ngModel)]="menuItemDraft.preparationMinutes" type="number" min="1" max="600" aria-label="Preparation minutes">
+              <input [(ngModel)]="menuItemDraft.description" aria-label="Item description" placeholder="Description">
+              <select [(ngModel)]="menuItemDraft.availability"><option value="AVAILABLE">Available</option><option value="UNAVAILABLE">Unavailable</option><option value="TEMPORARILY_UNAVAILABLE">Temporarily unavailable</option></select>
+              <label><input type="checkbox" [(ngModel)]="menuItemDraft.bestSeller"> Best seller</label>
+              <label><input type="checkbox" [(ngModel)]="menuItemDraft.chefRecommended"> Chef recommended</label>
+              <div class="menu-edit-actions"><button class="button button-accent button-small" (click)="saveMenuItem(item)">Save</button><button class="button button-quiet button-small" (click)="cancelMenuItemEdit()">Cancel</button></div>
+            </div></ng-template>
+          </div>
+          <div class="add-menu-form" *ngIf="user?.role !== 'RESTAURANT_STAFF'"><strong>Add a dish</strong><div class="menu-add-grid"><input [(ngModel)]="newItemName" placeholder="Dish name"><input [(ngModel)]="newItemCategory" placeholder="Category"><input [(ngModel)]="newItemPrice" type="number" min="0.01" step="0.5" placeholder="Price (QAR)"><input [(ngModel)]="newItemPreparationMinutes" type="number" min="1" max="600" placeholder="Prep time (minutes)"></div><input [(ngModel)]="newItemDescription" placeholder="Description"><div class="menu-flags"><label><input type="checkbox" [(ngModel)]="newItemBestSeller"> Best seller</label><label><input type="checkbox" [(ngModel)]="newItemChefRecommended"> Chef recommended</label></div><button class="button button-accent" (click)="addMenuItem()">Add to menu</button></div>
         </div>
       </div>
       <div class="portal-panel wide-panel"><div class="panel-heading"><div><span class="eyebrow">STATEMENTS</span><h2>Recent completed-order billing</h2></div></div><div class="admin-order-row" *ngFor="let transaction of restaurantBilling"><div><strong>{{ transaction.createdAt | date:'short' }}</strong><small>Gross {{ money(transaction.grossAmount, transaction.currency) }}</small></div><span>Commission {{ money(transaction.commissionAmount, transaction.currency) }}</span><strong>Net {{ money(transaction.netRestaurantAmount, transaction.currency) }}</strong></div><p class="muted" *ngIf="!restaurantBilling.length">Completed orders will appear here when billing is recorded.</p></div>
@@ -190,6 +246,21 @@
     <section class="content-section portal admin-portal" *ngIf="view === 'adminPortal'">
       <div class="portal-heading"><div><span class="eyebrow">KABHI ADMIN · LIVE DATABASE</span><h1>Platform overview.</h1></div><button class="button button-dark button-small" (click)="loadAdmin()">Refresh ↻</button></div>
       <div class="metrics-grid"><div class="metric-card"><span>Customers</span><strong>{{ metrics['customers'] || 0 }}</strong></div><div class="metric-card"><span>Approved restaurants</span><strong>{{ metrics['approvedRestaurants'] || 0 }}</strong></div><div class="metric-card"><span>Pending review</span><strong>{{ metrics['pendingRestaurants'] || 0 }}</strong></div><div class="metric-card"><span>Orders today</span><strong>{{ metrics['ordersToday'] || 0 }}</strong></div><div class="metric-card"><span>Completed orders</span><strong>{{ metrics['completedOrders'] || 0 }}</strong></div><div class="metric-card"><span>Rejected / timed out</span><strong>{{ metrics['rejectedOrders'] || 0 }}</strong></div><div class="metric-card"><span>Gross order value</span><strong>{{ money(metrics['grossOrderValue'] || 0) }}</strong></div><div class="metric-card"><span>Recorded commission</span><strong>{{ money(metrics['commission'] || 0) }}</strong></div><div class="metric-card"><span>Active promotions</span><strong>{{ metrics['activePromotions'] || 0 }}</strong></div><div class="metric-card"><span>Active sponsored banners</span><strong>{{ metrics['activeAdvertisements'] || 0 }}</strong></div><div class="metric-card"><span>Recorded banner impressions</span><strong>{{ metrics['advertisementImpressions'] || 0 }}</strong></div></div>
+      <div class="portal-panel wide-panel restaurant-directory" id="admin-restaurants">
+        <div class="panel-heading"><div><span class="eyebrow">PLATFORM PARTNERS</span><h2>All restaurants <span class="directory-count">{{ adminRestaurantTotal }}</span></h2></div><div class="directory-filters"><select [ngModel]="adminRestaurantStatus" (ngModelChange)="setAdminRestaurantStatus($event)" aria-label="Filter restaurants by status"><option value="ALL">All statuses</option><option value="PENDING_REVIEW">Pending review</option><option value="APPROVED">Approved</option><option value="REJECTED">Rejected</option><option value="SUSPENDED">Suspended</option><option value="DRAFT">Draft</option></select><div class="directory-search"><input [(ngModel)]="adminRestaurantSearch" (keyup.enter)="searchAdminRestaurants()" placeholder="Search restaurant, cuisine or address"><button class="button button-dark button-small" (click)="searchAdminRestaurants()">Search</button></div></div></div>
+        <article class="directory-row" *ngFor="let restaurant of adminRestaurants">
+          <div class="directory-identity"><span class="directory-emblem">{{ restaurant.name.slice(0, 1) }}</span><div><strong>{{ restaurant.name }}</strong><small>{{ restaurant.cuisine.join(' · ') || restaurant.category }}<span *ngIf="restaurant.hotelName"> · {{ restaurant.hotelName }}</span></small><small>{{ restaurant.address }}<span *ngIf="restaurant.phone"> · {{ restaurant.phone }}</span></small></div></div>
+          <span class="directory-status" [class.directory-approved]="restaurant.status === 'APPROVED'" [class.directory-pending]="restaurant.status === 'PENDING_REVIEW'">{{ statusLabel(restaurant.status) }}</span>
+          <select class="directory-availability" [ngModel]="restaurant.availability" (ngModelChange)="updateAdminRestaurantAvailability(restaurant, $event)" aria-label="Set restaurant availability"><option value="OPEN" [disabled]="restaurant.status !== 'APPROVED'">Open</option><option value="PAUSED">Paused</option><option value="CLOSED">Closed</option><option value="TEMPORARILY_UNAVAILABLE">Temporarily unavailable</option></select>
+          <div class="directory-actions">
+            <button class="button button-accent button-small" *ngIf="restaurant.status !== 'APPROVED'" (click)="updateAdminRestaurantStatus(restaurant, 'APPROVED')">Approve / activate</button>
+            <button class="button button-outline-danger button-small" *ngIf="restaurant.status !== 'SUSPENDED'" (click)="updateAdminRestaurantStatus(restaurant, 'SUSPENDED')">Suspend</button>
+            <button class="button button-quiet button-small" *ngIf="restaurant.status !== 'REJECTED'" (click)="updateAdminRestaurantStatus(restaurant, 'REJECTED')">Reject</button>
+          </div>
+        </article>
+        <p class="muted" *ngIf="!adminRestaurants.length">No restaurants match these filters.</p>
+        <div class="directory-pagination"><span>Page {{ adminRestaurantPage }} of {{ adminRestaurantTotalPages }}</span><div><button class="button button-quiet button-small" [disabled]="adminRestaurantPage <= 1" (click)="changeAdminRestaurantPage(adminRestaurantPage - 1)">← Previous</button><button class="button button-quiet button-small" [disabled]="adminRestaurantPage >= adminRestaurantTotalPages" (click)="changeAdminRestaurantPage(adminRestaurantPage + 1)">Next →</button></div></div>
+      </div>
       <div class="portal-columns">
         <div class="portal-panel"><div class="panel-heading"><div><span class="eyebrow">ONBOARDING</span><h2>Needs review</h2></div></div>
           <div class="review-row" *ngFor="let restaurant of pendingRestaurants"><div><strong>{{ restaurant.name }}</strong><small>{{ restaurant.cuisine.join(' · ') }} · {{ restaurant.address }}</small></div><div><button class="button button-accent button-small" (click)="reviewRestaurant(restaurant, 'APPROVED')">Approve</button><button class="button button-outline-danger button-small" (click)="reviewRestaurant(restaurant, 'REJECTED')">Reject</button></div></div>

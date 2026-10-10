@@ -1,4 +1,4 @@
-require("dotenv").config();
+require("./config");
 const mongoose = require("mongoose");
 const app = require("./app");
 const { expirePendingOrders } = require("./services");
