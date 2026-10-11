@@ -1,0 +1,138 @@
+name: Build and deploy KABHI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: kahbi-production-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Test and build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.22.3
+
+      - name: Install dependencies
+        run: npm run install:all
+
+      - name: Run backend tests
+        run: npm test
+
+      - name: Build Angular application
+        run: npm run build
+
+  deploy:
+    name: Deploy to Google Cloud Run
+    needs: validate
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.KAHBI_GCP_DEPLOY_ENABLED == 'true'
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
+      GCP_REGION: ${{ vars.GCP_REGION }}
+      GAR_REPOSITORY: ${{ vars.GAR_REPOSITORY }}
+      WIF_PROVIDER: ${{ vars.GCP_WIF_PROVIDER }}
+      DEPLOYER_SERVICE_ACCOUNT: ${{ vars.GCP_DEPLOYER_SERVICE_ACCOUNT }}
+      RUNTIME_SERVICE_ACCOUNT: ${{ vars.GCP_RUNTIME_SERVICE_ACCOUNT }}
+      MONGODB_SECRET: ${{ vars.GCP_MONGODB_SECRET }}
+      JWT_SECRET: ${{ vars.GCP_JWT_SECRET }}
+      OTP_SIGNING_SECRET: ${{ vars.GCP_OTP_SIGNING_SECRET }}
+      WHATSAPP_ENCRYPTION_SECRET: ${{ vars.GCP_WHATSAPP_ENCRYPTION_SECRET }}
+      API_SERVICE: ${{ vars.GCP_API_SERVICE || 'kahbi-api' }}
+      WEB_SERVICE: ${{ vars.GCP_WEB_SERVICE || 'kahbi-web' }}
+    steps:
+      - name: Validate deployment configuration
+        shell: bash
+        run: |
+          required=(GCP_PROJECT_ID GCP_REGION GAR_REPOSITORY WIF_PROVIDER DEPLOYER_SERVICE_ACCOUNT RUNTIME_SERVICE_ACCOUNT MONGODB_SECRET JWT_SECRET OTP_SIGNING_SECRET WHATSAPP_ENCRYPTION_SECRET)
+          missing=()
+          for key in "${required[@]}"; do
+            if [[ -z "${!key}" ]]; then missing+=("$key"); fi
+          done
+          if (( ${#missing[@]} )); then
+            printf 'Missing GitHub Actions repository variables: %s\n' "${missing[*]}"
+            exit 1
+          fi
+
+      - name: Authenticate to Google Cloud with Workload Identity Federation
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
+          service_account: ${{ vars.GCP_DEPLOYER_SERVICE_ACCOUNT }}
+          project_id: ${{ vars.GCP_PROJECT_ID }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configure Artifact Registry
+        shell: bash
+        run: gcloud auth configure-docker "${GCP_REGION}-docker.pkg.dev" --quiet
+
+      - name: Build and push production images
+        shell: bash
+        run: |
+          image_root="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${GAR_REPOSITORY}/kahbi"
+          docker build --file server/Dockerfile --tag "${image_root}-api:${GITHUB_SHA}" server
+          docker build --file client/Dockerfile.prod --tag "${image_root}-web:${GITHUB_SHA}" client
+          docker push "${image_root}-api:${GITHUB_SHA}"
+          docker push "${image_root}-web:${GITHUB_SHA}"
+          echo "API_IMAGE=${image_root}-api:${GITHUB_SHA}" >> "$GITHUB_ENV"
+          echo "WEB_IMAGE=${image_root}-web:${GITHUB_SHA}" >> "$GITHUB_ENV"
+
+      - name: Deploy API to Cloud Run
+        shell: bash
+        run: |
+          gcloud run deploy "$API_SERVICE" \
+            --project "$GCP_PROJECT_ID" \
+            --region "$GCP_REGION" \
+            --platform managed \
+            --image "$API_IMAGE" \
+            --service-account "$RUNTIME_SERVICE_ACCOUNT" \
+            --port 8080 \
+            --memory 1Gi \
+            --cpu 1 \
+            --max 10 \
+            --allow-unauthenticated \
+            --set-env-vars "NODE_ENV=production,PORT=8080,CURRENCY=QAR" \
+            --set-secrets "MONGODB_URI=${MONGODB_SECRET}:latest,JWT_SECRET=${JWT_SECRET}:latest,OTP_SIGNING_SECRET=${OTP_SIGNING_SECRET}:latest,WHATSAPP_CONFIG_ENCRYPTION_KEY=${WHATSAPP_ENCRYPTION_SECRET}:latest" \
+            --quiet
+          api_url="$(gcloud run services describe "$API_SERVICE" --project "$GCP_PROJECT_ID" --region "$GCP_REGION" --format='value(status.url)')"
+          if [[ -z "$api_url" ]]; then echo "Could not resolve the deployed API URL."; exit 1; fi
+          echo "API_UPSTREAM=$api_url" >> "$GITHUB_ENV"
+
+      - name: Deploy web app to Cloud Run
+        shell: bash
+        run: |
+          gcloud run deploy "$WEB_SERVICE" \
+            --project "$GCP_PROJECT_ID" \
+            --region "$GCP_REGION" \
+            --platform managed \
+            --image "$WEB_IMAGE" \
+            --service-account "$RUNTIME_SERVICE_ACCOUNT" \
+            --port 8080 \
+            --memory 256Mi \
+            --cpu 1 \
+            --max 10 \
+            --allow-unauthenticated \
+            --set-env-vars "PORT=8080,API_UPSTREAM=${API_UPSTREAM}" \
+            --quiet
+          web_url="$(gcloud run services describe "$WEB_SERVICE" --project "$GCP_PROJECT_ID" --region "$GCP_REGION" --format='value(status.url)')"
+          echo "KABHI deployed successfully: $web_url"
