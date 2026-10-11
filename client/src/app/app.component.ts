@@ -32,12 +32,37 @@ interface Restaurant {
   category: string;
   preparationMinutes: number;
   minOrder: number;
+  maxOrder: number;
   status: string;
   availability: string;
+  phone?: string;
+  whatsapp?: string;
+  email?: string;
+  latitude?: number | null;
+  longitude?: number | null;
+  serviceRadiusKm?: number | null;
   ratingAverage: number;
   ratingCount: number;
   distanceKm?: number | null;
   demo?: boolean;
+}
+
+interface RestaurantProfileDraft {
+  name: string;
+  hotelName: string;
+  cuisine: string;
+  description: string;
+  address: string;
+  latitude: number | null;
+  longitude: number | null;
+  serviceRadiusKm: number | null;
+  phone: string;
+  whatsapp: string;
+  email: string;
+  preparationMinutes: number;
+  minOrder: number;
+  maxOrder: number;
+  category: string;
 }
 
 interface MenuItem {
@@ -48,6 +73,7 @@ interface MenuItem {
   description: string;
   category: string;
   price: number;
+  preparationMinutes?: number;
   availability: string;
   bestSeller: boolean;
   chefRecommended: boolean;
@@ -192,6 +218,7 @@ export class AppComponent implements OnInit {
   trackedOrder: Order | null = null;
   authEmail = '';
   authPassword = '';
+  loginPortal: 'CUSTOMER' | 'RESTAURANT' | 'ADMIN' = 'CUSTOMER';
   signupName = '';
   signupPhone = '';
   signupRestaurant = false;
@@ -205,6 +232,12 @@ export class AppComponent implements OnInit {
   newItemCategory = '';
   newItemPrice = 0;
   newItemDescription = '';
+  newItemPreparationMinutes = 15;
+  newItemBestSeller = false;
+  newItemChefRecommended = false;
+  editingMenuItemId = '';
+  menuItemDraft = this.emptyMenuItemDraft();
+  restaurantProfileDraft: RestaurantProfileDraft = this.emptyRestaurantProfile();
   newPromotionCode = '';
   newPromotionTitle = '';
   newPromotionDiscount = 10;
@@ -793,13 +826,21 @@ export class AppComponent implements OnInit {
       portal: this.loginPortal
     }).subscribe({
       next: ({ token, user }) => {
+        this.loading = false;
+        if (!this.roleMatchesLoginPortal(user)) {
+          this.error = 'That account belongs to a different KABHI portal. Choose the matching account type and try again.';
+          return;
+        }
         localStorage.setItem(this.tokenKey, token);
         this.user = user;
         this.error = '';
         this.notice = `Welcome, ${user.name}.`;
         this.loadRoleLanding();
       },
-      error: (error) => this.showError(error)
+      error: (error) => {
+        this.loading = false;
+        this.showError(error);
+      }
     });
   }
 
@@ -864,6 +905,7 @@ export class AppComponent implements OnInit {
     this.http.get<{ restaurant: Restaurant }>(`${this.api}/restaurant/me`, { headers: this.headers() }).subscribe({
       next: ({ restaurant }) => {
         this.selectedRestaurant = restaurant;
+        this.setRestaurantProfile(restaurant);
         this.http.get<{ orders: Order[] }>(`${this.api}/restaurant/orders`, { headers: this.headers() }).subscribe({
           next: ({ orders }) => (this.restaurantOrders = orders),
           error: (error) => this.showError(error)
@@ -894,6 +936,21 @@ export class AppComponent implements OnInit {
   changeAvailability(availability: string): void {
     this.http.patch(`${this.api}/restaurant/availability`, { availability }, { headers: this.headers() }).subscribe({
       next: () => this.loadRestaurantPortal(),
+      error: (error) => this.showError(error)
+    });
+  }
+
+  saveRestaurantProfile(): void {
+    const body = {
+      ...this.restaurantProfileDraft,
+      cuisine: this.restaurantProfileDraft.cuisine.split(',').map((entry) => entry.trim()).filter(Boolean)
+    };
+    this.http.patch<{ restaurant: Restaurant }>(`${this.api}/restaurant/me`, body, { headers: this.headers() }).subscribe({
+      next: ({ restaurant }) => {
+        this.selectedRestaurant = restaurant;
+        this.setRestaurantProfile(restaurant);
+        this.notice = 'Restaurant profile saved.';
+      },
       error: (error) => this.showError(error)
     });
   }
@@ -1113,6 +1170,11 @@ export class AppComponent implements OnInit {
     });
   }
 
+  goToRestaurantMenu(): void {
+    if (this.view !== 'restaurantPortal') this.loadRestaurantPortal();
+    setTimeout(() => document.getElementById('restaurant-menu')?.scrollIntoView({ behavior: 'smooth' }), 0);
+  }
+
   loadAdmin(): void {
     this.view = 'adminPortal';
     this.http.get<{
@@ -1142,6 +1204,7 @@ export class AppComponent implements OnInit {
       next: ({ customers }) => (this.customers = customers),
       error: (error) => this.showError(error)
     });
+    this.loadAdminRestaurants();
     this.http.get<{ promotions: Promotion[]; advertisements: Advertisement[] }>(`${this.api}/admin/marketing`, { headers: this.headers() }).subscribe({
       next: (data) => {
         this.promotions = data.promotions;

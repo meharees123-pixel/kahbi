@@ -404,6 +404,55 @@ app.get("/api/restaurant/me", auth(), roles(...restaurantRoles), asyncRoute(asyn
   res.json({ restaurant });
 }));
 
+app.patch("/api/restaurant/me", auth(), roles("RESTAURANT_OWNER", "RESTAURANT_MANAGER"), asyncRoute(async (req, res) => {
+  const restaurant = await restaurantForUser(req.user);
+  const fields = ["name", "hotelName", "cuisine", "description", "address", "latitude", "longitude", "serviceRadiusKm", "phone", "whatsapp", "email", "preparationMinutes", "minOrder", "maxOrder", "category"];
+  const updates = {};
+  for (const field of fields) {
+    if (Object.hasOwn(req.body, field)) updates[field] = req.body[field];
+  }
+  if (typeof updates.name !== "undefined" && (!String(updates.name).trim() || String(updates.name).length > 120)) {
+    return res.status(400).json({ error: "Restaurant name is required and must be 120 characters or fewer." });
+  }
+  if (typeof updates.address !== "undefined" && (!String(updates.address).trim() || String(updates.address).length > 300)) {
+    return res.status(400).json({ error: "A valid restaurant address is required." });
+  }
+  if (typeof updates.cuisine !== "undefined") {
+    updates.cuisine = (Array.isArray(updates.cuisine) ? updates.cuisine : String(updates.cuisine).split(","))
+      .map((value) => String(value).trim()).filter(Boolean).slice(0, 12);
+  }
+  for (const field of ["latitude", "longitude", "serviceRadiusKm", "preparationMinutes", "minOrder", "maxOrder"]) {
+    if (typeof updates[field] !== "undefined" && updates[field] !== null) {
+      updates[field] = Number(updates[field]);
+      if (!Number.isFinite(updates[field])) return res.status(400).json({ error: `${field} must be a valid number.` });
+    }
+  }
+  const latitude = Object.hasOwn(updates, "latitude") ? updates.latitude : restaurant.latitude;
+  const longitude = Object.hasOwn(updates, "longitude") ? updates.longitude : restaurant.longitude;
+  if ((latitude === null) !== (longitude === null)
+    || (latitude !== null && (!isValidCoordinate(latitude, -90, 90) || !isValidCoordinate(longitude, -180, 180)))) {
+    return res.status(400).json({ error: "Provide both valid map coordinates, or leave both blank." });
+  }
+  if (typeof updates.serviceRadiusKm !== "undefined" && (updates.serviceRadiusKm < 1 || updates.serviceRadiusKm > 250)) {
+    return res.status(400).json({ error: "Service radius must be between 1 and 250 km." });
+  }
+  if (typeof updates.preparationMinutes !== "undefined" && (updates.preparationMinutes < 1 || updates.preparationMinutes > 600)) {
+    return res.status(400).json({ error: "Preparation time must be between 1 and 600 minutes." });
+  }
+  if (typeof updates.minOrder !== "undefined" && updates.minOrder < 0) return res.status(400).json({ error: "Minimum order cannot be negative." });
+  if (typeof updates.maxOrder !== "undefined" && updates.maxOrder < 1) return res.status(400).json({ error: "Maximum order must be greater than zero." });
+  if ((updates.minOrder ?? restaurant.minOrder) > (updates.maxOrder ?? restaurant.maxOrder)) {
+    return res.status(400).json({ error: "Maximum order must be at least the minimum order." });
+  }
+  if (typeof updates.phone !== "undefined" && updates.phone && !validatePhone(String(updates.phone))) return res.status(400).json({ error: "Enter a valid restaurant phone number." });
+  if (typeof updates.whatsapp !== "undefined" && updates.whatsapp && !validatePhone(String(updates.whatsapp))) return res.status(400).json({ error: "Enter a valid WhatsApp number." });
+  if (typeof updates.email !== "undefined" && updates.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(updates.email))) return res.status(400).json({ error: "Enter a valid restaurant email." });
+  Object.assign(restaurant, updates);
+  await restaurant.save();
+  await writeAudit({ user: req.user, action: "RESTAURANT_PROFILE_UPDATED", entity: "Restaurant", entityId: restaurant._id });
+  res.json({ restaurant });
+}));
+
 app.get("/api/restaurant/orders", auth(), roles(...restaurantRoles), asyncRoute(async (req, res) => {
   const restaurant = await restaurantForUser(req.user);
   const orders = await Order.find({ restaurantId: restaurant._id }).sort({ createdAt: -1 }).limit(100).lean();
@@ -477,7 +526,7 @@ app.patch("/api/restaurant/menu/:id", auth(), roles(...restaurantRoles), asyncRo
   res.json({ item });
 }));
 
-app.post("/api/restaurant/menu", auth(), roles(...restaurantRoles), asyncRoute(async (req, res) => {
+app.post("/api/restaurant/menu", auth(), roles("RESTAURANT_OWNER", "RESTAURANT_MANAGER"), asyncRoute(async (req, res) => {
   const restaurant = await restaurantForUser(req.user);
   const { name, category, price, description } = req.body;
   if (!name || !category || !Number.isFinite(Number(price)) || Number(price) <= 0) return res.status(400).json({ error: "Item name, category and a positive price are required." });
@@ -742,6 +791,23 @@ app.patch("/api/admin/restaurants/:id/status", auth(), roles("ADMIN", "SUPER_ADM
   if (status !== "APPROVED") restaurant.availability = "CLOSED";
   await restaurant.save();
   await writeAudit({ user: req.user, action: "RESTAURANT_REVIEWED", entity: "Restaurant", entityId: restaurant._id, details: { previousStatus, status } });
+  res.json({ restaurant });
+}));
+
+app.patch("/api/admin/restaurants/:id/availability", auth(), roles("ADMIN", "SUPER_ADMIN"), asyncRoute(async (req, res) => {
+  const availability = String(req.body.availability || "");
+  if (!["OPEN", "CLOSED", "TEMPORARILY_UNAVAILABLE", "PAUSED"].includes(availability)) {
+    return res.status(400).json({ error: "Choose a valid restaurant availability." });
+  }
+  const restaurant = await Restaurant.findById(req.params.id);
+  if (!restaurant) return res.status(404).json({ error: "Restaurant not found." });
+  if (availability === "OPEN" && restaurant.status !== "APPROVED") {
+    return res.status(409).json({ error: "Approve the restaurant before setting it open." });
+  }
+  const previous = restaurant.availability;
+  restaurant.availability = availability;
+  await restaurant.save();
+  await writeAudit({ user: req.user, action: "ADMIN_RESTAURANT_AVAILABILITY_CHANGED", entity: "Restaurant", entityId: restaurant._id, details: { previous, availability } });
   res.json({ restaurant });
 }));
 

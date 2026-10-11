@@ -140,7 +140,7 @@
 
     <section class="content-section narrow-section" *ngIf="view === 'track'">
       <span class="eyebrow">YOUR FOOD, ON ITS WAY</span><h1>Track an order.</h1>
-      <div class="track-form"><div class="form-field"><label>Order reference</label><input [(ngModel)]="trackReference" placeholder="KAB-20261008-ABC123"></div><div class="form-field"><label>Checkout phone number</label><input [(ngModel)]="trackPhone" placeholder="+974 5XXX XXXX"></div><button class="button button-dark" (click)="trackOrder()">Find order</button></div>
+      <div class="track-form"><div class="form-field"><label>Order reference</label><input [(ngModel)]="trackReference" placeholder="KAB-20261008-ABC123"></div><div class="form-field" *ngIf="!isCustomer"><label>Checkout phone number</label><input [(ngModel)]="trackPhone" placeholder="+974 5XXX XXXX"></div><div class="form-field signed-track-note" *ngIf="isCustomer"><label>Secure account lookup</label><span>We'll find orders linked to your signed-in account.</span></div><button class="button button-dark" (click)="trackOrder()">Find order</button></div>
       <article class="order-track-card" *ngIf="trackedOrder">
         <div class="track-top"><div><span class="eyebrow">{{ trackedOrder.reference }}</span><h2>{{ trackedOrder.restaurantName }}</h2><p>{{ trackedOrder.createdAt | date:'medium' }}</p></div><span class="order-status" [ngClass]="orderStatusClass(trackedOrder.status)">{{ statusLabel(trackedOrder.status) }}</span></div>
         <div class="timeline"><div class="timeline-item" *ngFor="let step of trackedOrder.statusHistory"><span class="timeline-dot"></span><div><strong>{{ statusLabel(step.status) }}</strong><small>{{ step.createdAt | date:'short' }}</small></div></div></div>
