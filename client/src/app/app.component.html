@@ -124,15 +124,27 @@
           <ng-template #emptyCart><div class="empty-state"><h3>Your cart is empty</h3><button class="button button-dark" (click)="view = 'home'">Explore restaurants</button></div></ng-template>
         </div>
         <aside class="checkout-card"><span class="eyebrow">DELIVERY DETAILS</span><h2>Where to?</h2>
-          <div class="form-field" *ngIf="!isCustomer"><label>Your name</label><input [(ngModel)]="guestName" placeholder="Full name" autocomplete="name" required></div>
-          <div class="form-field" *ngIf="!isCustomer"><label>Mobile / WhatsApp</label><input [(ngModel)]="guestPhone" placeholder="+974 5XXX XXXX" autocomplete="tel" type="tel" required></div>
+          <div class="form-field" *ngIf="!isCustomer"><label>Mobile / WhatsApp</label><input [(ngModel)]="guestPhone" placeholder="+974 5XXX XXXX" autocomplete="tel" type="tel" required><small>Enter the number in international format, including its country code.</small></div>
+          <div class="whatsapp-verification" *ngIf="!isCustomer">
+            <strong>Verify your WhatsApp number</strong>
+            <p>Verify your number before your first order. Verification also creates your customer account.</p>
+            <button class="button button-quiet button-small" *ngIf="!customerOtpChallengeId" [disabled]="loading" (click)="requestCustomerOtp('ORDER')">Request verification code</button>
+            <ng-container *ngIf="customerOtpChallengeId && customerOtpPurpose === 'ORDER'">
+              <div class="development-otp-callout" *ngIf="customerOtpDevelopmentCode" role="status" aria-live="polite">
+                <strong>Development verification code</strong><span>{{ customerOtpDevelopmentCode }}</span>
+                <small>WhatsApp delivery is disabled. Enter this code to continue.</small>
+              </div>
+              <div class="form-field"><label>Six-digit WhatsApp code</label><input [(ngModel)]="customerOtpCode" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="123456"></div>
+              <div class="order-actions"><button class="button button-dark button-small" [disabled]="loading" (click)="verifyCustomerOtp('ORDER')">Verify number</button><button class="text-button" [disabled]="loading" (click)="customerOtpChallengeId = ''; customerOtpCode = ''; customerOtpDevelopmentCode = ''">Change number</button></div>
+            </ng-container>
+          </div>
           <div class="checkout-location-card"><div><strong>Delivery pin</strong><span>{{ deliveryLocationLabel || 'Choose a delivery location first' }}</span></div><button class="button button-quiet button-small" (click)="openMapPicker('delivery')">{{ deliveryLatitude !== null ? 'Change pin' : 'Choose pin' }}</button></div>
           <div class="form-field"><label>Full delivery address</label><textarea [(ngModel)]="deliveryAddress" placeholder="Building, apartment, street, zone, and a nearby landmark" rows="3" required minlength="5"></textarea><small>We use your map pin to confirm free-delivery coverage. Add the exact building and unit details here.</small></div>
           <div class="delivery-coverage-warning" *ngIf="!isSelectedRestaurantInDeliveryRange && deliveryLatitude !== null">This restaurant's free-delivery area does not include your selected pin. Choose another restaurant or change your delivery location.</div>
           <div class="form-field"><label>Promotion code <span class="optional">optional</span></label><input [(ngModel)]="promotionCode" placeholder="e.g. KABHI10"></div>
           <div class="payment-note"><span>◉</span><div><strong>Pay restaurant directly</strong><small>Cash or direct payment on delivery</small></div></div>
           <div class="summary-row"><span>Subtotal</span><strong>{{ money(subtotal) }}</strong></div><div class="summary-row free-delivery-total"><span>Delivery</span><strong>FREE</strong></div><div class="summary-row total-row"><span>Total</span><strong>{{ money(subtotal) }}</strong></div>
-          <button class="button button-accent button-wide" [disabled]="loading || !cartItems.length || deliveryLatitude === null || deliveryLongitude === null || !isSelectedRestaurantInDeliveryRange" (click)="placeOrder()">{{ loading ? 'Placing order…' : 'Place order' }} <span>→</span></button>
+          <button class="button button-accent button-wide" [disabled]="loading || !isCustomer || !cartItems.length || deliveryLatitude === null || deliveryLongitude === null || !isSelectedRestaurantInDeliveryRange" (click)="placeOrder()">{{ loading ? 'Working…' : isCustomer ? 'Place order' : 'Verify WhatsApp to continue' }} <span>→</span></button>
           <p class="fine-print">Free delivery is available because your selected location is inside this restaurant's delivery radius. Tax is not charged by KABHI.</p>
         </aside>
       </div>
@@ -170,9 +182,23 @@
     <section class="auth-wrap" *ngIf="view === 'login' || view === 'signup'">
       <div class="auth-aside"><span class="brand-mark">K</span><span class="eyebrow">{{ loginPortal === 'ADMIN' ? 'KABHI ADMIN' : loginPortal === 'RESTAURANT' ? 'RESTAURANT PORTAL' : 'WELCOME TO KABHI' }}</span><h2>{{ loginPortal === 'ADMIN' ? 'Platform oversight.' : loginPortal === 'RESTAURANT' ? 'Your kitchen, managed.' : 'Made for good moments.' }}</h2><p>{{ loginPortal === 'ADMIN' ? 'Manage restaurants, menus, and orders across KABHI.' : loginPortal === 'RESTAURANT' ? 'Sign in to manage your restaurant, menu, and incoming orders.' : 'Discover the kitchens worth knowing in Qatar.' }}</p></div>
       <div class="auth-card">
-        <span class="eyebrow">{{ view === 'login' ? loginPortal + ' SIGN IN' : 'JOIN KABHI' }}</span><h1>{{ view === 'login' ? (loginPortal === 'CUSTOMER' ? 'Welcome back.' : 'Sign in to your portal.') : (signupRestaurant ? 'List your restaurant.' : 'Create an account.') }}</h1>
+        <span class="eyebrow">{{ view === 'login' ? loginPortal + ' SIGN IN' : 'JOIN KABHI' }}</span><h1>{{ view === 'login' ? (loginPortal === 'CUSTOMER' ? 'Sign in with WhatsApp.' : 'Sign in to your portal.') : (signupRestaurant ? 'List your restaurant.' : 'Create an account.') }}</h1>
         <div class="form-field" *ngIf="view === 'signup'"><label>{{ signupRestaurant ? 'Owner name' : 'Full name' }}</label><input [(ngModel)]="signupName" placeholder="Your name"></div>
         <div class="form-field" *ngIf="view === 'signup'"><label>Mobile / WhatsApp</label><input [(ngModel)]="signupPhone" placeholder="+974 5XXX XXXX"></div>
+        <ng-container *ngIf="view === 'login' && loginPortal === 'CUSTOMER'">
+          <div class="form-field"><label>WhatsApp number</label><input [(ngModel)]="customerAuthPhone" placeholder="+974 5XXX XXXX" autocomplete="tel" type="tel"></div>
+          <button class="button button-accent button-wide" *ngIf="!customerOtpChallengeId" [disabled]="loading" (click)="requestCustomerOtp('LOGIN')">{{ loading ? 'Requesting code…' : 'Request verification code' }} <span>→</span></button>
+          <ng-container *ngIf="customerOtpChallengeId && customerOtpPurpose === 'LOGIN'">
+            <p class="fine-print">{{ customerOtpDevelopmentCode ? 'Enter the development code shown below. It expires in five minutes.' : 'Enter the six-digit code sent to ' + customerAuthPhone + '. It expires in five minutes.' }}</p>
+            <div class="development-otp-callout" *ngIf="customerOtpDevelopmentCode" role="status" aria-live="polite">
+              <strong>Development verification code</strong><span>{{ customerOtpDevelopmentCode }}</span>
+              <small>WhatsApp delivery is disabled. Enter this code to sign in.</small>
+            </div>
+            <div class="form-field"><label>Verification code</label><input [(ngModel)]="customerOtpCode" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="123456"></div>
+            <button class="button button-accent button-wide" [disabled]="loading" (click)="verifyCustomerOtp('LOGIN')">{{ loading ? 'Verifying…' : 'Verify and sign in' }} <span>→</span></button>
+            <button class="text-button restaurant-signup" [disabled]="loading" (click)="customerOtpChallengeId = ''; customerOtpCode = ''; customerOtpDevelopmentCode = ''">Change number</button>
+          </ng-container>
+        </ng-container>
         <ng-container *ngIf="view === 'signup' && signupRestaurant">
           <div class="form-field"><label>Restaurant name</label><input [(ngModel)]="signupRestaurantName" placeholder="Business name"></div>
           <div class="form-field"><label>Cuisine</label><input [(ngModel)]="signupCuisine" placeholder="Indian, Arabic…"></div>
@@ -181,13 +207,13 @@
           <div class="form-field"><label>Free-delivery radius (km)</label><input [(ngModel)]="signupServiceRadiusKm" type="number" min="0.5" max="100" step="0.5"><small>Customers inside this radius qualify for free delivery. Enter 0.5–100 km.</small></div>
           <p class="fine-print">Your application will be reviewed before the restaurant appears to customers.</p>
         </ng-container>
-        <div class="form-field"><label>Email</label><input [(ngModel)]="authEmail" type="email" placeholder="you&#64;example.com" autocomplete="email"></div>
-        <div class="form-field"><label>Password</label><input [(ngModel)]="authPassword" type="password" placeholder="At least 10 characters" autocomplete="current-password"></div>
-        <button class="button button-accent button-wide" (click)="view === 'login' ? signIn() : signUp()">{{ view === 'login' ? 'Sign in' : 'Create account' }} <span>→</span></button>
-        <p class="auth-switch" *ngIf="view === 'login' && loginPortal === 'CUSTOMER'">New to KABHI? <button class="text-button" (click)="openSignup()">Create an account</button></p>
+        <div class="form-field" *ngIf="loginPortal !== 'CUSTOMER' || view === 'signup'"><label>Email</label><input [(ngModel)]="authEmail" type="email" placeholder="you&#64;example.com" autocomplete="email"></div>
+        <div class="form-field" *ngIf="loginPortal !== 'CUSTOMER' || view === 'signup'"><label>Password</label><input [(ngModel)]="authPassword" type="password" placeholder="At least 10 characters" autocomplete="current-password"></div>
+        <button class="button button-accent button-wide" *ngIf="loginPortal !== 'CUSTOMER' || view === 'signup'" (click)="view === 'login' ? signIn() : signUp()">{{ view === 'login' ? 'Sign in' : 'Create account' }} <span>→</span></button>
+        <p class="auth-switch" *ngIf="view === 'login' && loginPortal === 'CUSTOMER'">New to KABHI? Enter your WhatsApp number and verify the code to create your account.</p>
         <p class="auth-switch" *ngIf="view === 'login' && loginPortal === 'RESTAURANT'">Own a restaurant? <button class="text-button" (click)="openSignup()">Apply to join KABHI</button></p>
         <p class="auth-switch" *ngIf="view === 'signup'">Already have an account? <button class="text-button" (click)="view = 'login'; signupRestaurant = loginPortal === 'RESTAURANT'">Sign in</button></p>
-        <div class="demo-logins" *ngIf="view === 'login' && loginPortal === 'CUSTOMER'"><strong>Customer demo</strong><span>customer&#64;kahbi.demo</span><small>Password: Demo123!</small><button class="text-button" (click)="trackReference = ''; trackedOrder = null; view = 'track'">Track a guest order instead</button></div>
+        <div class="demo-logins" *ngIf="view === 'login' && loginPortal === 'CUSTOMER'"><strong>Customer demo</strong><span>WhatsApp: +97450000002</span><small>Configure WhatsApp Cloud API and an approved OTP template to receive sign-in codes.</small><button class="text-button" (click)="trackReference = ''; trackedOrder = null; view = 'track'">Track a guest order instead</button></div>
         <div class="demo-logins" *ngIf="view === 'login' && loginPortal === 'RESTAURANT'"><strong>Restaurant demo accounts</strong><span>restaurant&#64;kahbi.demo — KABHI Demo Hotel</span><span>owner.pearl&#64;kahbi.demo — Pearl Garden Kitchen</span><span>owner.souq&#64;kahbi.demo — Souq Flame Grill</span><span>owner.corniche&#64;kahbi.demo — Corniche Breakfast Club</span><span>owner.lusail&#64;kahbi.demo — Lusail Spice House</span><small>Each restaurant has its own login. Password: Demo123!</small></div>
         <div class="demo-logins" *ngIf="view === 'login' && loginPortal === 'ADMIN'"><strong>Admin demo account</strong><span>admin&#64;kahbi.demo</span><small>Password: Demo123!</small><small>Admin access includes every restaurant and its menu.</small></div>
       </div>
@@ -237,6 +263,29 @@
       <div class="restaurant-management-entry">
         <div><span class="eyebrow">RESTAURANT MANAGEMENT</span><strong>Manage every restaurant and menu from one place.</strong></div>
         <button class="button button-accent" (click)="openAdminRestaurantList()">Open restaurant directory <span>→</span></button>
+      </div>
+      <div class="portal-panel wide-panel whatsapp-admin-settings">
+        <div class="panel-heading">
+          <div><span class="eyebrow">CUSTOMER SIGN-IN</span><h2>WhatsApp Cloud API</h2></div>
+          <span class="order-status" [ngClass]="adminWhatsappStatus?.configured ? 'order-status-delivered' : 'order-status-pending'">{{ adminWhatsappStatus?.configured ? 'Configured' : 'Setup required' }}</span>
+        </div>
+        <p class="muted">Add Meta’s Cloud API credentials here when your WhatsApp account is ready. Secrets are encrypted before being saved and are never returned to the browser. Leave a saved secret blank to keep it unchanged.</p>
+        <p class="demo-callout" *ngIf="adminWhatsappStatus && !adminWhatsappStatus.encryptionKeyConfigured">Before saving, set <code>WHATSAPP_CONFIG_ENCRYPTION_KEY</code> in the root <code>.env</code> to a private random value of at least 32 characters, then restart the app.</p>
+        <p class="demo-callout" *ngIf="adminWhatsappStatus?.developmentOtpAllowed && !adminWhatsappStatus.otpSecretPersistent">Local OTPs use a private temporary signing key generated by the API; outstanding codes expire if the API restarts.</p>
+        <p class="demo-callout" *ngIf="adminWhatsappStatus && !adminWhatsappStatus.developmentOtpAllowed && !adminWhatsappStatus.otpSecretConfigured">Customer OTP requires <code>OTP_SIGNING_SECRET</code> in the root <code>.env</code> (at least 32 random characters).</p>
+        <div class="otp-delivery-control" *ngIf="adminWhatsappStatus">
+          <div><strong>WhatsApp OTP delivery</strong><small>{{ whatsappOtpDeliveryEnabled ? 'Codes are sent to customers through WhatsApp.' : 'WhatsApp is off; a development code will appear in the customer app.' }}</small></div>
+          <label><input type="checkbox" [checked]="whatsappOtpDeliveryEnabled" [disabled]="loading || !adminWhatsappStatus.developmentOtpAllowed" (change)="setWhatsappOtpDelivery($event)"> {{ whatsappOtpDeliveryEnabled ? 'Enabled' : 'Disabled' }}</label>
+        </div>
+        <p class="demo-callout" *ngIf="adminWhatsappStatus && !adminWhatsappStatus.developmentOtpAllowed">WhatsApp delivery cannot be disabled in production. Development OTP display is intentionally unavailable there.</p>
+        <div class="whatsapp-config-grid">
+          <label class="form-field"><span>Cloud API access token</span><input [(ngModel)]="whatsappAccessToken" type="password" autocomplete="new-password" [placeholder]="adminWhatsappStatus?.accessTokenConfigured ? 'Already saved — leave blank to keep' : 'Paste Meta access token'"></label>
+          <label class="form-field"><span>Phone Number ID</span><input [(ngModel)]="whatsappPhoneNumberId" inputmode="numeric" autocomplete="off" [placeholder]="adminWhatsappStatus?.phoneNumberIdConfigured ? 'Already saved — leave blank to keep' : 'Numeric ID from Meta API Setup'"></label>
+          <label class="form-field"><span>Approved OTP template</span><input [(ngModel)]="whatsappTemplateName" autocomplete="off"></label>
+          <label class="form-field"><span>Template language</span><input [(ngModel)]="whatsappLanguage" autocomplete="off"></label>
+          <label class="form-field"><span>Graph API version</span><input [(ngModel)]="whatsappGraphVersion" autocomplete="off"></label>
+        </div>
+        <div class="order-actions"><button class="button button-accent" [disabled]="loading || !adminWhatsappStatus?.encryptionKeyConfigured" (click)="saveAdminWhatsappConfig()">{{ loading ? 'Saving…' : 'Save WhatsApp settings' }}</button><small *ngIf="adminWhatsappStatus">Credentials source: {{ adminWhatsappStatus.source === 'admin' ? 'Admin settings' : 'Environment' }}.</small></div>
       </div>
       <div class="portal-columns">
         <div class="portal-panel"><div class="panel-heading"><div><span class="eyebrow">ONBOARDING</span><h2>Needs review</h2></div></div>

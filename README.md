@@ -14,11 +14,25 @@ This starts MongoDB, seeds the demo data, and launches the API and web app. Open
 
 By default the API and seeder use the local MongoDB container. To use MongoDB Atlas, copy `.env.example` to `.env` and replace `MONGODB_URI` with your Atlas connection string; Compose passes it to both the API and the seeder. Keep `.env` private and never commit it. The database name is the path segment in the URI (for example, `/kahbi`); use the intended database name rather than accidentally sharing another application's database. Ensure the Atlas database user has read/write access, the machine's IP is permitted by the Atlas network access list, and any special characters in the password are percent-encoded. The local MongoDB container still starts as part of Compose, but the app uses the URI configured in `.env`.
 
-The first startup seeds a clearly labeled demo restaurant, menu, promotion, and accounts. Seeding is safe to repeat. Demo passwords are `Demo123!`:
+Customer accounts sign in with a WhatsApp one-time code; customer passwords are no longer used. When your Meta WhatsApp account is ready, sign in to the **Admin** portal and enter the Cloud API access token, Phone Number ID, and approved template details in the **WhatsApp Cloud API** settings panel. The access token and ID are encrypted before being stored in MongoDB; the token is never sent back to the browser. Use an authorized test recipient while developing. Before saving credentials, add both signing/encryption secrets to the root `.env` and restart the stack. Generate each secret independently with `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`. Keep `.env` private and do not commit it. Preserve `WHATSAPP_CONFIG_ENCRYPTION_KEY`: changing it makes already-saved credentials unreadable. When delivery is enabled, missing credentials or an unapproved template cause an explicit error; verification codes are never logged or returned.
 
-| Portal | Sign-in URL | Demo email |
+The Admin dashboard also has a WhatsApp OTP delivery switch. In local development, turning delivery off shows the generated code in the customer app so the flow can be tested before Meta setup is ready. This bypasses possession verification and is allowed only when `NODE_ENV=development`; other environments reject disabling delivery and never return the code. The local Compose setup defaults `NODE_ENV` to `development`; set it to `production` when deploying. In local development, if no `OTP_SIGNING_SECRET` is set, the API creates a random temporary key on startup; outstanding codes expire when the API restarts. Production requires an explicit persistent signing secret. Keep code-display mode for local development only.
+
+```env
+WHATSAPP_OTP_TEMPLATE=kahbi_customer_otp
+WHATSAPP_OTP_LANGUAGE=en_US
+WHATSAPP_GRAPH_API_VERSION=v23.0
+OTP_SIGNING_SECRET=generate-a-private-random-secret-at-least-32-characters
+WHATSAPP_CONFIG_ENCRYPTION_KEY=generate-a-different-private-random-secret-at-least-32-characters
+```
+
+For Docker, `MONGODB_URI` in `.env` must be `mongodb://mongodb:27017/kahbi` when using the local container (not `localhost` from inside the API container). Put the generated secrets into `.env`, then run `npm run local` again. Sign in at [http://localhost:4200/login/admin](http://localhost:4200/login/admin), open the **WhatsApp Cloud API** panel, and save your Meta access token, numeric Phone Number ID, template name, language, and Graph API version. Customer login and checkout verification require only an international-format WhatsApp number; a new customer account is created after the code is verified. Every subsequent customer sign-in also requires an OTP.
+
+The first startup seeds a clearly labeled demo restaurant, menu, promotion, and accounts. Seeding is safe to repeat. Restaurant and admin demo passwords are `Demo123!`; the demo customer's number is `+97450000002` and needs to be able to receive a code through your configured WhatsApp test/sender setup:
+
+| Portal | Sign-in URL | Demo identity |
 | --- | --- | --- |
-| Customer | [http://localhost:4200/login/customer](http://localhost:4200/login/customer) | `customer@kahbi.demo` |
+| Customer | [http://localhost:4200/login/customer](http://localhost:4200/login/customer) | WhatsApp `+97450000002` |
 | Restaurant owner — KABHI Demo Hotel | [http://localhost:4200/login/restaurant](http://localhost:4200/login/restaurant) | `restaurant@kahbi.demo` |
 | Restaurant owner — Pearl Garden Kitchen | [http://localhost:4200/login/restaurant](http://localhost:4200/login/restaurant) | `owner.pearl@kahbi.demo` |
 | Restaurant owner — Souq Flame Grill | [http://localhost:4200/login/restaurant](http://localhost:4200/login/restaurant) | `owner.souq@kahbi.demo` |
@@ -50,7 +64,7 @@ The public OpenStreetMap tile and Nominatim services have usage policies and are
 ## Working MVP flow
 
 - Browse approved restaurants and menus as a guest, search and filter by cuisine/status, and add menu items to a single-restaurant cart.
-- Check out with a guest's name, Qatar mobile/WhatsApp number, and delivery address, or sign in as a customer. The API validates restaurant and item availability, quantities, service radius, promotion and all amounts before creating an order. An idempotency key prevents duplicate submissions.
+- Customer sign-in is passwordless and requires a WhatsApp OTP every time. Before the first checkout order on a new customer session, verify the WhatsApp number; this creates the customer account and links that order to it. The API validates restaurant and item availability, quantities, service radius, promotion and all amounts before creating an order. An idempotency key prevents duplicate submissions.
 - Track a guest order by its order reference and phone number; signed-in customers have private order history and may rate completed orders.
 - Sign in as the restaurant owner to view only that restaurant's orders and advance valid order states through accept, prepare, ready, delivery, and completion. Menu availability can be changed from the restaurant view.
 - Sign in as admin to view live database metrics, manage restaurants from a searchable card directory with a separate profile/menu editor, approve/reject/suspend restaurants, and accept/reject or advance orders through their valid lifecycle. Billing snapshots and audit events are recorded for completed orders and administrative decisions.
@@ -61,14 +75,14 @@ The public OpenStreetMap tile and Nominatim services have usage policies and are
 
 - Currency is QAR and tax is 0 for the MVP. Fees, commission, SLA, cancellation window, service radius and currency are environment-configurable; historical order prices and commission are stored as snapshots.
 - Payment method is cash/direct payment to the restaurant. No order is marked paid without a payment provider confirmation.
-- WhatsApp runs in demo/log-only mode. The application records notification intent and makes no claim that an external message was sent or delivered. A WhatsApp Business provider, approved templates, webhook endpoint, credentials, and delivery/retry handling must be configured before enabling live messaging. Credentials belong only in server environment variables.
+- Customer OTP messages are sent through WhatsApp Cloud API using an approved Authentication template; provider credentials and the OTP signing secret belong only in server environment variables. Other restaurant/order notifications remain demo/log-only and are not represented as sent or delivered.
 - Customer location is selected on OpenStreetMap (or with browser geolocation), and restaurant free-delivery radius is checked both when browsing and when placing an order.
 - This MVP does not yet include saved customer addresses, bulk menu upload, password reset, admin user/permission management, or an online payment gateway. Restaurant profile editing and configurable settings UI are also deferred; operational rates and rules are configured through server environment variables.
 - Demo accounts are for local development only. Change the JWT secret and replace/remove demo accounts before deployment. Use HTTPS, a managed MongoDB, secret storage, backups, and an appropriate operational review before production use.
 
 ## Security and data boundaries
 
-Passwords are hashed, API access uses expiring signed tokens, and role checks are enforced on the server. Restaurant scope is derived from the authenticated restaurant account, and signed-in customer order access is derived from the authenticated customer. Guest tracking requires both order reference and phone number. The API validates inputs and uses server-calculated prices; frontend-supplied totals/ownership are ignored.
+Restaurant/admin passwords are hashed, customer OTP challenges are stored as HMAC hashes with expiry and attempt/rate limits, API access uses expiring signed tokens, and role checks are enforced on the server. Restaurant scope is derived from the authenticated restaurant account, and signed-in customer order access is derived from the authenticated customer. Guest tracking requires both order reference and phone number. The API validates inputs and uses server-calculated prices; frontend-supplied totals/ownership are ignored.
 
 ## Useful commands
 

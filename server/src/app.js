@@ -4,16 +4,31 @@ const helmet = require("helmet");
 const rateLimit = require("express-rate-limit");
 const jwt = require("jsonwebtoken");
 const mongoose = require("mongoose");
+const crypto = require("crypto");
 const {
   User, Restaurant, MenuItem, Order, Promotion, Rating, AuditLog, MessageLog, BillingTransaction,
-  Advertisement, AdvertisementEvent
+  Advertisement, AdvertisementEvent, WhatsappOtp, WhatsappSettings, WhatsappOtpControl
 } = require("./models");
 const { canTransition, haversineKm, isValidCoordinate, isValidServiceRadius, isWithinServiceArea } = require("./rules");
 const { validateImageDataUrl } = require("./images");
 const { writeAudit, logNotification, changeOrderStatus } = require("./services");
+const {
+  normalizeWhatsappPhone,
+  customerPhoneQuery,
+  hashOtp,
+  matchesOtp,
+  encryptWhatsappConfiguration,
+  decryptWhatsappConfiguration,
+  otpSigningSecret,
+  resolveOtpSigningSecret,
+  developmentOtpMode,
+  whatsappOtpConfiguration,
+  sendWhatsappOtp
+} = require("./whatsapp");
 
 const app = express();
 const secret = process.env.JWT_SECRET || "local-development-secret-change-before-deploy";
+const resolvedOtpSigningSecret = resolveOtpSigningSecret(process.env);
 const currency = process.env.CURRENCY || "QAR";
 const apiOrigin = process.env.CLIENT_ORIGIN || "http://localhost:4200";
 
@@ -21,6 +36,15 @@ app.use(helmet());
 app.use(cors({ origin: apiOrigin }));
 app.use(express.json({ limit: "512kb" }));
 app.use("/api/auth", rateLimit({ windowMs: 15 * 60 * 1000, limit: 100, standardHeaders: true, legacyHeaders: false }));
+const customerOtpRateLimit = rateLimit({ windowMs: 15 * 60 * 1000, limit: 10, standardHeaders: true, legacyHeaders: false });
+
+async function whatsappRuntimeEnvironment() {
+  const saved = await WhatsappSettings.findOne({ key: "primary" }).lean();
+  const savedConfiguration = saved
+    ? decryptWhatsappConfiguration(saved.encryptedConfiguration, process.env.WHATSAPP_CONFIG_ENCRYPTION_KEY)
+    : {};
+  return { ...process.env, ...savedConfiguration };
+}
 
 function asyncRoute(handler) {
   return (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next);
@@ -41,7 +65,11 @@ function auth(required = true) {
     }
     const user = await User.findById(decoded.sub);
     if (!user || user.status !== "ACTIVE") return res.status(401).json({ error: "This account is unavailable." });
+    if (user.role === "CUSTOMER" && decoded.amr !== "whatsapp_otp") {
+      return res.status(401).json({ error: "Customer sessions must be verified with WhatsApp OTP. Sign in again." });
+    }
     req.user = user;
+    req.authMethod = decoded.amr || "password";
     next();
   });
 }
@@ -57,15 +85,15 @@ function publicUser(user) {
   return {
     id: user._id,
     name: user.name,
-    email: user.email,
+    email: String(user.email || "").endsWith("@customer.kahbi.invalid") ? "" : user.email,
     phone: user.phone,
     role: user.role,
     demo: user.demo
   };
 }
 
-function issueToken(user) {
-  return jwt.sign({ sub: String(user._id), role: user.role }, secret, { expiresIn: "8h", issuer: "kahbi-api" });
+function issueToken(user, authMethod = "password") {
+  return jwt.sign({ sub: String(user._id), role: user.role, amr: authMethod }, secret, { expiresIn: "8h", issuer: "kahbi-api" });
 }
 
 function roundMoney(amount) {
@@ -94,16 +122,7 @@ async function restaurantForUser(user) {
 app.get("/api/health", (_req, res) => res.json({ status: "ok", service: "kahbi-api", currency }));
 
 app.post("/api/auth/register", asyncRoute(async (req, res) => {
-  const { name, email, password, phone } = req.body;
-  if (!name || !email || typeof password !== "string" || password.length < 10 || !validatePhone(phone || "")) {
-    return res.status(400).json({ error: "Name, a valid mobile number, email, and password of at least 10 characters are required." });
-  }
-  if (await User.exists({ email: String(email).toLowerCase() })) return res.status(409).json({ error: "An account already uses that email." });
-  const user = new User({ name, email, phone, role: "CUSTOMER" });
-  await user.setPassword(password);
-  await user.save();
-  await writeAudit({ user, action: "CUSTOMER_REGISTERED", entity: "User", entityId: user._id });
-  res.status(201).json({ token: issueToken(user), user: publicUser(user) });
+  res.status(410).json({ error: "Customer accounts are created after WhatsApp OTP verification. Request a code to continue." });
 }));
 
 app.post("/api/auth/register-restaurant", asyncRoute(async (req, res) => {
@@ -136,11 +155,128 @@ app.post("/api/auth/register-restaurant", asyncRoute(async (req, res) => {
   res.status(201).json({ token: issueToken(user), user: publicUser(user), message: "Application submitted for admin review." });
 }));
 
+app.post("/api/auth/customer-otp/request", customerOtpRateLimit, asyncRoute(async (req, res) => {
+  const phone = normalizeWhatsappPhone(req.body.phone);
+  const purpose = String(req.body.purpose || "LOGIN").toUpperCase();
+  if (!phone) return res.status(400).json({ error: "Enter your WhatsApp number in international format, for example +974 5XXX XXXX." });
+  if (!["LOGIN", "ORDER"].includes(purpose)) return res.status(400).json({ error: "Choose a valid WhatsApp verification purpose." });
+  const deliveryControl = await WhatsappOtpControl.findOne({ key: "primary" }).lean();
+  const deliveryEnabled = deliveryControl?.deliveryEnabled !== false;
+  const deliveryMode = developmentOtpMode(deliveryEnabled);
+  const whatsappEnvironment = {
+    ...(deliveryEnabled ? await whatsappRuntimeEnvironment() : process.env),
+    OTP_SIGNING_SECRET: resolvedOtpSigningSecret
+  };
+  if (deliveryEnabled) whatsappOtpConfiguration(whatsappEnvironment);
+  const signingSecret = otpSigningSecret(whatsappEnvironment);
+  const latest = await WhatsappOtp.findOne({ phone }).sort({ createdAt: -1 }).lean();
+  if (latest && Date.now() - latest.createdAt.getTime() < 60 * 1000) {
+    return res.status(429).json({ error: "Please wait one minute before requesting another WhatsApp code." });
+  }
+  const requestsThisHour = await WhatsappOtp.countDocuments({ phone, createdAt: { $gte: new Date(Date.now() - 60 * 60 * 1000) } });
+  if (requestsThisHour >= 5) return res.status(429).json({ error: "Too many WhatsApp codes were requested for this number. Try again in an hour." });
+
+  const code = String(crypto.randomInt(0, 1_000_000)).padStart(6, "0");
+  const challenge = new WhatsappOtp({
+    phone,
+    purpose,
+    codeHash: "",
+    expiresAt: new Date(Date.now() + 5 * 60 * 1000),
+    deleteAt: new Date(Date.now() + 24 * 60 * 60 * 1000)
+  });
+  challenge.codeHash = hashOtp(String(challenge._id), code, signingSecret).toString("hex");
+  await challenge.save();
+  if (deliveryMode === "WHATSAPP") {
+    try {
+      await sendWhatsappOtp(phone, code, whatsappEnvironment);
+    } catch (error) {
+      await WhatsappOtp.deleteOne({ _id: challenge._id });
+      throw error;
+    }
+  }
+  res.json({
+    challengeId: String(challenge._id),
+    message: deliveryMode === "DEVELOPMENT"
+      ? "WhatsApp delivery is disabled. Enter the development code shown here; it expires in 5 minutes."
+      : "A verification code was sent to your WhatsApp number. It expires in 5 minutes.",
+    deliveryMode,
+    ...(deliveryMode === "DEVELOPMENT" ? { developmentCode: code } : {})
+  });
+}));
+
+app.post("/api/auth/customer-otp/verify", asyncRoute(async (req, res) => {
+  const challengeId = String(req.body.challengeId || "");
+  const phone = normalizeWhatsappPhone(req.body.phone);
+  const code = String(req.body.code || "").trim();
+  if (!mongoose.isValidObjectId(challengeId) || !phone || !/^\d{6}$/.test(code)) {
+    return res.status(400).json({ error: "Enter the WhatsApp number and six-digit code from your message." });
+  }
+  const challengeQuery = {
+    _id: challengeId,
+    phone,
+    consumedAt: null,
+    expiresAt: { $gt: new Date() }
+  };
+  const challenge = await WhatsappOtp.findOneAndUpdate(
+    { ...challengeQuery, attempts: { $lt: 5 } },
+    { $inc: { attempts: 1 } },
+    { new: true }
+  );
+  if (!challenge) {
+    const exhausted = await WhatsappOtp.exists(challengeQuery);
+    return res.status(exhausted ? 429 : 400).json({
+      error: exhausted
+        ? "Too many incorrect codes. Request a new WhatsApp code."
+        : "That verification code is invalid or expired. Request a new code."
+    });
+  }
+  if (!matchesOtp(String(challenge._id), code, otpSigningSecret({ OTP_SIGNING_SECRET: resolvedOtpSigningSecret }), challenge.codeHash)) {
+    return res.status(400).json({ error: "That verification code is incorrect." });
+  }
+
+  const consumedChallenge = await WhatsappOtp.findOneAndUpdate(
+    { _id: challenge._id, consumedAt: null },
+    { $set: { consumedAt: new Date() } },
+    { new: true }
+  );
+  if (!consumedChallenge) return res.status(400).json({ error: "That verification code has already been used." });
+  let user = await User.findOne({ role: "CUSTOMER", phone: customerPhoneQuery(phone) });
+  if (user && user.status !== "ACTIVE") return res.status(403).json({ error: "This customer account is unavailable." });
+  if (!user) {
+    const phoneDigits = phone.slice(1);
+    user = new User({
+      name: "WhatsApp customer",
+      email: `whatsapp.${phoneDigits}@customer.kahbi.invalid`,
+      phone,
+      whatsappVerifiedAt: new Date(),
+      role: "CUSTOMER"
+    });
+    await user.setPassword(crypto.randomBytes(32).toString("hex"));
+    try {
+      await user.save();
+    } catch (error) {
+      if (error.code !== 11000) throw error;
+      user = await User.findOne({ role: "CUSTOMER", phone: customerPhoneQuery(phone) });
+      if (!user) throw error;
+    }
+    await writeAudit({ user, action: "CUSTOMER_REGISTERED_WITH_WHATSAPP", entity: "User", entityId: user._id });
+  } else {
+    user.phone = phone;
+    user.whatsappVerifiedAt = new Date();
+    await user.save();
+  }
+  await writeAudit({ user, action: "CUSTOMER_WHATSAPP_LOGIN", entity: "User", entityId: user._id, details: { purpose: consumedChallenge.purpose } });
+  res.json({ token: issueToken(user, "whatsapp_otp"), user: publicUser(user), purpose: consumedChallenge.purpose });
+}));
+
 app.post("/api/auth/login", asyncRoute(async (req, res) => {
   const email = String(req.body.email || "").toLowerCase().trim();
   const user = await User.findOne({ email }).select("+passwordHash");
   if (!user || !(await user.verifyPassword(String(req.body.password || "")))) {
     return res.status(401).json({ error: "Email or password is incorrect." });
+  }
+  if (user.role === "CUSTOMER") {
+    return res.status(403).json({ error: "Customer accounts sign in with a WhatsApp verification code." });
   }
   const portal = String(req.body.portal || "").toUpperCase();
   if (portal && !["CUSTOMER", "RESTAURANT", "ADMIN"].includes(portal)) {
@@ -243,14 +379,13 @@ app.post("/api/orders/track", asyncRoute(async (req, res) => {
 app.post("/api/orders", auth(false), asyncRoute(async (req, res) => {
   const { restaurantId, items, address, latitude, longitude, promotionCode } = req.body;
   if (req.user && req.user.role !== "CUSTOMER") return res.status(403).json({ error: "Only customer accounts can place orders." });
+  if (!req.user) return res.status(401).json({ error: "Verify your WhatsApp number before placing an order." });
   const idempotencyKey = String(req.get("Idempotency-Key") || req.body.idempotencyKey || "").trim();
   if (!idempotencyKey || idempotencyKey.length > 100) return res.status(400).json({ error: "A valid order request key is required." });
   const previous = await Order.findOne({ idempotencyKey });
   if (previous) {
     const signedOwner = req.user && previous.customerId && String(previous.customerId) === String(req.user._id);
-    const guestPhoneMatch = !previous.customerId &&
-      String(previous.guest.phone).replace(/[^\d+]/g, "") === String(req.body.guestPhone || "").replace(/[^\d+]/g, "");
-    if (!signedOwner && !guestPhoneMatch) return res.status(409).json({ error: "This order request key has already been used." });
+    if (!signedOwner) return res.status(409).json({ error: "This order request key has already been used." });
     return res.status(200).json({ order: previous, duplicate: true });
   }
   if (!mongoose.isValidObjectId(restaurantId)) return res.status(400).json({ error: "Choose a valid restaurant." });
@@ -261,12 +396,6 @@ app.post("/api/orders", auth(false), asyncRoute(async (req, res) => {
     return res.status(400).json({ error: "Enter a delivery address with at least 5 characters." });
   }
   const signedCustomer = req.user && req.user.role === "CUSTOMER" ? req.user : null;
-  const guestName = String(req.body.guestName || "").trim();
-  const guestPhone = String(req.body.guestPhone || "").trim().replace(/[^\d+]/g, "");
-  if (!signedCustomer && !guestName) return res.status(400).json({ error: "Enter your name for guest checkout." });
-  if (!signedCustomer && !validatePhone(guestPhone)) {
-    return res.status(400).json({ error: "Enter a valid Qatar mobile or WhatsApp number." });
-  }
   const restaurant = await Restaurant.findOne({ _id: restaurantId, status: "APPROVED" });
   if (!restaurant) return res.status(404).json({ error: "This restaurant is not available for ordering." });
   if (restaurant.availability !== "OPEN") return res.status(409).json({ error: "This restaurant is not accepting orders right now." });
@@ -334,7 +463,7 @@ app.post("/api/orders", auth(false), asyncRoute(async (req, res) => {
     reference,
     idempotencyKey,
     customerId: signedCustomer ? signedCustomer._id : null,
-    guest: signedCustomer ? { name: signedCustomer.name, phone: String(signedCustomer.phone).replace(/[^\d+]/g, "") } : { name: guestName, phone: guestPhone },
+    guest: { name: signedCustomer.name, phone: String(signedCustomer.phone).replace(/[^\d+]/g, "") },
     restaurantId: restaurant._id,
     restaurantName: restaurant.name,
     items: orderItems,
@@ -358,7 +487,7 @@ app.post("/api/orders", auth(false), asyncRoute(async (req, res) => {
   }
   await writeAudit({ user: signedCustomer, action: "ORDER_CREATED", entity: "Order", entityId: order._id, details: { reference, restaurantId: restaurant._id, total } });
   await logNotification(order, "NEW_ORDER_RESTAURANT", restaurant.whatsapp || restaurant.phone);
-  await logNotification(order, "ORDER_CREATED_CUSTOMER", signedCustomer ? signedCustomer.phone : guestPhone);
+  await logNotification(order, "ORDER_CREATED_CUSTOMER", signedCustomer.phone);
   res.status(201).json({ order });
 }));
 
@@ -576,6 +705,107 @@ app.get("/api/admin/summary", auth(), roles("ADMIN", "SUPER_ADMIN"), asyncRoute(
     whatsappFailures
   };
   res.json({ metrics, orders, pendingReview, recentAudit, currency });
+}));
+
+app.get("/api/admin/whatsapp-config", auth(), roles("ADMIN", "SUPER_ADMIN"), asyncRoute(async (_req, res) => {
+  const environment = await whatsappRuntimeEnvironment();
+  const [saved, deliveryControl] = await Promise.all([
+    WhatsappSettings.exists({ key: "primary" }),
+    WhatsappOtpControl.findOne({ key: "primary" }).lean()
+  ]);
+  const hasAccessToken = Boolean(environment.WHATSAPP_ACCESS_TOKEN);
+  const hasPhoneNumberId = Boolean(environment.WHATSAPP_PHONE_NUMBER_ID);
+  const hasTemplate = Boolean(environment.WHATSAPP_OTP_TEMPLATE);
+  const otpSecretConfigured = Boolean(resolvedOtpSigningSecret && resolvedOtpSigningSecret.length >= 32);
+  const otpSecretPersistent = Boolean(process.env.OTP_SIGNING_SECRET && process.env.OTP_SIGNING_SECRET.length >= 32);
+  res.json({
+    configured: hasAccessToken && hasPhoneNumberId && hasTemplate && otpSecretConfigured,
+    source: saved ? "admin" : "environment",
+    otpDeliveryEnabled: deliveryControl?.deliveryEnabled !== false,
+    developmentOtpAllowed: process.env.NODE_ENV === "development",
+    accessTokenConfigured: hasAccessToken,
+    phoneNumberIdConfigured: hasPhoneNumberId,
+    otpSecretConfigured,
+    otpSecretPersistent,
+    encryptionKeyConfigured: Boolean(process.env.WHATSAPP_CONFIG_ENCRYPTION_KEY && process.env.WHATSAPP_CONFIG_ENCRYPTION_KEY.length >= 32),
+    templateName: environment.WHATSAPP_OTP_TEMPLATE || "kahbi_customer_otp",
+    language: environment.WHATSAPP_OTP_LANGUAGE || "en_US",
+    graphVersion: environment.WHATSAPP_GRAPH_API_VERSION || "v23.0"
+  });
+}));
+
+app.put("/api/admin/whatsapp-config/otp-delivery", auth(), roles("ADMIN", "SUPER_ADMIN"), asyncRoute(async (req, res) => {
+  if (typeof req.body.enabled !== "boolean") {
+    return res.status(400).json({ error: "Choose whether WhatsApp OTP delivery should be enabled." });
+  }
+  if (!req.body.enabled && process.env.NODE_ENV !== "development") {
+    return res.status(403).json({ error: "WhatsApp OTP delivery can only be disabled when NODE_ENV=development." });
+  }
+  await WhatsappOtpControl.findOneAndUpdate(
+    { key: "primary" },
+    { $set: { deliveryEnabled: req.body.enabled, updatedBy: req.user._id } },
+    { upsert: true, new: true, runValidators: true }
+  );
+  await writeAudit({
+    user: req.user,
+    action: req.body.enabled ? "WHATSAPP_OTP_DELIVERY_ENABLED" : "WHATSAPP_OTP_DELIVERY_DISABLED",
+    entity: "WhatsappOtpControl",
+    details: { deliveryEnabled: req.body.enabled }
+  });
+  res.json({
+    deliveryEnabled: req.body.enabled,
+    message: req.body.enabled
+      ? "WhatsApp OTP delivery is enabled."
+      : "WhatsApp OTP delivery is disabled. Development codes will be shown in the app."
+  });
+}));
+
+app.put("/api/admin/whatsapp-config", auth(), roles("ADMIN", "SUPER_ADMIN"), asyncRoute(async (req, res) => {
+  const encryptionKey = process.env.WHATSAPP_CONFIG_ENCRYPTION_KEY;
+  const existing = await WhatsappSettings.findOne({ key: "primary" }).lean();
+  const savedConfiguration = existing
+    ? decryptWhatsappConfiguration(existing.encryptedConfiguration, encryptionKey)
+    : {};
+  const effective = { ...process.env, ...savedConfiguration };
+  const accessToken = typeof req.body.accessToken === "string" && req.body.accessToken.trim()
+    ? req.body.accessToken.trim()
+    : effective.WHATSAPP_ACCESS_TOKEN;
+  const phoneNumberId = typeof req.body.phoneNumberId === "string" && req.body.phoneNumberId.trim()
+    ? req.body.phoneNumberId.trim()
+    : effective.WHATSAPP_PHONE_NUMBER_ID;
+  const templateName = typeof req.body.templateName === "string" && req.body.templateName.trim()
+    ? req.body.templateName.trim()
+    : effective.WHATSAPP_OTP_TEMPLATE || "kahbi_customer_otp";
+  const language = typeof req.body.language === "string" && req.body.language.trim()
+    ? req.body.language.trim()
+    : effective.WHATSAPP_OTP_LANGUAGE || "en_US";
+  const graphVersion = typeof req.body.graphVersion === "string" && req.body.graphVersion.trim()
+    ? req.body.graphVersion.trim()
+    : effective.WHATSAPP_GRAPH_API_VERSION || "v23.0";
+  if (!accessToken || accessToken.length > 4096) return res.status(400).json({ error: "Enter a valid WhatsApp access token." });
+  if (!/^\d{5,30}$/.test(phoneNumberId || "")) return res.status(400).json({ error: "Enter the numeric WhatsApp Phone Number ID from Meta API Setup." });
+  if (!/^[a-zA-Z0-9_]{1,512}$/.test(templateName)) return res.status(400).json({ error: "Enter a valid approved WhatsApp template name." });
+  if (!/^[a-z]{2}_[A-Z]{2}$/.test(language)) return res.status(400).json({ error: "Enter a template language code such as en_US." });
+  if (!/^v\d+\.\d+$/.test(graphVersion)) return res.status(400).json({ error: "Enter a Graph API version in the format vNN.0." });
+
+  const encryptedConfiguration = encryptWhatsappConfiguration({
+    WHATSAPP_ACCESS_TOKEN: accessToken,
+    WHATSAPP_PHONE_NUMBER_ID: phoneNumberId,
+    WHATSAPP_OTP_TEMPLATE: templateName,
+    WHATSAPP_OTP_LANGUAGE: language,
+    WHATSAPP_GRAPH_API_VERSION: graphVersion
+  }, encryptionKey);
+  await WhatsappSettings.findOneAndUpdate(
+    { key: "primary" },
+    { $set: { encryptedConfiguration, updatedBy: req.user._id } },
+    { upsert: true, new: true, runValidators: true }
+  );
+  await writeAudit({ user: req.user, action: "WHATSAPP_CONFIGURATION_UPDATED", entity: "WhatsappSettings", details: { source: "admin" } });
+  res.json({
+    message: "WhatsApp settings saved securely. Restarting the app is not required.",
+    configured: Boolean(accessToken && phoneNumberId && templateName &&
+      resolvedOtpSigningSecret && resolvedOtpSigningSecret.length >= 32)
+  });
 }));
 
 app.get("/api/admin/restaurants", auth(), roles("ADMIN", "SUPER_ADMIN"), asyncRoute(async (req, res) => {
@@ -913,7 +1143,7 @@ app.use((error, _req, res, _next) => {
   if (error.name === "ValidationError") return res.status(400).json({ error: "Some submitted information is invalid." });
   const status = Number(error.status) || 500;
   if (status >= 500) console.error("API request failed:", error.message);
-  res.status(status).json({ error: status >= 500 ? "Something went wrong. Please try again." : error.message });
+  res.status(status).json({ error: status >= 500 && !error.expose ? "Something went wrong. Please try again." : error.message });
 });
 
 module.exports = app;

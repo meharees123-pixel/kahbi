@@ -179,7 +179,7 @@ async function seed() {
       restaurantId: additionalRestaurant._id
     });
   }
-  console.log("KABHI demo data ready. All demo account passwords are Demo123! (local use only).");
+  console.log("KABHI demo data ready. Restaurant/admin demo passwords are Demo123! (local use only). Customer sign-in uses WhatsApp OTP.");
   await mongoose.disconnect();
 }
 
