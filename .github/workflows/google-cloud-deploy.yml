@@ -44,13 +44,10 @@ jobs:
     environment: production
     permissions:
       contents: read
-      id-token: write
     env:
       GCP_PROJECT_ID: ${{ vars.GCP_PROJECT_ID }}
       GCP_REGION: ${{ vars.GCP_REGION }}
       GAR_REPOSITORY: ${{ vars.GAR_REPOSITORY }}
-      WIF_PROVIDER: ${{ vars.GCP_WIF_PROVIDER }}
-      DEPLOYER_SERVICE_ACCOUNT: ${{ vars.GCP_DEPLOYER_SERVICE_ACCOUNT }}
       RUNTIME_SERVICE_ACCOUNT: ${{ vars.GCP_RUNTIME_SERVICE_ACCOUNT }}
       MONGODB_SECRET: ${{ vars.GCP_MONGODB_SECRET }}
       JWT_SECRET: ${{ vars.GCP_JWT_SECRET }}
@@ -62,7 +59,7 @@ jobs:
       - name: Validate deployment configuration
         shell: bash
         run: |
-          required=(GCP_PROJECT_ID GCP_REGION GAR_REPOSITORY WIF_PROVIDER DEPLOYER_SERVICE_ACCOUNT RUNTIME_SERVICE_ACCOUNT MONGODB_SECRET JWT_SECRET OTP_SIGNING_SECRET WHATSAPP_ENCRYPTION_SECRET)
+          required=(GCP_PROJECT_ID GCP_REGION GAR_REPOSITORY RUNTIME_SERVICE_ACCOUNT MONGODB_SECRET JWT_SECRET OTP_SIGNING_SECRET WHATSAPP_ENCRYPTION_SECRET)
           missing=()
           for key in "${required[@]}"; do
             if [[ -z "${!key}" ]]; then missing+=("$key"); fi
@@ -72,11 +69,10 @@ jobs:
             exit 1
           fi
 
-      - name: Authenticate to Google Cloud with Workload Identity Federation
+      - name: Authenticate to Google Cloud
         uses: google-github-actions/auth@v2
         with:
-          workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
-          service_account: ${{ vars.GCP_DEPLOYER_SERVICE_ACCOUNT }}
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
           project_id: ${{ vars.GCP_PROJECT_ID }}
 
       - name: Set up gcloud

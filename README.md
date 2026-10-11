@@ -59,7 +59,7 @@ Production API: `npm start`. Production Angular build: `npm run build`.
 
 `.github/workflows/google-cloud-deploy.yml` tests and builds on pull requests to `main`, then builds and deploys the API and production Angular/Nginx frontend to Cloud Run after changes reach `main`. Deployment is intentionally gated until `KAHBI_GCP_DEPLOY_ENABLED=true` is added as a GitHub Actions repository variable and the Google Cloud settings are configured. The frontend serves the Angular production bundle and proxies `/api` requests to the API service; local development continues to use `localhost:3000`.
 
-See [Google Cloud deployment setup](.github/DEPLOYMENT.md) for required GitHub variables, Workload Identity Federation, Artifact Registry, Cloud Run and Secret Manager setup. No service-account key or database credential belongs in Git. Production secrets are injected from Secret Manager. The release workflow does not seed demo accounts or reset passwords.
+See [Google Cloud deployment setup](.github/DEPLOYMENT.md) for required GitHub variables, the `GCP_SA_KEY` GitHub Actions secret, Artifact Registry, Cloud Run and Secret Manager setup. No service-account key or database credential belongs in Git. Production secrets are injected from Secret Manager. The release workflow does not seed demo accounts or reset passwords.
 
 ## Free-delivery locations and OpenStreetMap
 
