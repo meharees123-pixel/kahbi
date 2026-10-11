@@ -4,14 +4,16 @@ The GitHub Actions workflow deploys the API and production frontend to Cloud Run
 
 ## Google Cloud resources
 
-Choose a Google Cloud project and region, then enable the IAM, IAM Credentials, Security Token Service, Cloud Run, Artifact Registry, and Secret Manager APIs. Create a Docker-format Artifact Registry repository in the chosen region.
+Choose a Google Cloud project and region, then enable the Cloud Run, Artifact Registry, and Secret Manager APIs. Create a Docker-format Artifact Registry repository in the chosen region.
 
-Use Workload Identity Federation (WIF) rather than a downloaded service-account key:
+## Deployment service account
 
-- Create a workload identity pool and GitHub OIDC provider. Map the GitHub repository and ref claims (for example, `attribute.repository=assertion.repository` and `attribute.ref=assertion.ref`). Restrict the provider's attribute condition to repository `meharees123-pixel/kahbi` and ref `refs/heads/main`.
-- Create a deployer service account. Grant it Artifact Registry Writer and Cloud Run Admin. Grant it Service Account User on the runtime service account.
+- Create a dedicated deployer service account in the selected project and create a JSON key for it.
+- Grant the deployer `roles/artifactregistry.writer` and `roles/run.admin` on the project. Grant it `roles/iam.serviceAccountUser` on the runtime service account only.
 - Create a separate runtime service account for Cloud Run. Grant it Secret Manager Secret Accessor only on the KABHI secrets listed below.
-- Grant `roles/iam.workloadIdentityUser` on the deployer account to the repository principal set from this workload identity pool, so the GitHub workflow can impersonate it without a service-account key.
+- Add the service-account JSON key to GitHub **Settings > Secrets and variables > Actions > Secrets** as `GCP_SA_KEY`. Do not commit the key, place it in a repository variable, or send it in chat.
+
+Service-account keys are long-lived credentials. Prefer Workload Identity Federation when available. If using this key-based setup, use a dedicated least-privilege service account, restrict access to the GitHub repository, rotate the key regularly, and revoke it immediately if exposed.
 
 Create these secrets in Secret Manager and add a version to each. Do not put their values in GitHub repository variables or commit them to the repository.
 
@@ -34,8 +36,6 @@ In **Settings > Secrets and variables > Actions > Variables**, add:
 | `GCP_PROJECT_ID` | Google Cloud project ID | Yes |
 | `GCP_REGION` | For example, `me-central1` | Yes |
 | `GAR_REPOSITORY` | Artifact Registry repository name in that region | Yes |
-| `GCP_WIF_PROVIDER` | Full `projects/.../locations/global/workloadIdentityPools/.../providers/...` resource name | Yes |
-| `GCP_DEPLOYER_SERVICE_ACCOUNT` | Deployer service account email | Yes |
 | `GCP_RUNTIME_SERVICE_ACCOUNT` | Cloud Run runtime service account email | Yes |
 | `GCP_MONGODB_SECRET` | Secret Manager secret ID holding the MongoDB URI | Yes |
 | `GCP_JWT_SECRET` | Secret Manager secret ID holding the JWT secret | Yes |
@@ -44,7 +44,7 @@ In **Settings > Secrets and variables > Actions > Variables**, add:
 | `GCP_API_SERVICE` | Cloud Run API service name; defaults to `kahbi-api` | No |
 | `GCP_WEB_SERVICE` | Cloud Run frontend service name; defaults to `kahbi-web` | No |
 
-The WIF provider condition should limit deployments to this repository's `main` branch. The workflow never receives a long-lived service-account key. Its deploy job remains skipped until `KAHBI_GCP_DEPLOY_ENABLED` is `true`; once enabled, missing configuration causes an explicit failure before authentication.
+Add the deployment service-account JSON key as the GitHub Actions secret `GCP_SA_KEY`. Restrict repository write access and protect the `main` branch because pushes to `main` can use this credential. The deploy job remains skipped until `KAHBI_GCP_DEPLOY_ENABLED` is `true`; once enabled, missing repository variables cause an explicit failure before authentication.
 
 ## Deployment behavior and first release
 
@@ -54,4 +54,4 @@ The API service is publicly reachable, with application authentication and role 
 
 The workflow deliberately does not run the demo seeder against production: seeding would create demo accounts and can reset their passwords. Provision production data and the first administrator using an approved, secure process before opening the service to users. Configure WhatsApp Cloud API settings from the admin portal after creating that administrator. The deployment workflow only builds and deploys; it does not create or change database records.
 
-Before enabling the deploy gate, share the project ID, region, Artifact Registry repository, WIF provider and service-account setup, and Secret Manager secret IDs so the configuration can be checked against your Google Cloud resources. Never send secret values in chat.
+Before enabling the deploy gate, configure the project ID, region, Artifact Registry repository, runtime service account, deployer JSON key secret, and Secret Manager secret IDs. Never send secret values or service-account key JSON in chat.
