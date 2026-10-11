@@ -2,7 +2,8 @@ import { CommonModule } from '@angular/common';
 import { HttpClient, HttpHeaders } from '@angular/common/http';
 import { ChangeDetectorRef, Component, OnInit } from '@angular/core';
 import { FormsModule } from '@angular/forms';
-import { finalize } from 'rxjs';
+import * as L from 'leaflet';
+import { finalize, firstValueFrom } from 'rxjs';
 import { LoadingIndicatorService } from './loading-indicator.service';
 
 interface User {
@@ -25,6 +26,9 @@ interface Restaurant {
   address: string;
   phone?: string;
   email?: string;
+  latitude?: number | null;
+  longitude?: number | null;
+  serviceRadiusKm?: number | null;
   category: string;
   preparationMinutes: number;
   minOrder: number;
@@ -110,6 +114,13 @@ interface BillingRecord {
   createdAt: string;
 }
 
+interface MapPoint {
+  lat: number;
+  lng: number;
+}
+
+type LoginPortal = 'CUSTOMER' | 'RESTAURANT' | 'ADMIN';
+
 @Component({
   selector: 'kahbi-root',
   standalone: true,
@@ -122,7 +133,17 @@ export class AppComponent implements OnInit {
   private readonly maxImagePixels = 40_000_000;
   private readonly api = 'http://localhost:3000/api';
   private readonly tokenKey = 'kahbi.session';
+  private readonly deliveryLocationKeys = {
+    latitude: 'kahbi.delivery.latitude',
+    longitude: 'kahbi.delivery.longitude',
+    label: 'kahbi.delivery.label'
+  };
+  private mapPicker: L.Map | null = null;
+  private mapMarker: L.CircleMarker | null = null;
+  private mapGeocodeTimer: ReturnType<typeof setTimeout> | null = null;
+  private mapSelectionRequest = 0;
   view = 'home';
+  loginPortal: LoginPortal = 'CUSTOMER';
   user: User | null = null;
   restaurants: Restaurant[] = [];
   menu: MenuItem[] = [];
@@ -146,7 +167,8 @@ export class AppComponent implements OnInit {
   billingTransactions: BillingRecord[] = [];
   restaurantBilling: BillingRecord[] = [];
   customers: CustomerRecord[] = [];
-  error = '';
+  private errorDismissTimer: ReturnType<typeof setTimeout> | null = null;
+  private errorMessage = '';
   notice = '';
   loading = false;
   search = '';
@@ -156,6 +178,14 @@ export class AppComponent implements OnInit {
   deliveryAddress = '';
   deliveryLatitude: number | null = null;
   deliveryLongitude: number | null = null;
+  deliveryLocationLabel = '';
+  mapPickerOpen = false;
+  mapPickerPurpose: 'delivery' | 'signupRestaurant' | 'adminCreateRestaurant' | 'adminEditRestaurant' = 'delivery';
+  mapSelection: MapPoint | null = null;
+  mapSelectionAddress = '';
+  mapLoading = false;
+  mapError = '';
+  mapNotice = '';
   promotionCode = '';
   trackReference = '';
   trackPhone = '';
@@ -168,6 +198,9 @@ export class AppComponent implements OnInit {
   signupRestaurantName = '';
   signupCuisine = '';
   signupAddress = '';
+  signupLatitude: number | null = null;
+  signupLongitude: number | null = null;
+  signupServiceRadiusKm = 5;
   newItemName = '';
   newItemCategory = '';
   newItemPrice = 0;
@@ -187,6 +220,9 @@ export class AppComponent implements OnInit {
   newAdminRestaurantDescription = '';
   newAdminRestaurantPhone = '';
   newAdminRestaurantEmail = '';
+  newAdminRestaurantLatitude: number | null = null;
+  newAdminRestaurantLongitude: number | null = null;
+  newAdminRestaurantRadiusKm = 5;
   adminRestaurantImageDraft = '';
   adminMenuImageDrafts: Record<string, string> = {};
   newAdminItemName = '';
@@ -201,7 +237,42 @@ export class AppComponent implements OnInit {
     readonly loadingIndicator: LoadingIndicatorService
   ) {}
 
+  get error(): string {
+    return this.errorMessage;
+  }
+
+  set error(message: string) {
+    this.errorMessage = message;
+    if (this.errorDismissTimer) {
+      clearTimeout(this.errorDismissTimer);
+      this.errorDismissTimer = null;
+    }
+    if (message) {
+      this.errorDismissTimer = window.setTimeout(() => {
+        this.errorMessage = '';
+        this.errorDismissTimer = null;
+        this.changeDetector.markForCheck();
+      }, 6000);
+    }
+  }
+
   ngOnInit(): void {
+    this.applyLocationRoute();
+    window.addEventListener('popstate', () => {
+      this.applyLocationRoute();
+      this.changeDetector.markForCheck();
+    });
+    const savedLatitude = localStorage.getItem(this.deliveryLocationKeys.latitude);
+    const savedLongitude = localStorage.getItem(this.deliveryLocationKeys.longitude);
+    if (savedLatitude !== null && savedLongitude !== null) {
+      const latitude = Number(savedLatitude);
+      const longitude = Number(savedLongitude);
+      if (this.isCoordinate(latitude, -90, 90) && this.isCoordinate(longitude, -180, 180)) {
+        this.deliveryLatitude = latitude;
+        this.deliveryLongitude = longitude;
+        this.deliveryLocationLabel = localStorage.getItem(this.deliveryLocationKeys.label) || 'Selected delivery location';
+      }
+    }
     const token = localStorage.getItem(this.tokenKey);
     if (token) {
       this.http.get<{ user: User }>(`${this.api}/auth/me`, { headers: this.headers() }).subscribe({
@@ -245,6 +316,14 @@ export class AppComponent implements OnInit {
     return this.user?.role === 'ADMIN' || this.user?.role === 'SUPER_ADMIN';
   }
 
+  get isSelectedRestaurantInDeliveryRange(): boolean {
+    const restaurant = this.selectedRestaurant;
+    if (this.deliveryLatitude === null || this.deliveryLongitude === null ||
+        restaurant?.latitude == null || restaurant.longitude == null ||
+        restaurant.serviceRadiusKm == null) return false;
+    return this.distanceKm(this.deliveryLatitude, this.deliveryLongitude, restaurant.latitude, restaurant.longitude) <= restaurant.serviceRadiusKm;
+  }
+
   get filteredAdminRestaurants(): Restaurant[] {
     const query = this.adminRestaurantSearch.trim().toLowerCase();
     if (!query) return this.adminRestaurants;
@@ -265,6 +344,7 @@ export class AppComponent implements OnInit {
   }
 
   private loadRoleLanding(): void {
+    window.history.replaceState(null, '', '/');
     if (this.user?.role === 'CUSTOMER') {
       this.view = 'home';
       this.loadRestaurants();
@@ -273,6 +353,55 @@ export class AppComponent implements OnInit {
     } else if (this.user?.role === 'ADMIN' || this.user?.role === 'SUPER_ADMIN') {
       this.loadAdmin();
     } else {
+      this.view = 'home';
+      this.loadRestaurants();
+    }
+  }
+
+  openLogin(portal: LoginPortal): void {
+    this.loginPortal = portal;
+    this.signupRestaurant = portal === 'RESTAURANT';
+    this.view = 'login';
+    this.error = '';
+    window.history.pushState(null, '', `/login/${portal.toLowerCase()}`);
+  }
+
+  openSignup(): void {
+    if (this.loginPortal === 'ADMIN') return;
+    this.signupRestaurant = this.loginPortal === 'RESTAURANT';
+    this.view = 'signup';
+    this.error = '';
+  }
+
+  navigateHome(): void {
+    if (this.user) {
+      this.loadRoleLanding();
+      return;
+    }
+    this.loginPortal = 'CUSTOMER';
+    this.signupRestaurant = false;
+    this.view = 'home';
+    window.history.pushState(null, '', '/');
+    this.loadRestaurants();
+  }
+
+  private applyLocationRoute(): void {
+    const route = window.location.pathname.replace(/\/+$/, '') || '/';
+    const portalByRoute: Record<string, LoginPortal> = {
+      '/login/customer': 'CUSTOMER',
+      '/login/restaurant': 'RESTAURANT',
+      '/login/admin': 'ADMIN'
+    };
+    const portal = portalByRoute[route];
+    if (portal) {
+      this.loginPortal = portal;
+      this.signupRestaurant = portal === 'RESTAURANT';
+      this.view = 'login';
+      return;
+    }
+    if (route === '/' && !this.user && (this.view === 'login' || this.view === 'signup')) {
+      this.loginPortal = 'CUSTOMER';
+      this.signupRestaurant = false;
       this.view = 'home';
       this.loadRestaurants();
     }
@@ -304,27 +433,227 @@ export class AppComponent implements OnInit {
 
   chooseLocation(): void {
     if (!navigator.geolocation) {
-      this.notice = 'Location is unavailable in this browser. Enter your delivery address at checkout.';
+      this.openMapPicker('delivery');
       return;
     }
     navigator.geolocation.getCurrentPosition(
       (position) => {
-        this.deliveryLatitude = position.coords.latitude;
-        this.deliveryLongitude = position.coords.longitude;
+        this.setDeliveryLocation(position.coords.latitude, position.coords.longitude, 'Current location');
         this.notice = 'Nearby restaurants updated for your location.';
         this.loadRestaurants();
       },
       () => {
-        this.notice = 'Location permission was not granted. You can still browse and enter an address manually.';
+        this.notice = 'Location permission was not granted. Choose your delivery point on the map instead.';
+        this.openMapPicker('delivery');
       },
       { timeout: 8000 }
     );
   }
 
+  openMapPicker(purpose: AppComponent['mapPickerPurpose']): void {
+    this.mapPickerPurpose = purpose;
+    this.mapPickerOpen = true;
+    this.mapSelection = this.savedMapPoint(purpose);
+    this.mapSelectionAddress = this.mapSelection
+      ? purpose === 'delivery' ? this.deliveryLocationLabel
+        : purpose === 'signupRestaurant' ? this.signupAddress
+          : purpose === 'adminCreateRestaurant' ? this.newAdminRestaurantAddress
+            : this.adminRestaurant?.address || ''
+      : '';
+    this.mapError = '';
+    this.mapNotice = '';
+    this.mapLoading = true;
+    this.changeDetector.markForCheck();
+    window.setTimeout(() => void this.initializeMapPicker(), 0);
+  }
+
+  closeMapPicker(): void {
+    this.mapPickerOpen = false;
+    this.mapSelectionRequest += 1;
+    this.mapPicker?.remove();
+    this.mapPicker = null;
+    this.mapMarker = null;
+    if (this.mapGeocodeTimer) {
+      clearTimeout(this.mapGeocodeTimer);
+      this.mapGeocodeTimer = null;
+    }
+  }
+
+  useCurrentLocationInPicker(): void {
+    if (!navigator.geolocation) {
+      this.mapNotice = 'Location services are unavailable in this browser. Click your location on the map.';
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        const point = { lat: position.coords.latitude, lng: position.coords.longitude };
+        this.mapPicker?.setView([point.lat, point.lng], 15);
+        this.setMapSelection(point);
+      },
+      () => {
+        this.mapNotice = 'Location permission was not granted. Click the correct location on the map.';
+        this.changeDetector.markForCheck();
+      },
+      { timeout: 10000 }
+    );
+  }
+
+  confirmMapSelection(): void {
+    if (!this.mapSelection) return;
+    const { lat, lng } = this.mapSelection;
+    const locationLabel = this.mapSelectionAddress || `${lat.toFixed(5)}, ${lng.toFixed(5)}`;
+    if (this.mapPickerPurpose === 'delivery') {
+      const previousLabel = this.deliveryLocationLabel;
+      const addressFollowsPin = this.deliveryAddress.trim() === previousLabel && !!previousLabel;
+      this.setDeliveryLocation(lat, lng, locationLabel);
+      if (addressFollowsPin) {
+        this.deliveryAddress = locationLabel;
+      }
+      this.notice = 'Showing restaurants that deliver to your selected location.';
+      this.loadRestaurants();
+    } else if (this.mapPickerPurpose === 'signupRestaurant') {
+      this.signupLatitude = lat;
+      this.signupLongitude = lng;
+      this.signupAddress = locationLabel;
+    } else if (this.mapPickerPurpose === 'adminCreateRestaurant') {
+      this.newAdminRestaurantLatitude = lat;
+      this.newAdminRestaurantLongitude = lng;
+      this.newAdminRestaurantAddress = locationLabel;
+    } else if (this.adminRestaurant) {
+      this.adminRestaurant.latitude = lat;
+      this.adminRestaurant.longitude = lng;
+      this.adminRestaurant.address = locationLabel;
+    }
+    this.closeMapPicker();
+    this.changeDetector.markForCheck();
+  }
+
+  private setDeliveryLocation(latitude: number, longitude: number, label: string): void {
+    this.deliveryLatitude = latitude;
+    this.deliveryLongitude = longitude;
+    this.deliveryLocationLabel = label;
+    localStorage.setItem(this.deliveryLocationKeys.latitude, String(latitude));
+    localStorage.setItem(this.deliveryLocationKeys.longitude, String(longitude));
+    localStorage.setItem(this.deliveryLocationKeys.label, label);
+  }
+
+  private isCoordinate(value: number, min: number, max: number): boolean {
+    return Number.isFinite(value) && value >= min && value <= max;
+  }
+
+  private distanceKm(latitude1: number, longitude1: number, latitude2: number, longitude2: number): number {
+    const radians = (degrees: number) => degrees * Math.PI / 180;
+    const latitudeDelta = radians(latitude2 - latitude1);
+    const longitudeDelta = radians(longitude2 - longitude1);
+    const a = Math.sin(latitudeDelta / 2) ** 2 +
+      Math.cos(radians(latitude1)) * Math.cos(radians(latitude2)) * Math.sin(longitudeDelta / 2) ** 2;
+    return 6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  }
+
+  private async initializeMapPicker(): Promise<void> {
+    try {
+      if (!this.mapPickerOpen) return;
+      const element = document.getElementById('location-picker-map');
+      if (!element) throw new Error('The location map could not be initialized. Close it and try again.');
+      const center = this.mapInitialPoint();
+      this.mapPicker = L.map(element, { zoomControl: true, scrollWheelZoom: false })
+        .setView([center.lat, center.lng], this.mapSelection ? 15 : 11);
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        maxZoom: 19,
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap</a> contributors'
+      }).addTo(this.mapPicker);
+      if (this.mapSelection) {
+        this.setMapMarker(this.mapSelection);
+      }
+      this.mapPicker.on('click', (event: L.LeafletMouseEvent) => {
+        this.setMapSelection({ lat: event.latlng.lat, lng: event.latlng.lng });
+      });
+    } catch (error) {
+      this.mapError = error instanceof Error ? error.message : 'The OpenStreetMap picker could not be initialized.';
+    } finally {
+      this.mapLoading = false;
+      this.changeDetector.markForCheck();
+      window.setTimeout(() => this.mapPicker?.invalidateSize(), 0);
+    }
+  }
+
+  private mapInitialPoint(): MapPoint {
+    return this.savedMapPoint(this.mapPickerPurpose) || { lat: 25.2854, lng: 51.531 };
+  }
+
+  private savedMapPoint(purpose: AppComponent['mapPickerPurpose']): MapPoint | null {
+    if (purpose === 'delivery' && this.deliveryLatitude !== null && this.deliveryLongitude !== null) {
+      return { lat: this.deliveryLatitude, lng: this.deliveryLongitude };
+    }
+    if (purpose === 'signupRestaurant' && this.signupLatitude !== null && this.signupLongitude !== null) {
+      return { lat: this.signupLatitude, lng: this.signupLongitude };
+    }
+    if (purpose === 'adminCreateRestaurant' && this.newAdminRestaurantLatitude !== null && this.newAdminRestaurantLongitude !== null) {
+      return { lat: this.newAdminRestaurantLatitude, lng: this.newAdminRestaurantLongitude };
+    }
+    if (purpose === 'adminEditRestaurant' && this.adminRestaurant?.latitude != null && this.adminRestaurant.longitude != null) {
+      return { lat: this.adminRestaurant.latitude, lng: this.adminRestaurant.longitude };
+    }
+    return null;
+  }
+
+  private setMapSelection(point: MapPoint): void {
+    this.mapSelection = point;
+    this.setMapMarker(point);
+    this.mapSelectionAddress = `${point.lat.toFixed(5)}, ${point.lng.toFixed(5)}`;
+    this.mapError = '';
+    this.mapNotice = '';
+    const requestId = ++this.mapSelectionRequest;
+    if (this.mapGeocodeTimer) clearTimeout(this.mapGeocodeTimer);
+    this.mapGeocodeTimer = window.setTimeout(() => {
+      void this.reverseGeocodeSelection(point, requestId);
+    }, 1100);
+    this.changeDetector.markForCheck();
+  }
+
+  private setMapMarker(point: MapPoint): void {
+    if (!this.mapPicker) return;
+    if (this.mapMarker) {
+      this.mapMarker.setLatLng([point.lat, point.lng]);
+      return;
+    }
+    this.mapMarker = L.circleMarker([point.lat, point.lng], {
+      radius: 9,
+      color: '#ffffff',
+      weight: 3,
+      fillColor: '#0e4037',
+      fillOpacity: 1
+    }).addTo(this.mapPicker);
+  }
+
+  private async reverseGeocodeSelection(point: MapPoint, requestId: number): Promise<void> {
+    try {
+      const result = await firstValueFrom(this.http.get<{ display_name?: string }>(
+        'https://nominatim.openstreetmap.org/reverse',
+        { params: { format: 'jsonv2', lat: String(point.lat), lon: String(point.lng), zoom: '18' } }
+      ));
+      if (requestId === this.mapSelectionRequest && result.display_name) {
+        this.mapSelectionAddress = result.display_name;
+      }
+    } catch {
+      if (requestId === this.mapSelectionRequest) {
+        this.mapNotice = 'Could not look up a nearby address. Your map pin is still selected; enter the full address at checkout.';
+      }
+    } finally {
+      this.changeDetector.markForCheck();
+    }
+  }
+
   openRestaurant(restaurant: Restaurant): void {
     this.http.get<{ restaurant: Restaurant; items: MenuItem[] }>(`${this.api}/restaurants/${restaurant._id}/menu`).subscribe({
       next: (data) => {
-        this.selectedRestaurant = data.restaurant;
+        this.selectedRestaurant = {
+          ...data.restaurant,
+          distanceKm: this.deliveryLatitude !== null && this.deliveryLongitude !== null &&
+            data.restaurant.latitude != null && data.restaurant.longitude != null
+            ? Number(this.distanceKm(this.deliveryLatitude, this.deliveryLongitude, data.restaurant.latitude, data.restaurant.longitude).toFixed(2))
+            : null
+        };
         this.menu = data.items;
         this.view = 'restaurant';
         this.error = '';
@@ -359,6 +688,14 @@ export class AppComponent implements OnInit {
 
   placeOrder(): void {
     if (!this.selectedRestaurant || !this.cartItems.length) return;
+    if (this.deliveryLatitude === null || this.deliveryLongitude === null) {
+      this.error = 'Choose your delivery location on the map first.';
+      return;
+    }
+    if (!this.isSelectedRestaurantInDeliveryRange) {
+      this.error = "This restaurant's free-delivery area does not include your selected pin.";
+      return;
+    }
     const address = this.deliveryAddress.trim();
     if (address.length < 5) {
       this.error = 'Enter a delivery address with at least 5 characters.';
@@ -450,7 +787,11 @@ export class AppComponent implements OnInit {
   }
 
   signIn(): void {
-    this.http.post<{ token: string; user: User }>(`${this.api}/auth/login`, { email: this.authEmail, password: this.authPassword }).subscribe({
+    this.http.post<{ token: string; user: User }>(`${this.api}/auth/login`, {
+      email: this.authEmail,
+      password: this.authPassword,
+      portal: this.loginPortal
+    }).subscribe({
       next: ({ token, user }) => {
         localStorage.setItem(this.tokenKey, token);
         this.user = user;
@@ -463,6 +804,13 @@ export class AppComponent implements OnInit {
   }
 
   signUp(): void {
+    if (this.signupRestaurant && (
+      this.signupLatitude === null || this.signupLongitude === null ||
+      !Number.isFinite(this.signupServiceRadiusKm) || this.signupServiceRadiusKm < 0.5 || this.signupServiceRadiusKm > 100
+    )) {
+      this.error = 'Select your restaurant location on the map and set a delivery radius from 0.5 to 100 km.';
+      return;
+    }
     const endpoint = this.signupRestaurant ? '/auth/register-restaurant' : '/auth/register';
     const body = this.signupRestaurant
       ? {
@@ -472,7 +820,10 @@ export class AppComponent implements OnInit {
           phone: this.signupPhone,
           restaurantName: this.signupRestaurantName,
           cuisine: this.signupCuisine,
-          address: this.signupAddress
+          address: this.signupAddress,
+          latitude: this.signupLatitude,
+          longitude: this.signupLongitude,
+          serviceRadiusKm: this.signupServiceRadiusKm
         }
       : { name: this.signupName, email: this.authEmail, password: this.authPassword, phone: this.signupPhone };
     this.http.post<{ token: string; user: User; message?: string }>(`${this.api}${endpoint}`, body).subscribe({
@@ -492,6 +843,8 @@ export class AppComponent implements OnInit {
     this.user = null;
     this.orders = [];
     this.view = 'home';
+    this.loginPortal = 'CUSTOMER';
+    window.history.replaceState(null, '', '/');
     this.loadRestaurants();
     this.notice = 'You have been signed out.';
   }
@@ -799,13 +1152,21 @@ export class AppComponent implements OnInit {
   }
 
   createAdminRestaurant(): void {
+    if (this.newAdminRestaurantLatitude === null || this.newAdminRestaurantLongitude === null ||
+        !Number.isFinite(this.newAdminRestaurantRadiusKm) || this.newAdminRestaurantRadiusKm < 0.5 || this.newAdminRestaurantRadiusKm > 100) {
+      this.error = 'Choose the restaurant location on the map and enter a delivery radius from 0.5 to 100 km.';
+      return;
+    }
     this.http.post<{ restaurant: Restaurant }>(`${this.api}/admin/restaurants`, {
       name: this.newAdminRestaurantName,
       cuisine: this.newAdminRestaurantCuisine,
       address: this.newAdminRestaurantAddress,
       description: this.newAdminRestaurantDescription,
       phone: this.newAdminRestaurantPhone,
-      email: this.newAdminRestaurantEmail
+      email: this.newAdminRestaurantEmail,
+      latitude: this.newAdminRestaurantLatitude,
+      longitude: this.newAdminRestaurantLongitude,
+      serviceRadiusKm: this.newAdminRestaurantRadiusKm
     }, { headers: this.headers() }).subscribe({
       next: ({ restaurant }) => {
         this.newAdminRestaurantName = '';
@@ -814,6 +1175,9 @@ export class AppComponent implements OnInit {
         this.newAdminRestaurantDescription = '';
         this.newAdminRestaurantPhone = '';
         this.newAdminRestaurantEmail = '';
+        this.newAdminRestaurantLatitude = null;
+        this.newAdminRestaurantLongitude = null;
+        this.newAdminRestaurantRadiusKm = 5;
         this.adminRestaurant = restaurant;
         this.adminCuisineDraft = restaurant.cuisine.join(', ');
         this.adminRestaurantImageDraft = '';
@@ -879,7 +1243,10 @@ export class AppComponent implements OnInit {
       email: restaurant.email || '',
       preparationMinutes: restaurant.preparationMinutes,
       minOrder: restaurant.minOrder,
-      availability: restaurant.availability
+      availability: restaurant.availability,
+      latitude: restaurant.latitude,
+      longitude: restaurant.longitude,
+      serviceRadiusKm: restaurant.serviceRadiusKm
     }, { headers: this.headers() }).subscribe({
       next: ({ restaurant: updated }) => {
         this.adminRestaurant = updated;
@@ -1104,6 +1471,10 @@ export class AppComponent implements OnInit {
 
   statusLabel(status: string): string {
     return status.replaceAll('_', ' ').toLowerCase().replace(/(^|\s)\S/g, (letter) => letter.toUpperCase());
+  }
+
+  orderStatusClass(status: string): string {
+    return `order-status-${status.toLowerCase().replaceAll('_', '-')}`;
   }
 
   money(value: number, currency = 'QAR'): string {

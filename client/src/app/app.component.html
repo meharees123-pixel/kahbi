@@ -1,13 +1,17 @@
 <div class="app-shell">
   <header class="topbar">
-    <a class="brand" href="#" (click)="$event.preventDefault(); view = 'home'; loadRestaurants()">
+    <a class="brand" href="/" (click)="$event.preventDefault(); navigateHome()">
       <span class="brand-mark">K</span><span>KABHI</span>
     </a>
     <nav class="top-nav">
       <ng-container *ngIf="!user || isCustomer">
-        <button class="nav-link" (click)="view = 'home'; loadRestaurants()">Discover</button>
+        <button class="nav-link" (click)="navigateHome()">Discover</button>
         <button class="nav-link" (click)="view = 'track'; trackedOrder = null">Track order</button>
         <button class="nav-link" *ngIf="isCustomer" (click)="loadMyOrders()">My orders</button>
+      </ng-container>
+      <ng-container *ngIf="!user">
+        <button class="nav-link" (click)="openLogin('RESTAURANT')">Restaurant sign in</button>
+        <button class="nav-link" (click)="openLogin('ADMIN')">Admin sign in</button>
       </ng-container>
       <button class="nav-link" *ngIf="isRestaurantUser" (click)="loadRestaurantPortal()">Restaurant dashboard</button>
       <button class="nav-link" *ngIf="isAdminUser" (click)="loadAdmin()">Admin dashboard</button>
@@ -15,7 +19,7 @@
     <div class="nav-actions">
       <button class="icon-button" *ngIf="(!user || isCustomer) && cartCount" (click)="openCart()">Cart <span class="cart-count">{{ cartCount }}</span></button>
       <span class="signed-user" *ngIf="user">{{ user.name }}</span>
-      <button class="button button-dark button-small" *ngIf="!user" (click)="view = 'login'; error = ''">Sign in</button>
+      <button class="button button-dark button-small" *ngIf="!user" (click)="openLogin('CUSTOMER')">Customer sign in</button>
       <button class="button button-quiet button-small" *ngIf="user" (click)="logout()">Sign out</button>
     </div>
   </header>
@@ -28,8 +32,13 @@
     </div>
   </div>
 
+  <div class="error-toast" *ngIf="error" role="alert" aria-live="assertive" aria-atomic="true">
+    <span class="error-toast-icon" aria-hidden="true">!</span>
+    <span class="error-toast-message">{{ error }}</span>
+    <button class="error-toast-dismiss" (click)="error = ''" aria-label="Dismiss error notification">×</button>
+  </div>
+
   <main>
-    <div class="flash error" *ngIf="error">{{ error }}</div>
     <div class="flash notice" *ngIf="notice">{{ notice }} <button (click)="notice = ''" aria-label="Dismiss">×</button></div>
 
     <section class="hero" *ngIf="view === 'home'">
@@ -39,7 +48,8 @@
         <p>Discover the kitchens worth staying in for. Order direct from Qatar's best hotels and restaurants.</p>
         <div class="location-line">
           <span class="location-dot"></span>
-          <span>{{ deliveryLatitude !== null ? 'Showing kitchens near your location' : 'Delivering across Doha' }}</span>
+          <span>{{ deliveryLatitude !== null ? 'Free delivery to ' + deliveryLocationLabel : 'Set your location to find free delivery nearby' }}</span>
+          <button class="text-button" (click)="openMapPicker('delivery')">{{ deliveryLatitude !== null ? 'Change location' : 'Choose location' }}</button>
           <button class="text-button" (click)="chooseLocation()">Use my location</button>
         </div>
         <div class="search-box">
@@ -77,17 +87,19 @@
           <div class="restaurant-info">
             <div class="restaurant-title"><h3>{{ restaurant.name }}</h3><span class="rating" *ngIf="restaurant.ratingCount">★ {{ restaurant.ratingAverage | number:'1.1-1' }}</span></div>
             <p>{{ restaurant.cuisine.join(' · ') || restaurant.category }}</p>
-            <div class="restaurant-meta"><span>◷ {{ restaurant.preparationMinutes }}–{{ restaurant.preparationMinutes + 10 }} min</span><span *ngIf="restaurant.distanceKm !== null && restaurant.distanceKm !== undefined">· {{ restaurant.distanceKm }} km</span></div>
+            <div class="restaurant-meta"><span>◷ {{ restaurant.preparationMinutes }}–{{ restaurant.preparationMinutes + 10 }} min</span><span *ngIf="restaurant.distanceKm !== null && restaurant.distanceKm !== undefined">· {{ restaurant.distanceKm }} km away</span></div>
+            <div class="restaurant-delivery-badge" *ngIf="deliveryLatitude !== null && restaurant.serviceRadiusKm">✓ Free delivery within {{ restaurant.serviceRadiusKm }} km</div>
+            <div class="restaurant-location-prompt" *ngIf="deliveryLatitude === null">Choose a location to check free delivery</div>
           </div>
         </article>
       </div>
-      <ng-template #noRestaurants><div class="empty-state"><div class="empty-icon">⌕</div><h3>No kitchens found</h3><p>Try a different search or clear the open-now filter.</p><button class="text-button" (click)="search = ''; openOnly = false; loadRestaurants()">Show all restaurants</button></div></ng-template>
+      <ng-template #noRestaurants><div class="empty-state"><div class="empty-icon">⌕</div><h3>{{ deliveryLatitude !== null ? 'No free-delivery kitchens nearby yet' : 'No kitchens found' }}</h3><p>{{ deliveryLatitude !== null ? 'Try another delivery location to find restaurants in range.' : 'Try a different search or clear the open-now filter.' }}</p><button class="button button-dark button-small" *ngIf="deliveryLatitude !== null" (click)="openMapPicker('delivery')">Change delivery location</button><button class="text-button" *ngIf="deliveryLatitude === null" (click)="search = ''; openOnly = false; loadRestaurants()">Show all restaurants</button></div></ng-template>
     </section>
 
     <section class="content-section restaurant-page" *ngIf="view === 'restaurant' && selectedRestaurant">
       <button class="back-link" (click)="view = 'home'; loadRestaurants()">← All restaurants</button>
       <div class="restaurant-banner"><img *ngIf="selectedRestaurant.imageData; else restaurantBannerInitial" class="banner-emblem banner-image" [src]="selectedRestaurant.imageData" [alt]="selectedRestaurant.name"><ng-template #restaurantBannerInitial><span class="banner-emblem">{{ selectedRestaurant.name.slice(0, 1) }}</span></ng-template><div><span class="eyebrow">{{ selectedRestaurant.cuisine.join(' · ') }}</span><h1>{{ selectedRestaurant.name }}</h1><p>{{ selectedRestaurant.description }}</p><span class="status-pill" [class.status-open]="selectedRestaurant.availability === 'OPEN'">{{ statusLabel(selectedRestaurant.availability) }}</span><span class="restaurant-eta"> · {{ selectedRestaurant.preparationMinutes }}–{{ selectedRestaurant.preparationMinutes + 10 }} min · Min. {{ money(selectedRestaurant.minOrder) }}</span></div></div>
-      <div class="feature-badges"><span>✦ Restaurant-managed delivery</span><span>◷ {{ selectedRestaurant.preparationMinutes }} min prep</span><span *ngIf="promotions.length">✳ Offers available</span></div>
+      <div class="feature-badges"><span *ngIf="deliveryLatitude !== null && selectedRestaurant.serviceRadiusKm">✓ Free delivery within {{ selectedRestaurant.serviceRadiusKm }} km</span><span *ngIf="deliveryLatitude === null">Choose a delivery location to check coverage</span><span *ngIf="deliveryLatitude !== null && selectedRestaurant.distanceKm !== null && selectedRestaurant.distanceKm !== undefined">⌖ {{ selectedRestaurant.distanceKm }} km from your pin</span><span>◷ {{ selectedRestaurant.preparationMinutes }} min prep</span><span *ngIf="promotions.length">✳ Offers available</span></div>
       <div class="menu-layout">
         <div><div class="section-heading compact"><div><span class="eyebrow">FROM THE KITCHEN</span><h2>Menu</h2></div></div>
           <div class="menu-list">
@@ -98,7 +110,7 @@
             </article>
           </div>
         </div>
-        <aside class="cart-summary" *ngIf="cartCount"><span class="eyebrow">YOUR ORDER</span><h3>{{ cartCount }} item{{ cartCount === 1 ? '' : 's' }}</h3><div class="summary-row"><span>Subtotal</span><strong>{{ money(subtotal) }}</strong></div><p>Delivery is handled by the restaurant and confirmed with you.</p><button class="button button-dark button-wide" (click)="openCart()">View cart <span>{{ money(subtotal) }}</span></button></aside>
+        <aside class="cart-summary" *ngIf="cartCount"><span class="eyebrow">YOUR ORDER</span><h3>{{ cartCount }} item{{ cartCount === 1 ? '' : 's' }}</h3><div class="summary-row"><span>Subtotal</span><strong>{{ money(subtotal) }}</strong></div><p class="free-delivery-note">✓ Free delivery to your selected location</p><button class="button button-dark button-wide" (click)="openCart()">View cart <span>{{ money(subtotal) }}</span></button></aside>
       </div>
     </section>
 
@@ -114,12 +126,14 @@
         <aside class="checkout-card"><span class="eyebrow">DELIVERY DETAILS</span><h2>Where to?</h2>
           <div class="form-field" *ngIf="!isCustomer"><label>Your name</label><input [(ngModel)]="guestName" placeholder="Full name" autocomplete="name" required></div>
           <div class="form-field" *ngIf="!isCustomer"><label>Mobile / WhatsApp</label><input [(ngModel)]="guestPhone" placeholder="+974 5XXX XXXX" autocomplete="tel" type="tel" required></div>
-          <div class="form-field"><label>Delivery address</label><textarea [(ngModel)]="deliveryAddress" placeholder="Building, street, zone, landmark" rows="3" required minlength="5"></textarea></div>
+          <div class="checkout-location-card"><div><strong>Delivery pin</strong><span>{{ deliveryLocationLabel || 'Choose a delivery location first' }}</span></div><button class="button button-quiet button-small" (click)="openMapPicker('delivery')">{{ deliveryLatitude !== null ? 'Change pin' : 'Choose pin' }}</button></div>
+          <div class="form-field"><label>Full delivery address</label><textarea [(ngModel)]="deliveryAddress" placeholder="Building, apartment, street, zone, and a nearby landmark" rows="3" required minlength="5"></textarea><small>We use your map pin to confirm free-delivery coverage. Add the exact building and unit details here.</small></div>
+          <div class="delivery-coverage-warning" *ngIf="!isSelectedRestaurantInDeliveryRange && deliveryLatitude !== null">This restaurant's free-delivery area does not include your selected pin. Choose another restaurant or change your delivery location.</div>
           <div class="form-field"><label>Promotion code <span class="optional">optional</span></label><input [(ngModel)]="promotionCode" placeholder="e.g. KABHI10"></div>
           <div class="payment-note"><span>◉</span><div><strong>Pay restaurant directly</strong><small>Cash or direct payment on delivery</small></div></div>
-          <div class="summary-row"><span>Subtotal</span><strong>{{ money(subtotal) }}</strong></div><div class="summary-row"><span>Fees & tax</span><strong>Confirmed by restaurant</strong></div><div class="summary-row total-row"><span>Total before delivery</span><strong>{{ money(subtotal) }}</strong></div>
-          <button class="button button-accent button-wide" [disabled]="loading || !cartItems.length" (click)="placeOrder()">{{ loading ? 'Placing order…' : 'Place order' }} <span>→</span></button>
-          <p class="fine-print">Your restaurant will confirm any delivery charge. Tax is not charged by KABHI.</p>
+          <div class="summary-row"><span>Subtotal</span><strong>{{ money(subtotal) }}</strong></div><div class="summary-row free-delivery-total"><span>Delivery</span><strong>FREE</strong></div><div class="summary-row total-row"><span>Total</span><strong>{{ money(subtotal) }}</strong></div>
+          <button class="button button-accent button-wide" [disabled]="loading || !cartItems.length || deliveryLatitude === null || deliveryLongitude === null || !isSelectedRestaurantInDeliveryRange" (click)="placeOrder()">{{ loading ? 'Placing order…' : 'Place order' }} <span>→</span></button>
+          <p class="fine-print">Free delivery is available because your selected location is inside this restaurant's delivery radius. Tax is not charged by KABHI.</p>
         </aside>
       </div>
     </section>
@@ -128,7 +142,7 @@
       <span class="eyebrow">YOUR FOOD, ON ITS WAY</span><h1>Track an order.</h1>
       <div class="track-form"><div class="form-field"><label>Order reference</label><input [(ngModel)]="trackReference" placeholder="KAB-20261008-ABC123"></div><div class="form-field"><label>Checkout phone number</label><input [(ngModel)]="trackPhone" placeholder="+974 5XXX XXXX"></div><button class="button button-dark" (click)="trackOrder()">Find order</button></div>
       <article class="order-track-card" *ngIf="trackedOrder">
-        <div class="track-top"><div><span class="eyebrow">{{ trackedOrder.reference }}</span><h2>{{ trackedOrder.restaurantName }}</h2><p>{{ trackedOrder.createdAt | date:'medium' }}</p></div><span class="order-status">{{ statusLabel(trackedOrder.status) }}</span></div>
+        <div class="track-top"><div><span class="eyebrow">{{ trackedOrder.reference }}</span><h2>{{ trackedOrder.restaurantName }}</h2><p>{{ trackedOrder.createdAt | date:'medium' }}</p></div><span class="order-status" [ngClass]="orderStatusClass(trackedOrder.status)">{{ statusLabel(trackedOrder.status) }}</span></div>
         <div class="timeline"><div class="timeline-item" *ngFor="let step of trackedOrder.statusHistory"><span class="timeline-dot"></span><div><strong>{{ statusLabel(step.status) }}</strong><small>{{ step.createdAt | date:'short' }}</small></div></div></div>
         <div class="order-detail-row" *ngFor="let item of trackedOrder.items"><span>{{ item.quantity }} × {{ item.name }}</span><strong>{{ money(item.lineTotal, trackedOrder.currency) }}</strong></div>
         <div class="order-detail-row"><span>Subtotal</span><strong>{{ money(trackedOrder.subtotal, trackedOrder.currency) }}</strong></div>
@@ -145,7 +159,7 @@
     <section class="content-section narrow-section" *ngIf="view === 'orders'">
       <span class="eyebrow">YOUR KABHI HISTORY</span><h1>Past orders.</h1>
       <article class="order-history-card" *ngFor="let order of orders">
-        <div class="track-top"><div><span class="eyebrow">{{ order.reference }}</span><h2>{{ order.restaurantName }}</h2><p>{{ order.createdAt | date:'medium' }}</p></div><span class="order-status">{{ statusLabel(order.status) }}</span></div>
+        <div class="track-top"><div><span class="eyebrow">{{ order.reference }}</span><h2>{{ order.restaurantName }}</h2><p>{{ order.createdAt | date:'medium' }}</p></div><span class="order-status" [ngClass]="orderStatusClass(order.status)">{{ statusLabel(order.status) }}</span></div>
         <div class="order-detail-row"><span>{{ order.items.length }} items</span><strong>{{ money(order.total, order.currency) }}</strong></div>
         <button class="text-button" (click)="trackReference = order.reference; trackPhone = user?.phone || ''; trackedOrder = order; view = 'track'">View order details →</button>
         <div class="rating-actions" *ngIf="order.status === 'CLOSED'"><span>Rate your order</span><button *ngFor="let star of [1, 2, 3, 4, 5]" (click)="rateOrder(order, star)" aria-label="Rate this order">★</button></div>
@@ -154,24 +168,28 @@
     </section>
 
     <section class="auth-wrap" *ngIf="view === 'login' || view === 'signup'">
-      <div class="auth-aside"><span class="brand-mark">K</span><span class="eyebrow">WELCOME TO KABHI</span><h2>Made for good<br><em>moments.</em></h2><p>Discover the kitchens worth knowing in Qatar.</p></div>
+      <div class="auth-aside"><span class="brand-mark">K</span><span class="eyebrow">{{ loginPortal === 'ADMIN' ? 'KABHI ADMIN' : loginPortal === 'RESTAURANT' ? 'RESTAURANT PORTAL' : 'WELCOME TO KABHI' }}</span><h2>{{ loginPortal === 'ADMIN' ? 'Platform oversight.' : loginPortal === 'RESTAURANT' ? 'Your kitchen, managed.' : 'Made for good moments.' }}</h2><p>{{ loginPortal === 'ADMIN' ? 'Manage restaurants, menus, and orders across KABHI.' : loginPortal === 'RESTAURANT' ? 'Sign in to manage your restaurant, menu, and incoming orders.' : 'Discover the kitchens worth knowing in Qatar.' }}</p></div>
       <div class="auth-card">
-        <span class="eyebrow">{{ view === 'login' ? 'YOUR ACCOUNT' : 'JOIN THE TABLE' }}</span><h1>{{ view === 'login' ? 'Welcome back.' : (signupRestaurant ? 'List your restaurant.' : 'Create an account.') }}</h1>
+        <span class="eyebrow">{{ view === 'login' ? loginPortal + ' SIGN IN' : 'JOIN KABHI' }}</span><h1>{{ view === 'login' ? (loginPortal === 'CUSTOMER' ? 'Welcome back.' : 'Sign in to your portal.') : (signupRestaurant ? 'List your restaurant.' : 'Create an account.') }}</h1>
         <div class="form-field" *ngIf="view === 'signup'"><label>{{ signupRestaurant ? 'Owner name' : 'Full name' }}</label><input [(ngModel)]="signupName" placeholder="Your name"></div>
         <div class="form-field" *ngIf="view === 'signup'"><label>Mobile / WhatsApp</label><input [(ngModel)]="signupPhone" placeholder="+974 5XXX XXXX"></div>
         <ng-container *ngIf="view === 'signup' && signupRestaurant">
           <div class="form-field"><label>Restaurant name</label><input [(ngModel)]="signupRestaurantName" placeholder="Business name"></div>
           <div class="form-field"><label>Cuisine</label><input [(ngModel)]="signupCuisine" placeholder="Indian, Arabic…"></div>
-          <div class="form-field"><label>Business address</label><input [(ngModel)]="signupAddress" placeholder="Doha, Qatar"></div>
+          <div class="form-field"><label>Business address</label><input [(ngModel)]="signupAddress" placeholder="Choose a map pin to fill the address"></div>
+          <div class="location-picker-control"><div><strong>Restaurant map pin</strong><span>{{ signupLatitude !== null && signupLongitude !== null ? 'Location selected' : 'Required to set your delivery area' }}</span></div><button class="button button-quiet button-small" (click)="openMapPicker('signupRestaurant')">{{ signupLatitude !== null ? 'Change pin' : 'Choose pin' }}</button></div>
+          <div class="form-field"><label>Free-delivery radius (km)</label><input [(ngModel)]="signupServiceRadiusKm" type="number" min="0.5" max="100" step="0.5"><small>Customers inside this radius qualify for free delivery. Enter 0.5–100 km.</small></div>
           <p class="fine-print">Your application will be reviewed before the restaurant appears to customers.</p>
         </ng-container>
         <div class="form-field"><label>Email</label><input [(ngModel)]="authEmail" type="email" placeholder="you&#64;example.com" autocomplete="email"></div>
         <div class="form-field"><label>Password</label><input [(ngModel)]="authPassword" type="password" placeholder="At least 10 characters" autocomplete="current-password"></div>
         <button class="button button-accent button-wide" (click)="view === 'login' ? signIn() : signUp()">{{ view === 'login' ? 'Sign in' : 'Create account' }} <span>→</span></button>
-        <p class="auth-switch" *ngIf="view === 'login'">New to KABHI? <button class="text-button" (click)="view = 'signup'">Create an account</button></p>
-        <p class="auth-switch" *ngIf="view === 'signup'">Already have an account? <button class="text-button" (click)="view = 'login'; signupRestaurant = false">Sign in</button></p>
-        <button class="text-button restaurant-signup" *ngIf="view === 'signup'" (click)="signupRestaurant = !signupRestaurant">{{ signupRestaurant ? 'Sign up as a customer instead' : 'Own a restaurant? Apply to join' }}</button>
-        <div class="demo-logins" *ngIf="view === 'login'"><strong>Try the demo</strong><span>Customer · customer&#64;kahbi.demo</span><span>Restaurant · restaurant&#64;kahbi.demo</span><span>Admin · admin&#64;kahbi.demo</span><small>Password: Demo123!</small><button class="text-button" (click)="trackReference = ''; trackedOrder = null; view = 'track'">Track a guest order instead</button></div>
+        <p class="auth-switch" *ngIf="view === 'login' && loginPortal === 'CUSTOMER'">New to KABHI? <button class="text-button" (click)="openSignup()">Create an account</button></p>
+        <p class="auth-switch" *ngIf="view === 'login' && loginPortal === 'RESTAURANT'">Own a restaurant? <button class="text-button" (click)="openSignup()">Apply to join KABHI</button></p>
+        <p class="auth-switch" *ngIf="view === 'signup'">Already have an account? <button class="text-button" (click)="view = 'login'; signupRestaurant = loginPortal === 'RESTAURANT'">Sign in</button></p>
+        <div class="demo-logins" *ngIf="view === 'login' && loginPortal === 'CUSTOMER'"><strong>Customer demo</strong><span>customer&#64;kahbi.demo</span><small>Password: Demo123!</small><button class="text-button" (click)="trackReference = ''; trackedOrder = null; view = 'track'">Track a guest order instead</button></div>
+        <div class="demo-logins" *ngIf="view === 'login' && loginPortal === 'RESTAURANT'"><strong>Restaurant demo accounts</strong><span>restaurant&#64;kahbi.demo — KABHI Demo Hotel</span><span>owner.pearl&#64;kahbi.demo — Pearl Garden Kitchen</span><span>owner.souq&#64;kahbi.demo — Souq Flame Grill</span><span>owner.corniche&#64;kahbi.demo — Corniche Breakfast Club</span><span>owner.lusail&#64;kahbi.demo — Lusail Spice House</span><small>Each restaurant has its own login. Password: Demo123!</small></div>
+        <div class="demo-logins" *ngIf="view === 'login' && loginPortal === 'ADMIN'"><strong>Admin demo account</strong><span>admin&#64;kahbi.demo</span><small>Password: Demo123!</small><small>Admin access includes every restaurant and its menu.</small></div>
       </div>
     </section>
 
@@ -189,7 +207,7 @@
       <div class="portal-columns">
         <div class="portal-panel"><div class="panel-heading"><div><span class="eyebrow">LIVE SERVICE</span><h2>Orders</h2></div><button class="text-button" (click)="loadRestaurantPortal()">Refresh ↻</button></div>
           <article class="portal-order" *ngFor="let order of restaurantOrders">
-            <div class="portal-order-top"><div><strong>{{ order.reference }}</strong><span>{{ order.createdAt | date:'short' }} · {{ order.guest.name || 'Customer' }} · {{ order.guest.phone }}</span></div><span class="order-status">{{ statusLabel(order.status) }}</span></div>
+            <div class="portal-order-top"><div><strong>{{ order.reference }}</strong><span>{{ order.createdAt | date:'short' }} · {{ order.guest.name || 'Customer' }} · {{ order.guest.phone }}</span></div><span class="order-status" [ngClass]="orderStatusClass(order.status)">{{ statusLabel(order.status) }}</span></div>
             <div class="order-detail-row" *ngFor="let item of order.items"><span>{{ item.quantity }} × {{ item.name }}</span><strong>{{ money(item.lineTotal) }}</strong></div>
             <div class="order-detail-row"><span>{{ order.address }}</span><strong>{{ money(order.total) }}</strong></div>
             <div class="order-actions" *ngIf="order.status === 'RESTAURANT_PENDING'"><button class="button button-accent" (click)="restaurantAction(order, 'ACCEPTED')">Accept order</button><button class="button button-outline-danger" (click)="restaurantAction(order, 'REJECTED')">Reject</button></div>
@@ -236,7 +254,7 @@
         </div>
       </div>
       <div class="portal-panel wide-panel"><div class="panel-heading"><div><span class="eyebrow">MONITORING</span><h2>Recent orders</h2></div><span class="muted">{{ allOrders.length }} latest</span></div>
-        <div class="admin-order-row admin-order-manage" *ngFor="let order of allOrders"><div><strong>{{ order.reference }}</strong><small>{{ order.restaurantName }} · {{ order.createdAt | date:'short' }} · {{ order.guest.name || 'Customer' }} · {{ order.guest.phone }}</small></div><span class="order-status">{{ statusLabel(order.status) }}</span><strong>{{ money(order.total, order.currency) }}</strong><div class="order-actions"><button class="button button-accent button-small" *ngFor="let action of adminOrderActions(order)" [class.button-outline-danger]="action.status === 'REJECTED'" (click)="adminOrderAction(order, action.status)">{{ action.label }}</button></div></div>
+        <div class="admin-order-row admin-order-manage" *ngFor="let order of allOrders"><div><strong>{{ order.reference }}</strong><small>{{ order.restaurantName }} · {{ order.createdAt | date:'short' }} · {{ order.guest.name || 'Customer' }} · {{ order.guest.phone }}</small></div><span class="order-status" [ngClass]="orderStatusClass(order.status)">{{ statusLabel(order.status) }}</span><strong>{{ money(order.total, order.currency) }}</strong><div class="order-actions"><button class="button button-accent button-small" *ngFor="let action of adminOrderActions(order)" [class.button-outline-danger]="action.status === 'REJECTED'" (click)="adminOrderAction(order, action.status)">{{ action.label }}</button></div></div>
       </div>
       <div class="portal-panel wide-panel"><div class="panel-heading"><div><span class="eyebrow">GOVERNANCE</span><h2>Recent audit activity</h2></div></div><div class="log-row" *ngFor="let log of auditLogs"><span>{{ log.action }} · {{ log.entity }}</span><small>{{ log.createdAt | date:'short' }}</small></div></div>
       <div class="portal-panel wide-panel"><div class="panel-heading"><div><span class="eyebrow">FINANCE</span><h2>Recent billing transactions</h2></div></div><div class="admin-order-row" *ngFor="let transaction of billingTransactions"><div><strong>{{ transaction.createdAt | date:'short' }}</strong><small>{{ transaction.currency }} · gross {{ money(transaction.grossAmount, transaction.currency) }}</small></div><span>Commission {{ money(transaction.commissionAmount, transaction.currency) }}</span><strong>Net {{ money(transaction.netRestaurantAmount, transaction.currency) }}</strong></div><p class="muted" *ngIf="!billingTransactions.length">Billing entries are recorded when completed orders are closed.</p></div>
@@ -261,7 +279,7 @@
       </div>
       <ng-template #noAdminRestaurants><div class="empty-state"><div class="empty-icon">⌕</div><h3>{{ adminRestaurants.length ? 'No matching restaurants' : 'No restaurants yet' }}</h3><p>{{ adminRestaurants.length ? 'Try a different search.' : 'Add your first restaurant below.' }}</p></div></ng-template>
       <details class="portal-panel add-restaurant-panel"><summary><span><strong>Add a restaurant</strong><small>New restaurants are approved and start closed until you are ready to open them.</small></span><span class="button button-dark button-small">Add restaurant +</span></summary>
-        <div class="admin-restaurant-create-form"><input [(ngModel)]="newAdminRestaurantName" placeholder="Restaurant name"><input [(ngModel)]="newAdminRestaurantCuisine" placeholder="Cuisines, comma separated"><input [(ngModel)]="newAdminRestaurantAddress" placeholder="Restaurant address"><input [(ngModel)]="newAdminRestaurantPhone" placeholder="Contact phone"><input [(ngModel)]="newAdminRestaurantEmail" type="email" placeholder="Contact email"><input [(ngModel)]="newAdminRestaurantDescription" placeholder="Description"><button class="button button-accent" (click)="createAdminRestaurant()">Create restaurant</button></div>
+        <div class="admin-restaurant-create-form"><input [(ngModel)]="newAdminRestaurantName" placeholder="Restaurant name"><input [(ngModel)]="newAdminRestaurantCuisine" placeholder="Cuisines, comma separated"><input [(ngModel)]="newAdminRestaurantAddress" placeholder="Restaurant address"><input [(ngModel)]="newAdminRestaurantPhone" placeholder="Contact phone"><input [(ngModel)]="newAdminRestaurantEmail" type="email" placeholder="Contact email"><input [(ngModel)]="newAdminRestaurantDescription" placeholder="Description"><div class="location-picker-control"><div><strong>Restaurant map pin</strong><span>{{ newAdminRestaurantLatitude !== null && newAdminRestaurantLongitude !== null ? 'Location selected' : 'Required to set delivery area' }}</span></div><button class="button button-quiet button-small" (click)="openMapPicker('adminCreateRestaurant')">{{ newAdminRestaurantLatitude !== null ? 'Change pin' : 'Choose pin' }}</button></div><label class="radius-field">Free-delivery radius (km)<input [(ngModel)]="newAdminRestaurantRadiusKm" type="number" min="0.5" max="100" step="0.5"></label><button class="button button-accent" (click)="createAdminRestaurant()">Create restaurant</button></div>
       </details>
     </section>
 
@@ -272,6 +290,7 @@
         <div class="portal-panel admin-profile-panel"><div class="panel-heading"><div><span class="eyebrow">PROFILE & SERVICE</span><h2>Restaurant details</h2></div></div>
           <div class="admin-restaurant-form">
             <label>Restaurant name<input [(ngModel)]="managedRestaurant.name" placeholder="Restaurant name"></label><label>Cuisines<input [(ngModel)]="adminCuisineDraft" placeholder="Cuisines, comma separated"></label><label>Address<input [(ngModel)]="managedRestaurant.address" placeholder="Address"></label><label>Phone<input [(ngModel)]="managedRestaurant.phone" placeholder="Phone"></label><label>Email<input [(ngModel)]="managedRestaurant.email" type="email" placeholder="Email"></label><label>Description<input [(ngModel)]="managedRestaurant.description" placeholder="Description"></label><label>Preparation time (minutes)<input [(ngModel)]="managedRestaurant.preparationMinutes" type="number" min="1" max="240"></label><label>Minimum order (QAR)<input [(ngModel)]="managedRestaurant.minOrder" type="number" min="0"></label>
+            <div class="location-picker-control admin-map-control"><div><strong>Restaurant map pin</strong><span>{{ managedRestaurant.latitude != null && managedRestaurant.longitude != null ? 'Location selected' : 'Choose a pin to enable delivery coverage' }}</span></div><button class="button button-quiet button-small" (click)="openMapPicker('adminEditRestaurant')">{{ managedRestaurant.latitude != null ? 'Change pin' : 'Choose pin' }}</button></div><label>Free-delivery radius (km)<input [(ngModel)]="managedRestaurant.serviceRadiusKm" type="number" min="0.5" max="100" step="0.5"></label>
             <label>Availability<select [(ngModel)]="managedRestaurant.availability"><option value="OPEN">Open</option><option value="CLOSED">Closed</option><option value="PAUSED">Paused</option><option value="TEMPORARILY_UNAVAILABLE">Temporarily unavailable</option></select></label>
             <label>Approval status<select [ngModel]="managedRestaurant.status" (ngModelChange)="updateAdminRestaurantStatus($event)"><option value="APPROVED">Approved</option><option value="REJECTED">Rejected</option><option value="SUSPENDED">Suspended</option></select></label>
           </div>
@@ -291,5 +310,16 @@
       </div>
     </section>
   </main>
-  <footer class="footer"><a class="brand" href="#" (click)="$event.preventDefault(); view = 'home'"><span class="brand-mark">K</span><span>KABHI</span></a><span>Good food, from Qatar's own kitchens.</span><span class="footer-currency">QATAR · QAR</span></footer>
+  <div class="map-modal-backdrop" *ngIf="mapPickerOpen" (click)="closeMapPicker()">
+    <section class="map-modal" role="dialog" aria-modal="true" aria-labelledby="map-modal-title" (click)="$event.stopPropagation()">
+      <div class="map-modal-heading"><div><span class="eyebrow">{{ mapPickerPurpose === 'delivery' ? 'DELIVERY LOCATION' : 'RESTAURANT LOCATION' }}</span><h2 id="map-modal-title">{{ mapPickerPurpose === 'delivery' ? 'Where should we deliver?' : 'Set your restaurant pin.' }}</h2><p>{{ mapPickerPurpose === 'delivery' ? 'Click the map to choose where you want your order delivered.' : 'Click the restaurant entrance or central point on the map.' }}</p></div><button class="map-close" aria-label="Close map" (click)="closeMapPicker()">×</button></div>
+      <div class="map-loading" *ngIf="mapLoading"><span class="global-loader-spinner"></span><span>Loading map…</span></div>
+      <div class="map-error" *ngIf="mapError" role="alert">{{ mapError }}</div>
+      <div class="map-notice" *ngIf="mapNotice" role="status">{{ mapNotice }}</div>
+      <div id="location-picker-map" class="location-picker-map" [class.map-hidden]="mapLoading || !!mapError"></div>
+      <div class="map-selection-details"><div><strong>{{ mapSelection ? 'Selected location' : 'No location selected' }}</strong><span>{{ mapSelectionAddress || 'Click the map to place a pin.' }}</span></div><button class="button button-quiet button-small" *ngIf="!mapError" (click)="useCurrentLocationInPicker()">Use current location</button></div>
+      <div class="map-modal-actions"><button class="button button-quiet" (click)="closeMapPicker()">Cancel</button><button class="button button-dark" [disabled]="!mapSelection || mapLoading || !!mapError" (click)="confirmMapSelection()">Use this location</button></div>
+    </section>
+  </div>
+  <footer class="footer"><a class="brand" href="/" (click)="$event.preventDefault(); navigateHome()"><span class="brand-mark">K</span><span>KABHI</span></a><span>Good food, from Qatar's own kitchens.</span><span class="footer-currency">QATAR · QAR</span></footer>
 </div>

@@ -8,14 +8,13 @@ const {
   User, Restaurant, MenuItem, Order, Promotion, Rating, AuditLog, MessageLog, BillingTransaction,
   Advertisement, AdvertisementEvent
 } = require("./models");
-const { canTransition, haversineKm, isValidCoordinate } = require("./rules");
+const { canTransition, haversineKm, isValidCoordinate, isValidServiceRadius, isWithinServiceArea } = require("./rules");
 const { validateImageDataUrl } = require("./images");
 const { writeAudit, logNotification, changeOrderStatus } = require("./services");
 
 const app = express();
 const secret = process.env.JWT_SECRET || "local-development-secret-change-before-deploy";
 const currency = process.env.CURRENCY || "QAR";
-const defaultRadius = Number(process.env.DEFAULT_SERVICE_RADIUS_KM || 20);
 const apiOrigin = process.env.CLIENT_ORIGIN || "http://localhost:4200";
 
 app.use(helmet());
@@ -108,15 +107,24 @@ app.post("/api/auth/register", asyncRoute(async (req, res) => {
 }));
 
 app.post("/api/auth/register-restaurant", asyncRoute(async (req, res) => {
-  const { ownerName, email, password, phone, restaurantName, cuisine, address } = req.body;
+  const { ownerName, email, password, phone, restaurantName, cuisine, address, latitude, longitude, serviceRadiusKm } = req.body;
   if (!ownerName || !restaurantName || !address || !email || typeof password !== "string" || password.length < 10 || !validatePhone(phone || "")) {
     return res.status(400).json({ error: "Complete all business and owner fields; use a valid mobile number and a password of at least 10 characters." });
+  }
+  const restaurantLatitude = Number(latitude);
+  const restaurantLongitude = Number(longitude);
+  const deliveryRadius = Number(serviceRadiusKm);
+  if (!isValidCoordinate(restaurantLatitude, -90, 90) || !isValidCoordinate(restaurantLongitude, -180, 180) || !isValidServiceRadius(deliveryRadius)) {
+    return res.status(400).json({ error: "Choose the restaurant location on the map and set a delivery radius between 0.5 and 100 km." });
   }
   if (await User.exists({ email: String(email).toLowerCase() })) return res.status(409).json({ error: "An account already uses that email." });
   const restaurant = await Restaurant.create({
     name: restaurantName,
     cuisine: Array.isArray(cuisine) ? cuisine : String(cuisine || "Other").split(",").map((entry) => entry.trim()).filter(Boolean),
     address,
+    latitude: restaurantLatitude,
+    longitude: restaurantLongitude,
+    serviceRadiusKm: deliveryRadius,
     phone,
     status: "PENDING_REVIEW",
     availability: "CLOSED"
@@ -134,6 +142,15 @@ app.post("/api/auth/login", asyncRoute(async (req, res) => {
   if (!user || !(await user.verifyPassword(String(req.body.password || "")))) {
     return res.status(401).json({ error: "Email or password is incorrect." });
   }
+  const portal = String(req.body.portal || "").toUpperCase();
+  if (portal && !["CUSTOMER", "RESTAURANT", "ADMIN"].includes(portal)) {
+    return res.status(400).json({ error: "Choose a valid sign-in portal." });
+  }
+  const roleMatchesPortal = !portal ||
+    (portal === "CUSTOMER" && user.role === "CUSTOMER") ||
+    (portal === "RESTAURANT" && user.role.startsWith("RESTAURANT_")) ||
+    (portal === "ADMIN" && ["ADMIN", "SUPER_ADMIN"].includes(user.role));
+  if (!roleMatchesPortal) return res.status(403).json({ error: "This account cannot sign in through the selected portal." });
   if (user.status !== "ACTIVE") return res.status(403).json({ error: "This account has been suspended or deactivated." });
   await writeAudit({ user, action: "LOGIN", entity: "User", entityId: user._id });
   res.json({ token: issueToken(user), user: publicUser(user) });
@@ -171,10 +188,13 @@ app.get("/api/restaurants", asyncRoute(async (req, res) => {
   const result = restaurants.map((restaurant) => {
     let distanceKm = null;
     let eligible = true;
-    if (locationProvided && restaurant.latitude !== null && restaurant.longitude !== null) {
+    if (locationProvided && restaurant.latitude !== null && restaurant.latitude !== undefined &&
+        restaurant.longitude !== null && restaurant.longitude !== undefined &&
+        isValidServiceRadius(restaurant.serviceRadiusKm)) {
       distanceKm = roundMoney(haversineKm(lat, lng, restaurant.latitude, restaurant.longitude));
-      const radius = restaurant.serviceRadiusKm || defaultRadius;
-      eligible = distanceKm <= radius;
+      eligible = isWithinServiceArea(lat, lng, restaurant.latitude, restaurant.longitude, restaurant.serviceRadiusKm);
+    } else if (locationProvided) {
+      eligible = false;
     }
     return { ...restaurant, distanceKm, eligible };
   });
@@ -190,7 +210,9 @@ app.get("/api/restaurants", asyncRoute(async (req, res) => {
   if (advertisements.length) {
     await AdvertisementEvent.insertMany(advertisements.map((advertisement) => ({ advertisementId: advertisement._id, eventType: "IMPRESSION" })));
   }
-  res.json({ restaurants: eligibleOnly ? result.filter((item) => item.eligible) : result, promotions, advertisements });
+  const visibleRestaurants = eligibleOnly ? result.filter((item) => item.eligible) : result;
+  if (locationProvided) visibleRestaurants.sort((left, right) => left.distanceKm - right.distanceKm);
+  res.json({ restaurants: visibleRestaurants, promotions, advertisements });
 }));
 
 app.get("/api/restaurants/:id/menu", asyncRoute(async (req, res) => {
@@ -248,13 +270,19 @@ app.post("/api/orders", auth(false), asyncRoute(async (req, res) => {
   const restaurant = await Restaurant.findOne({ _id: restaurantId, status: "APPROVED" });
   if (!restaurant) return res.status(404).json({ error: "This restaurant is not available for ordering." });
   if (restaurant.availability !== "OPEN") return res.status(409).json({ error: "This restaurant is not accepting orders right now." });
-  const hasCoordinates = latitude !== undefined && longitude !== undefined;
-  if (hasCoordinates && (!isValidCoordinate(Number(latitude), -90, 90) || !isValidCoordinate(Number(longitude), -180, 180))) {
-    return res.status(400).json({ error: "Provide valid delivery coordinates." });
+  const hasLatitude = latitude !== undefined;
+  const hasLongitude = longitude !== undefined;
+  if (hasLatitude !== hasLongitude || !hasLatitude ||
+      !isValidCoordinate(Number(latitude), -90, 90) || !isValidCoordinate(Number(longitude), -180, 180)) {
+    return res.status(400).json({ error: "Choose your delivery location on the map before placing your order." });
   }
-  if (hasCoordinates && restaurant.latitude !== null && restaurant.longitude !== null) {
-    const distance = haversineKm(Number(latitude), Number(longitude), restaurant.latitude, restaurant.longitude);
-    if (distance > (restaurant.serviceRadiusKm || defaultRadius)) return res.status(400).json({ error: "This delivery location is outside the restaurant service area." });
+  if (!isValidCoordinate(restaurant.latitude, -90, 90) ||
+      !isValidCoordinate(restaurant.longitude, -180, 180) ||
+      !isValidServiceRadius(restaurant.serviceRadiusKm)) {
+    return res.status(409).json({ error: "This restaurant has not configured its free-delivery area yet." });
+  }
+  if (!isWithinServiceArea(Number(latitude), Number(longitude), restaurant.latitude, restaurant.longitude, restaurant.serviceRadiusKm)) {
+    return res.status(400).json({ error: "This delivery location is outside the restaurant's free-delivery area." });
   }
   const quantities = new Map();
   for (const item of items) {
@@ -297,7 +325,7 @@ app.post("/api/orders", auth(false), asyncRoute(async (req, res) => {
       ? roundMoney(Math.min(subtotal * promotion.discountValue / 100, promotion.maximumDiscount))
       : roundMoney(Math.min(promotion.discountValue, subtotal));
   }
-  const deliveryFee = Math.max(0, Number(process.env.DEFAULT_DELIVERY_FEE || 0));
+  const deliveryFee = 0;
   const adminFee = Math.max(0, Number(process.env.CUSTOMER_ADMIN_FEE || 0));
   const total = roundMoney(Math.max(0, subtotal - discount) + deliveryFee + adminFee);
   const today = new Date(Date.now() + 3 * 60 * 60 * 1000).toISOString().slice(0, 10).replaceAll("-", "");
@@ -311,8 +339,8 @@ app.post("/api/orders", auth(false), asyncRoute(async (req, res) => {
     restaurantName: restaurant.name,
     items: orderItems,
     address: address.trim(),
-    latitude: hasCoordinates ? Number(latitude) : null,
-    longitude: hasCoordinates ? Number(longitude) : null,
+    latitude: Number(latitude),
+    longitude: Number(longitude),
     subtotal,
     discount,
     deliveryFee,
@@ -510,11 +538,17 @@ app.get("/api/admin/restaurants", auth(), roles("ADMIN", "SUPER_ADMIN"), asyncRo
 app.post("/api/admin/restaurants", auth(), roles("ADMIN", "SUPER_ADMIN"), asyncRoute(async (req, res) => {
   const name = String(req.body.name || "").trim();
   const address = String(req.body.address || "").trim();
+  const latitude = Number(req.body.latitude);
+  const longitude = Number(req.body.longitude);
+  const serviceRadiusKm = Number(req.body.serviceRadiusKm);
   const cuisine = Array.isArray(req.body.cuisine)
     ? req.body.cuisine.map((entry) => String(entry).trim()).filter(Boolean)
     : String(req.body.cuisine || "").split(",").map((entry) => entry.trim()).filter(Boolean);
   if (!name || !address || !cuisine.length) {
     return res.status(400).json({ error: "Restaurant name, cuisine and address are required." });
+  }
+  if (!isValidCoordinate(latitude, -90, 90) || !isValidCoordinate(longitude, -180, 180) || !isValidServiceRadius(serviceRadiusKm)) {
+    return res.status(400).json({ error: "Choose the restaurant location on the map and set a delivery radius between 0.5 and 100 km." });
   }
   const image = Object.hasOwn(req.body, "imageData") ? validateImageDataUrl(req.body.imageData) : null;
   if (image?.error) return res.status(400).json({ error: image.error });
@@ -522,6 +556,9 @@ app.post("/api/admin/restaurants", auth(), roles("ADMIN", "SUPER_ADMIN"), asyncR
     name,
     cuisine,
     address,
+    latitude,
+    longitude,
+    serviceRadiusKm,
     description: String(req.body.description || "").trim(),
     phone: String(req.body.phone || "").trim(),
     email: String(req.body.email || "").trim().toLowerCase(),
@@ -578,6 +615,20 @@ app.patch("/api/admin/restaurants/:id", auth(), roles("ADMIN", "SUPER_ADMIN"), a
     const amount = Number(req.body.minOrder);
     if (!Number.isFinite(amount) || amount < 0 || amount > 100000) return res.status(400).json({ error: "Enter a valid minimum order amount." });
     updates.minOrder = roundMoney(amount);
+  }
+  const hasLatitude = Object.hasOwn(req.body, "latitude");
+  const hasLongitude = Object.hasOwn(req.body, "longitude");
+  const hasRadius = Object.hasOwn(req.body, "serviceRadiusKm");
+  if (hasLatitude || hasLongitude || hasRadius) {
+    const latitude = hasLatitude ? Number(req.body.latitude) : restaurant.latitude;
+    const longitude = hasLongitude ? Number(req.body.longitude) : restaurant.longitude;
+    const serviceRadiusKm = hasRadius ? Number(req.body.serviceRadiusKm) : restaurant.serviceRadiusKm;
+    if (!isValidCoordinate(latitude, -90, 90) || !isValidCoordinate(longitude, -180, 180) || !isValidServiceRadius(serviceRadiusKm)) {
+      return res.status(400).json({ error: "Choose a valid restaurant map location and set a delivery radius between 0.5 and 100 km." });
+    }
+    updates.latitude = latitude;
+    updates.longitude = longitude;
+    updates.serviceRadiusKm = serviceRadiusKm;
   }
   Object.assign(restaurant, updates);
   await restaurant.save();
