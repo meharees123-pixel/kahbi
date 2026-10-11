@@ -19,6 +19,7 @@ services:
     restart: unless-stopped
     environment:
       PORT: 3000
+      NODE_ENV: ${NODE_ENV:-development}
       MONGODB_URI: ${MONGODB_URI:-mongodb://mongodb:27017/kahbi}
       JWT_SECRET: ${JWT_SECRET:-local-development-secret-change-before-deploy}
       CLIENT_ORIGIN: http://localhost:4200
@@ -30,6 +31,13 @@ services:
       CUSTOMER_ADMIN_FEE: ${CUSTOMER_ADMIN_FEE:-0}
       RESTAURANT_COMMISSION_PERCENT: ${RESTAURANT_COMMISSION_PERCENT:-12}
       WHATSAPP_MODE: demo
+      WHATSAPP_ACCESS_TOKEN: ${WHATSAPP_ACCESS_TOKEN:-}
+      WHATSAPP_PHONE_NUMBER_ID: ${WHATSAPP_PHONE_NUMBER_ID:-}
+      WHATSAPP_OTP_TEMPLATE: ${WHATSAPP_OTP_TEMPLATE:-kahbi_customer_otp}
+      WHATSAPP_OTP_LANGUAGE: ${WHATSAPP_OTP_LANGUAGE:-en_US}
+      WHATSAPP_GRAPH_API_VERSION: ${WHATSAPP_GRAPH_API_VERSION:-v23.0}
+      OTP_SIGNING_SECRET: ${OTP_SIGNING_SECRET:-}
+      WHATSAPP_CONFIG_ENCRYPTION_KEY: ${WHATSAPP_CONFIG_ENCRYPTION_KEY:-}
     ports:
       - "3000:3000"
     depends_on:

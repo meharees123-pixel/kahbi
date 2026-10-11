@@ -35,34 +35,11 @@ interface Restaurant {
   maxOrder: number;
   status: string;
   availability: string;
-  phone?: string;
   whatsapp?: string;
-  email?: string;
-  latitude?: number | null;
-  longitude?: number | null;
-  serviceRadiusKm?: number | null;
   ratingAverage: number;
   ratingCount: number;
   distanceKm?: number | null;
   demo?: boolean;
-}
-
-interface RestaurantProfileDraft {
-  name: string;
-  hotelName: string;
-  cuisine: string;
-  description: string;
-  address: string;
-  latitude: number | null;
-  longitude: number | null;
-  serviceRadiusKm: number | null;
-  phone: string;
-  whatsapp: string;
-  email: string;
-  preparationMinutes: number;
-  minOrder: number;
-  maxOrder: number;
-  category: string;
 }
 
 interface MenuItem {
@@ -140,6 +117,21 @@ interface BillingRecord {
   createdAt: string;
 }
 
+interface WhatsappConfigStatus {
+  configured: boolean;
+  source: 'admin' | 'environment';
+  otpDeliveryEnabled: boolean;
+  developmentOtpAllowed: boolean;
+  accessTokenConfigured: boolean;
+  phoneNumberIdConfigured: boolean;
+  otpSecretConfigured: boolean;
+  otpSecretPersistent: boolean;
+  encryptionKeyConfigured: boolean;
+  templateName: string;
+  language: string;
+  graphVersion: string;
+}
+
 interface MapPoint {
   lat: number;
   lng: number;
@@ -193,13 +185,19 @@ export class AppComponent implements OnInit {
   billingTransactions: BillingRecord[] = [];
   restaurantBilling: BillingRecord[] = [];
   customers: CustomerRecord[] = [];
+  adminWhatsappStatus: WhatsappConfigStatus | null = null;
+  whatsappAccessToken = '';
+  whatsappPhoneNumberId = '';
+  whatsappOtpDeliveryEnabled = true;
+  whatsappTemplateName = 'kahbi_customer_otp';
+  whatsappLanguage = 'en_US';
+  whatsappGraphVersion = 'v23.0';
   private errorDismissTimer: ReturnType<typeof setTimeout> | null = null;
   private errorMessage = '';
   notice = '';
   loading = false;
   search = '';
   openOnly = false;
-  guestName = '';
   guestPhone = '';
   deliveryAddress = '';
   deliveryLatitude: number | null = null;
@@ -218,9 +216,13 @@ export class AppComponent implements OnInit {
   trackedOrder: Order | null = null;
   authEmail = '';
   authPassword = '';
-  loginPortal: 'CUSTOMER' | 'RESTAURANT' | 'ADMIN' = 'CUSTOMER';
   signupName = '';
   signupPhone = '';
+  customerAuthPhone = '';
+  customerOtpCode = '';
+  customerOtpChallengeId = '';
+  customerOtpDevelopmentCode = '';
+  customerOtpPurpose: 'LOGIN' | 'ORDER' = 'LOGIN';
   signupRestaurant = false;
   signupRestaurantName = '';
   signupCuisine = '';
@@ -236,8 +238,6 @@ export class AppComponent implements OnInit {
   newItemBestSeller = false;
   newItemChefRecommended = false;
   editingMenuItemId = '';
-  menuItemDraft = this.emptyMenuItemDraft();
-  restaurantProfileDraft: RestaurantProfileDraft = this.emptyRestaurantProfile();
   newPromotionCode = '';
   newPromotionTitle = '';
   newPromotionDiscount = 10;
@@ -349,6 +349,12 @@ export class AppComponent implements OnInit {
     return this.user?.role === 'ADMIN' || this.user?.role === 'SUPER_ADMIN';
   }
 
+  private roleMatchesLoginPortal(user: User): boolean {
+    if (this.loginPortal === 'CUSTOMER') return user.role === 'CUSTOMER';
+    if (this.loginPortal === 'RESTAURANT') return user.role.startsWith('RESTAURANT_');
+    return user.role === 'ADMIN' || user.role === 'SUPER_ADMIN';
+  }
+
   get isSelectedRestaurantInDeliveryRange(): boolean {
     const restaurant = this.selectedRestaurant;
     if (this.deliveryLatitude === null || this.deliveryLongitude === null ||
@@ -394,6 +400,10 @@ export class AppComponent implements OnInit {
   openLogin(portal: LoginPortal): void {
     this.loginPortal = portal;
     this.signupRestaurant = portal === 'RESTAURANT';
+    this.customerOtpChallengeId = '';
+    this.customerOtpCode = '';
+    this.customerOtpDevelopmentCode = '';
+    this.customerOtpPurpose = 'LOGIN';
     this.view = 'login';
     this.error = '';
     window.history.pushState(null, '', `/login/${portal.toLowerCase()}`);
@@ -401,6 +411,10 @@ export class AppComponent implements OnInit {
 
   openSignup(): void {
     if (this.loginPortal === 'ADMIN') return;
+    if (this.loginPortal === 'CUSTOMER') {
+      this.notice = 'Enter your WhatsApp number and verify the code to create your account.';
+      return;
+    }
     this.signupRestaurant = this.loginPortal === 'RESTAURANT';
     this.view = 'signup';
     this.error = '';
@@ -715,12 +729,21 @@ export class AppComponent implements OnInit {
   }
 
   openCart(): void {
+    if (!this.isCustomer && this.customerOtpPurpose !== 'ORDER') {
+      this.customerOtpChallengeId = '';
+      this.customerOtpCode = '';
+      this.customerOtpDevelopmentCode = '';
+    }
     this.view = 'cart';
     this.error = '';
   }
 
   placeOrder(): void {
     if (!this.selectedRestaurant || !this.cartItems.length) return;
+    if (!this.isCustomer) {
+      this.error = 'Verify your WhatsApp number before placing an order.';
+      return;
+    }
     if (this.deliveryLatitude === null || this.deliveryLongitude === null) {
       this.error = 'Choose your delivery location on the map first.';
       return;
@@ -734,16 +757,6 @@ export class AppComponent implements OnInit {
       this.error = 'Enter a delivery address with at least 5 characters.';
       return;
     }
-    const guestName = this.guestName.trim();
-    const guestPhone = this.guestPhone.trim();
-    if (!this.isCustomer && !guestName) {
-      this.error = 'Enter your name for guest checkout.';
-      return;
-    }
-    if (!this.isCustomer && !/^\+?[0-9 ()-]{8,20}$/.test(guestPhone)) {
-      this.error = 'Enter a valid Qatar mobile or WhatsApp number.';
-      return;
-    }
     this.loading = true;
     this.error = '';
     const idempotencyKey = crypto.randomUUID();
@@ -752,9 +765,7 @@ export class AppComponent implements OnInit {
       items: this.cartItems.map(({ item, quantity }) => ({ menuItemId: item._id, quantity })),
       address,
       promotionCode: this.promotionCode || undefined,
-      idempotencyKey,
-      guestName,
-      guestPhone
+      idempotencyKey
     };
     if (this.deliveryLatitude !== null && this.deliveryLongitude !== null) {
       body['latitude'] = this.deliveryLatitude;
@@ -820,6 +831,10 @@ export class AppComponent implements OnInit {
   }
 
   signIn(): void {
+    if (this.loginPortal === 'CUSTOMER') {
+      this.requestCustomerOtp('LOGIN');
+      return;
+    }
     this.http.post<{ token: string; user: User }>(`${this.api}/auth/login`, {
       email: this.authEmail,
       password: this.authPassword,
@@ -844,7 +859,65 @@ export class AppComponent implements OnInit {
     });
   }
 
+  requestCustomerOtp(purpose: 'LOGIN' | 'ORDER'): void {
+    const phone = purpose === 'ORDER' ? this.guestPhone.trim() : this.customerAuthPhone.trim();
+    this.customerOtpDevelopmentCode = '';
+    this.loading = true;
+    this.error = '';
+    this.http.post<{ challengeId: string; message: string; deliveryMode: 'WHATSAPP' | 'DEVELOPMENT'; developmentCode?: string }>(`${this.api}/auth/customer-otp/request`, {
+      phone,
+      purpose
+    }).pipe(finalize(() => {
+      this.loading = false;
+      this.changeDetector.markForCheck();
+    })).subscribe({
+      next: ({ challengeId, message, developmentCode }) => {
+        this.customerOtpChallengeId = challengeId;
+        this.customerOtpPurpose = purpose;
+        this.customerOtpCode = '';
+        this.customerOtpDevelopmentCode = developmentCode || '';
+        this.notice = message;
+      },
+      error: (error) => this.showError(error)
+    });
+  }
+
+  verifyCustomerOtp(purpose: 'LOGIN' | 'ORDER'): void {
+    const phone = purpose === 'ORDER' ? this.guestPhone.trim() : this.customerAuthPhone.trim();
+    this.loading = true;
+    this.error = '';
+    this.http.post<{ token: string; user: User; purpose: 'LOGIN' | 'ORDER' }>(`${this.api}/auth/customer-otp/verify`, {
+      challengeId: this.customerOtpChallengeId,
+      phone,
+      code: this.customerOtpCode.trim()
+    }).pipe(finalize(() => {
+      this.loading = false;
+      this.changeDetector.markForCheck();
+    })).subscribe({
+      next: ({ token, user }) => {
+        localStorage.setItem(this.tokenKey, token);
+        this.user = user;
+        this.customerOtpChallengeId = '';
+        this.customerOtpCode = '';
+        this.customerOtpDevelopmentCode = '';
+        this.error = '';
+        if (purpose === 'ORDER') {
+          this.notice = 'WhatsApp number verified. Your account is ready; you can now place your order.';
+          this.view = 'cart';
+        } else {
+          this.notice = 'Your WhatsApp number is verified. Welcome to KABHI.';
+          this.loadRoleLanding();
+        }
+      },
+      error: (error) => this.showError(error)
+    });
+  }
+
   signUp(): void {
+    if (!this.signupRestaurant) {
+      this.error = 'Customer accounts are created after WhatsApp verification.';
+      return;
+    }
     if (this.signupRestaurant && (
       this.signupLatitude === null || this.signupLongitude === null ||
       !Number.isFinite(this.signupServiceRadiusKm) || this.signupServiceRadiusKm < 0.5 || this.signupServiceRadiusKm > 100
@@ -852,9 +925,8 @@ export class AppComponent implements OnInit {
       this.error = 'Select your restaurant location on the map and set a delivery radius from 0.5 to 100 km.';
       return;
     }
-    const endpoint = this.signupRestaurant ? '/auth/register-restaurant' : '/auth/register';
-    const body = this.signupRestaurant
-      ? {
+    const endpoint = '/auth/register-restaurant';
+    const body = {
           ownerName: this.signupName,
           email: this.authEmail,
           password: this.authPassword,
@@ -865,8 +937,7 @@ export class AppComponent implements OnInit {
           latitude: this.signupLatitude,
           longitude: this.signupLongitude,
           serviceRadiusKm: this.signupServiceRadiusKm
-        }
-      : { name: this.signupName, email: this.authEmail, password: this.authPassword, phone: this.signupPhone };
+        };
     this.http.post<{ token: string; user: User; message?: string }>(`${this.api}${endpoint}`, body).subscribe({
       next: ({ token, user, message }) => {
         localStorage.setItem(this.tokenKey, token);
@@ -885,6 +956,9 @@ export class AppComponent implements OnInit {
     this.orders = [];
     this.view = 'home';
     this.loginPortal = 'CUSTOMER';
+    this.customerOtpChallengeId = '';
+    this.customerOtpCode = '';
+    this.customerOtpDevelopmentCode = '';
     window.history.replaceState(null, '', '/');
     this.loadRestaurants();
     this.notice = 'You have been signed out.';
@@ -905,7 +979,6 @@ export class AppComponent implements OnInit {
     this.http.get<{ restaurant: Restaurant }>(`${this.api}/restaurant/me`, { headers: this.headers() }).subscribe({
       next: ({ restaurant }) => {
         this.selectedRestaurant = restaurant;
-        this.setRestaurantProfile(restaurant);
         this.http.get<{ orders: Order[] }>(`${this.api}/restaurant/orders`, { headers: this.headers() }).subscribe({
           next: ({ orders }) => (this.restaurantOrders = orders),
           error: (error) => this.showError(error)
@@ -936,21 +1009,6 @@ export class AppComponent implements OnInit {
   changeAvailability(availability: string): void {
     this.http.patch(`${this.api}/restaurant/availability`, { availability }, { headers: this.headers() }).subscribe({
       next: () => this.loadRestaurantPortal(),
-      error: (error) => this.showError(error)
-    });
-  }
-
-  saveRestaurantProfile(): void {
-    const body = {
-      ...this.restaurantProfileDraft,
-      cuisine: this.restaurantProfileDraft.cuisine.split(',').map((entry) => entry.trim()).filter(Boolean)
-    };
-    this.http.patch<{ restaurant: Restaurant }>(`${this.api}/restaurant/me`, body, { headers: this.headers() }).subscribe({
-      next: ({ restaurant }) => {
-        this.selectedRestaurant = restaurant;
-        this.setRestaurantProfile(restaurant);
-        this.notice = 'Restaurant profile saved.';
-      },
       error: (error) => this.showError(error)
     });
   }
@@ -1177,6 +1235,7 @@ export class AppComponent implements OnInit {
 
   loadAdmin(): void {
     this.view = 'adminPortal';
+    this.loadAdminWhatsappConfig();
     this.http.get<{
       metrics: { [key: string]: number };
       orders: Order[];
@@ -1211,6 +1270,74 @@ export class AppComponent implements OnInit {
         this.advertisements = data.advertisements;
       },
       error: (error) => this.showError(error)
+    });
+  }
+
+  loadAdminWhatsappConfig(): void {
+    this.http.get<WhatsappConfigStatus>(`${this.api}/admin/whatsapp-config`, { headers: this.headers() }).subscribe({
+      next: (status) => {
+        this.adminWhatsappStatus = status;
+        this.whatsappOtpDeliveryEnabled = status.otpDeliveryEnabled;
+        this.whatsappTemplateName = status.templateName;
+        this.whatsappLanguage = status.language;
+        this.whatsappGraphVersion = status.graphVersion;
+      },
+      error: (error) => this.showError(error)
+    });
+  }
+
+  saveAdminWhatsappConfig(): void {
+    if (!this.whatsappAccessToken.trim() && !this.adminWhatsappStatus?.accessTokenConfigured) {
+      this.error = 'Enter the WhatsApp Cloud API access token.';
+      return;
+    }
+    if (!this.whatsappPhoneNumberId.trim() && !this.adminWhatsappStatus?.phoneNumberIdConfigured) {
+      this.error = 'Enter the WhatsApp Phone Number ID from Meta API Setup.';
+      return;
+    }
+    this.loading = true;
+    this.error = '';
+    this.http.put<{ message: string }>(`${this.api}/admin/whatsapp-config`, {
+      accessToken: this.whatsappAccessToken,
+      phoneNumberId: this.whatsappPhoneNumberId,
+      templateName: this.whatsappTemplateName,
+      language: this.whatsappLanguage,
+      graphVersion: this.whatsappGraphVersion
+    }, { headers: this.headers() }).pipe(finalize(() => {
+      this.loading = false;
+      this.changeDetector.markForCheck();
+    })).subscribe({
+      next: ({ message }) => {
+        this.whatsappAccessToken = '';
+        this.whatsappPhoneNumberId = '';
+        this.notice = message;
+        this.loadAdminWhatsappConfig();
+      },
+      error: (error) => this.showError(error)
+    });
+  }
+
+  setWhatsappOtpDelivery(event: Event): void {
+    const enabled = (event.currentTarget as HTMLInputElement).checked;
+    this.loading = true;
+    this.error = '';
+    this.http.put<{ deliveryEnabled: boolean; message: string }>(`${this.api}/admin/whatsapp-config/otp-delivery`, {
+      enabled
+    }, { headers: this.headers() }).pipe(finalize(() => {
+      this.loading = false;
+      this.changeDetector.markForCheck();
+    })).subscribe({
+      next: ({ deliveryEnabled, message }) => {
+        this.whatsappOtpDeliveryEnabled = deliveryEnabled;
+        if (this.adminWhatsappStatus) {
+          this.adminWhatsappStatus = { ...this.adminWhatsappStatus, otpDeliveryEnabled: deliveryEnabled };
+        }
+        this.notice = message;
+      },
+      error: (error) => {
+        this.whatsappOtpDeliveryEnabled = this.adminWhatsappStatus?.otpDeliveryEnabled ?? true;
+        this.showError(error);
+      }
     });
   }
 
