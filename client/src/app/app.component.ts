@@ -149,7 +149,9 @@ export class AppComponent implements OnInit {
   private readonly maxImageBytes = 256 * 1024;
   private readonly maxSourceImageBytes = 10 * 1024 * 1024;
   private readonly maxImagePixels = 40_000_000;
-  private readonly api = 'http://localhost:3000/api';
+  private readonly api = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
+    ? 'http://localhost:3000/api'
+    : '/api';
   private readonly tokenKey = 'kahbi.session';
   private readonly deliveryLocationKeys = {
     latitude: 'kahbi.delivery.latitude',

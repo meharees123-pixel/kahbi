@@ -55,6 +55,12 @@ Requirements: Node.js 22.22.3+ (or 24.15.0+) and MongoDB 7+ running locally.
 
 Production API: `npm start`. Production Angular build: `npm run build`.
 
+## Google Cloud deployment
+
+`.github/workflows/google-cloud-deploy.yml` tests and builds on pull requests to `main`, then builds and deploys the API and production Angular/Nginx frontend to Cloud Run after changes reach `main`. Deployment is intentionally gated until `KAHBI_GCP_DEPLOY_ENABLED=true` is added as a GitHub Actions repository variable and the Google Cloud settings are configured. The frontend serves the Angular production bundle and proxies `/api` requests to the API service; local development continues to use `localhost:3000`.
+
+See [Google Cloud deployment setup](.github/DEPLOYMENT.md) for required GitHub variables, Workload Identity Federation, Artifact Registry, Cloud Run and Secret Manager setup. No service-account key or database credential belongs in Git. Production secrets are injected from Secret Manager. The release workflow does not seed demo accounts or reset passwords.
+
 ## Free-delivery locations and OpenStreetMap
 
 The customer home page lets customers choose a delivery pin or use browser geolocation. KABHI then shows approved restaurants whose configured delivery radius covers that point, nearest first. Checkout requires the pin and the customer's full building/street address; the API checks coverage again before creating an order. Restaurant owners select their location and a 0.5–100 km free-delivery radius during signup. Admins can set or update both in restaurant management.
