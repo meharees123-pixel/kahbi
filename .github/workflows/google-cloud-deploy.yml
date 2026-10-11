@@ -83,6 +83,7 @@ jobs:
         run: gcloud auth configure-docker "${GCP_REGION}-docker.pkg.dev" --quiet
 
       - name: Build and push production images
+        id: build_images
         shell: bash
         run: |
           image_root="${GCP_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${GAR_REPOSITORY}/kahbi"
@@ -90,45 +91,52 @@ jobs:
           docker build --file client/Dockerfile.prod --tag "${image_root}-web:${GITHUB_SHA}" client
           docker push "${image_root}-api:${GITHUB_SHA}"
           docker push "${image_root}-web:${GITHUB_SHA}"
-          echo "API_IMAGE=${image_root}-api:${GITHUB_SHA}" >> "$GITHUB_ENV"
-          echo "WEB_IMAGE=${image_root}-web:${GITHUB_SHA}" >> "$GITHUB_ENV"
+          echo "api_image=${image_root}-api:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+          echo "web_image=${image_root}-web:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
 
       - name: Deploy API to Cloud Run
-        shell: bash
-        run: |
-          gcloud run deploy "$API_SERVICE" \
-            --project "$GCP_PROJECT_ID" \
-            --region "$GCP_REGION" \
-            --platform managed \
-            --image "$API_IMAGE" \
-            --service-account "$RUNTIME_SERVICE_ACCOUNT" \
-            --port 8080 \
-            --memory 1Gi \
-            --cpu 1 \
-            --max 10 \
-            --allow-unauthenticated \
-            --set-env-vars "NODE_ENV=production,PORT=8080,CURRENCY=QAR" \
-            --set-secrets "MONGODB_URI=${MONGODB_SECRET}:latest,JWT_SECRET=${JWT_SECRET}:latest,OTP_SIGNING_SECRET=${OTP_SIGNING_SECRET}:latest,WHATSAPP_CONFIG_ENCRYPTION_KEY=${WHATSAPP_ENCRYPTION_SECRET}:latest" \
-            --quiet
-          api_url="$(gcloud run services describe "$API_SERVICE" --project "$GCP_PROJECT_ID" --region "$GCP_REGION" --format='value(status.url)')"
-          if [[ -z "$api_url" ]]; then echo "Could not resolve the deployed API URL."; exit 1; fi
-          echo "API_UPSTREAM=$api_url" >> "$GITHUB_ENV"
+        id: deploy_api
+        uses: google-github-actions/deploy-cloudrun@v2
+        with:
+          service: ${{ env.API_SERVICE }}
+          image: ${{ steps.build_images.outputs.api_image }}
+          project_id: ${{ env.GCP_PROJECT_ID }}
+          region: ${{ env.GCP_REGION }}
+          env_vars: |-
+            NODE_ENV=production
+            PORT=8080
+            CURRENCY=QAR
+          secrets: |-
+            MONGODB_URI=${{ env.MONGODB_SECRET }}:latest
+            JWT_SECRET=${{ env.JWT_SECRET }}:latest
+            OTP_SIGNING_SECRET=${{ env.OTP_SIGNING_SECRET }}:latest
+            WHATSAPP_CONFIG_ENCRYPTION_KEY=${{ env.WHATSAPP_ENCRYPTION_SECRET }}:latest
+          flags: >-
+            --service-account=${{ env.RUNTIME_SERVICE_ACCOUNT }}
+            --port=8080
+            --memory=1Gi
+            --cpu=1
+            --max=10
+            --allow-unauthenticated
 
       - name: Deploy web app to Cloud Run
-        shell: bash
-        run: |
-          gcloud run deploy "$WEB_SERVICE" \
-            --project "$GCP_PROJECT_ID" \
-            --region "$GCP_REGION" \
-            --platform managed \
-            --image "$WEB_IMAGE" \
-            --service-account "$RUNTIME_SERVICE_ACCOUNT" \
-            --port 8080 \
-            --memory 256Mi \
-            --cpu 1 \
-            --max 10 \
-            --allow-unauthenticated \
-            --set-env-vars "PORT=8080,API_UPSTREAM=${API_UPSTREAM}" \
-            --quiet
-          web_url="$(gcloud run services describe "$WEB_SERVICE" --project "$GCP_PROJECT_ID" --region "$GCP_REGION" --format='value(status.url)')"
-          echo "KABHI deployed successfully: $web_url"
+        id: deploy_web
+        uses: google-github-actions/deploy-cloudrun@v2
+        with:
+          service: ${{ env.WEB_SERVICE }}
+          image: ${{ steps.build_images.outputs.web_image }}
+          project_id: ${{ env.GCP_PROJECT_ID }}
+          region: ${{ env.GCP_REGION }}
+          env_vars: |-
+            PORT=8080
+            API_UPSTREAM=${{ steps.deploy_api.outputs.url }}
+          flags: >-
+            --service-account=${{ env.RUNTIME_SERVICE_ACCOUNT }}
+            --port=8080
+            --memory=256Mi
+            --cpu=1
+            --max=10
+            --allow-unauthenticated
+
+      - name: Report deployed URL
+        run: echo "KABHI deployed successfully at ${{ steps.deploy_web.outputs.url }}"

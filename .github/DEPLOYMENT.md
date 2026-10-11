@@ -48,7 +48,7 @@ Add the deployment service-account JSON key as the GitHub Actions secret `GCP_SA
 
 ## Deployment behavior and first release
 
-Each main-branch deployment builds immutable images tagged with the commit SHA and deploys two public Cloud Run services: `kahbi-api` and `kahbi-web`. The web container serves Angular's production build and proxies `/api/` requests to the deployed API. The API uses Cloud Run's injected port and production mode.
+Each main-branch deployment builds immutable images tagged with the commit SHA and deploys two public Cloud Run services with `google-github-actions/deploy-cloudrun@v2`: `kahbi-api` and `kahbi-web`. The web container serves Angular's production build and proxies `/api/` requests to the API URL returned by the API deployment step. The API uses Cloud Run's injected port and production mode.
 
 The API service is publicly reachable, with application authentication and role checks protecting authorized routes. Do not remove those API checks. The browser uses the web service origin, avoiding a hard-coded Cloud Run URL and cross-origin browser API calls.
 
