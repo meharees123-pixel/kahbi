@@ -1,7 +1,10 @@
 import { CommonModule } from '@angular/common';
 import { HttpClient, HttpHeaders } from '@angular/common/http';
-import { Component, OnInit } from '@angular/core';
+import { ChangeDetectorRef, Component, OnInit } from '@angular/core';
 import { FormsModule } from '@angular/forms';
+import * as L from 'leaflet';
+import { finalize, firstValueFrom } from 'rxjs';
+import { LoadingIndicatorService } from './loading-indicator.service';
 
 interface User {
   id: string;
@@ -16,10 +19,16 @@ interface User {
 interface Restaurant {
   _id: string;
   name: string;
+  imageData?: string;
   hotelName?: string;
   cuisine: string[];
   description: string;
   address: string;
+  phone?: string;
+  email?: string;
+  latitude?: number | null;
+  longitude?: number | null;
+  serviceRadiusKm?: number | null;
   category: string;
   preparationMinutes: number;
   minOrder: number;
@@ -59,6 +68,8 @@ interface RestaurantProfileDraft {
 interface MenuItem {
   _id: string;
   name: string;
+  imageData?: string;
+  active?: boolean;
   description: string;
   category: string;
   price: number;
@@ -129,6 +140,13 @@ interface BillingRecord {
   createdAt: string;
 }
 
+interface MapPoint {
+  lat: number;
+  lng: number;
+}
+
+type LoginPortal = 'CUSTOMER' | 'RESTAURANT' | 'ADMIN';
+
 @Component({
   selector: 'kahbi-root',
   standalone: true,
@@ -136,9 +154,22 @@ interface BillingRecord {
   templateUrl: './app.component.html'
 })
 export class AppComponent implements OnInit {
+  private readonly maxImageBytes = 256 * 1024;
+  private readonly maxSourceImageBytes = 10 * 1024 * 1024;
+  private readonly maxImagePixels = 40_000_000;
   private readonly api = 'http://localhost:3000/api';
   private readonly tokenKey = 'kahbi.session';
+  private readonly deliveryLocationKeys = {
+    latitude: 'kahbi.delivery.latitude',
+    longitude: 'kahbi.delivery.longitude',
+    label: 'kahbi.delivery.label'
+  };
+  private mapPicker: L.Map | null = null;
+  private mapMarker: L.CircleMarker | null = null;
+  private mapGeocodeTimer: ReturnType<typeof setTimeout> | null = null;
+  private mapSelectionRequest = 0;
   view = 'home';
+  loginPortal: LoginPortal = 'CUSTOMER';
   user: User | null = null;
   restaurants: Restaurant[] = [];
   menu: MenuItem[] = [];
@@ -151,12 +182,10 @@ export class AppComponent implements OnInit {
   restaurantMenu: MenuItem[] = [];
   pendingRestaurants: Restaurant[] = [];
   adminRestaurants: Restaurant[] = [];
-  adminRestaurantStatus = 'ALL';
+  adminRestaurant: Restaurant | null = null;
+  adminCuisineDraft = '';
   adminRestaurantSearch = '';
-  adminRestaurantPage = 1;
-  adminRestaurantTotal = 0;
-  adminRestaurantTotalPages = 1;
-  readonly adminRestaurantPageSize = 50;
+  adminMenu: MenuItem[] = [];
   allOrders: Order[] = [];
   metrics: { [key: string]: number } = {};
   messageLogs: { template: string; status: string; recipient: string }[] = [];
@@ -164,7 +193,8 @@ export class AppComponent implements OnInit {
   billingTransactions: BillingRecord[] = [];
   restaurantBilling: BillingRecord[] = [];
   customers: CustomerRecord[] = [];
-  error = '';
+  private errorDismissTimer: ReturnType<typeof setTimeout> | null = null;
+  private errorMessage = '';
   notice = '';
   loading = false;
   search = '';
@@ -174,6 +204,14 @@ export class AppComponent implements OnInit {
   deliveryAddress = '';
   deliveryLatitude: number | null = null;
   deliveryLongitude: number | null = null;
+  deliveryLocationLabel = '';
+  mapPickerOpen = false;
+  mapPickerPurpose: 'delivery' | 'signupRestaurant' | 'adminCreateRestaurant' | 'adminEditRestaurant' = 'delivery';
+  mapSelection: MapPoint | null = null;
+  mapSelectionAddress = '';
+  mapLoading = false;
+  mapError = '';
+  mapNotice = '';
   promotionCode = '';
   trackReference = '';
   trackPhone = '';
@@ -187,6 +225,9 @@ export class AppComponent implements OnInit {
   signupRestaurantName = '';
   signupCuisine = '';
   signupAddress = '';
+  signupLatitude: number | null = null;
+  signupLongitude: number | null = null;
+  signupServiceRadiusKm = 5;
   newItemName = '';
   newItemCategory = '';
   newItemPrice = 0;
@@ -203,10 +244,68 @@ export class AppComponent implements OnInit {
   newPromotionMinimum = 0;
   newAdvertisementTitle = '';
   newAdvertisementDescription = '';
+  restaurantImageDraft: string | null = null;
+  menuImageDrafts: Record<string, string> = {};
+  newItemImageData = '';
+  newAdminRestaurantName = '';
+  newAdminRestaurantCuisine = '';
+  newAdminRestaurantAddress = '';
+  newAdminRestaurantDescription = '';
+  newAdminRestaurantPhone = '';
+  newAdminRestaurantEmail = '';
+  newAdminRestaurantLatitude: number | null = null;
+  newAdminRestaurantLongitude: number | null = null;
+  newAdminRestaurantRadiusKm = 5;
+  adminRestaurantImageDraft = '';
+  adminMenuImageDrafts: Record<string, string> = {};
+  newAdminItemName = '';
+  newAdminItemCategory = '';
+  newAdminItemPrice = 0;
+  newAdminItemDescription = '';
+  newAdminItemImageData = '';
 
-  constructor(private readonly http: HttpClient) {}
+  constructor(
+    private readonly http: HttpClient,
+    private readonly changeDetector: ChangeDetectorRef,
+    readonly loadingIndicator: LoadingIndicatorService
+  ) {}
+
+  get error(): string {
+    return this.errorMessage;
+  }
+
+  set error(message: string) {
+    this.errorMessage = message;
+    if (this.errorDismissTimer) {
+      clearTimeout(this.errorDismissTimer);
+      this.errorDismissTimer = null;
+    }
+    if (message) {
+      this.errorDismissTimer = window.setTimeout(() => {
+        this.errorMessage = '';
+        this.errorDismissTimer = null;
+        this.changeDetector.markForCheck();
+      }, 6000);
+    }
+  }
 
   ngOnInit(): void {
+    this.applyLocationRoute();
+    window.addEventListener('popstate', () => {
+      this.applyLocationRoute();
+      this.changeDetector.markForCheck();
+    });
+    const savedLatitude = localStorage.getItem(this.deliveryLocationKeys.latitude);
+    const savedLongitude = localStorage.getItem(this.deliveryLocationKeys.longitude);
+    if (savedLatitude !== null && savedLongitude !== null) {
+      const latitude = Number(savedLatitude);
+      const longitude = Number(savedLongitude);
+      if (this.isCoordinate(latitude, -90, 90) && this.isCoordinate(longitude, -180, 180)) {
+        this.deliveryLatitude = latitude;
+        this.deliveryLongitude = longitude;
+        this.deliveryLocationLabel = localStorage.getItem(this.deliveryLocationKeys.label) || 'Selected delivery location';
+      }
+    }
     const token = localStorage.getItem(this.tokenKey);
     if (token) {
       this.http.get<{ user: User }>(`${this.api}/auth/me`, { headers: this.headers() }).subscribe({
@@ -243,11 +342,28 @@ export class AppComponent implements OnInit {
   }
 
   get isRestaurantUser(): boolean {
-    return Boolean(this.user?.role.startsWith('RESTAURANT_'));
+    return this.user?.role.startsWith('RESTAURANT_') ?? false;
   }
 
   get isAdminUser(): boolean {
     return this.user?.role === 'ADMIN' || this.user?.role === 'SUPER_ADMIN';
+  }
+
+  get isSelectedRestaurantInDeliveryRange(): boolean {
+    const restaurant = this.selectedRestaurant;
+    if (this.deliveryLatitude === null || this.deliveryLongitude === null ||
+        restaurant?.latitude == null || restaurant.longitude == null ||
+        restaurant.serviceRadiusKm == null) return false;
+    return this.distanceKm(this.deliveryLatitude, this.deliveryLongitude, restaurant.latitude, restaurant.longitude) <= restaurant.serviceRadiusKm;
+  }
+
+  get filteredAdminRestaurants(): Restaurant[] {
+    const query = this.adminRestaurantSearch.trim().toLowerCase();
+    if (!query) return this.adminRestaurants;
+    return this.adminRestaurants.filter((restaurant) =>
+      [restaurant.name, restaurant.address, restaurant.status, restaurant.availability, ...restaurant.cuisine]
+        .some((value) => value?.toLowerCase().includes(query))
+    );
   }
 
   headers(): HttpHeaders {
@@ -257,9 +373,11 @@ export class AppComponent implements OnInit {
 
   private showError(error: { error?: { error?: string } }): void {
     this.error = error.error?.error || 'Could not complete that request. Please try again.';
+    this.changeDetector.markForCheck();
   }
 
   private loadRoleLanding(): void {
+    window.history.replaceState(null, '', '/');
     if (this.user?.role === 'CUSTOMER') {
       this.view = 'home';
       this.loadRestaurants();
@@ -273,64 +391,53 @@ export class AppComponent implements OnInit {
     }
   }
 
-  private emptyRestaurantProfile(): RestaurantProfileDraft {
-    return {
-      name: '',
-      hotelName: '',
-      cuisine: '',
-      description: '',
-      address: '',
-      latitude: null,
-      longitude: null,
-      serviceRadiusKm: null,
-      phone: '',
-      whatsapp: '',
-      email: '',
-      preparationMinutes: 35,
-      minOrder: 0,
-      maxOrder: 1000,
-      category: 'Restaurant'
-    };
-  }
-
-  private emptyMenuItemDraft(): { name: string; category: string; description: string; price: number; availability: string; preparationMinutes: number; bestSeller: boolean; chefRecommended: boolean } {
-    return { name: '', category: '', description: '', price: 0, availability: 'AVAILABLE', preparationMinutes: 15, bestSeller: false, chefRecommended: false };
-  }
-
-  private setRestaurantProfile(restaurant: Restaurant): void {
-    this.restaurantProfileDraft = {
-      name: restaurant.name,
-      hotelName: restaurant.hotelName || '',
-      cuisine: restaurant.cuisine.join(', '),
-      description: restaurant.description || '',
-      address: restaurant.address,
-      latitude: restaurant.latitude ?? null,
-      longitude: restaurant.longitude ?? null,
-      serviceRadiusKm: restaurant.serviceRadiusKm ?? null,
-      phone: restaurant.phone || '',
-      whatsapp: restaurant.whatsapp || '',
-      email: restaurant.email || '',
-      preparationMinutes: restaurant.preparationMinutes,
-      minOrder: restaurant.minOrder,
-      maxOrder: restaurant.maxOrder || 1000,
-      category: restaurant.category || 'Restaurant'
-    };
-  }
-
-  selectDemoLogin(portal: 'CUSTOMER' | 'RESTAURANT' | 'ADMIN'): void {
+  openLogin(portal: LoginPortal): void {
     this.loginPortal = portal;
-    this.authEmail = portal === 'CUSTOMER'
-      ? 'customer@kahbi.demo'
-      : portal === 'RESTAURANT'
-        ? 'restaurant@kahbi.demo'
-        : 'admin@kahbi.demo';
-    this.authPassword = 'Demo123!';
+    this.signupRestaurant = portal === 'RESTAURANT';
+    this.view = 'login';
+    this.error = '';
+    window.history.pushState(null, '', `/login/${portal.toLowerCase()}`);
   }
 
-  private roleMatchesLoginPortal(user: User): boolean {
-    if (this.loginPortal === 'CUSTOMER') return user.role === 'CUSTOMER';
-    if (this.loginPortal === 'RESTAURANT') return user.role.startsWith('RESTAURANT_');
-    return user.role === 'ADMIN' || user.role === 'SUPER_ADMIN';
+  openSignup(): void {
+    if (this.loginPortal === 'ADMIN') return;
+    this.signupRestaurant = this.loginPortal === 'RESTAURANT';
+    this.view = 'signup';
+    this.error = '';
+  }
+
+  navigateHome(): void {
+    if (this.user) {
+      this.loadRoleLanding();
+      return;
+    }
+    this.loginPortal = 'CUSTOMER';
+    this.signupRestaurant = false;
+    this.view = 'home';
+    window.history.pushState(null, '', '/');
+    this.loadRestaurants();
+  }
+
+  private applyLocationRoute(): void {
+    const route = window.location.pathname.replace(/\/+$/, '') || '/';
+    const portalByRoute: Record<string, LoginPortal> = {
+      '/login/customer': 'CUSTOMER',
+      '/login/restaurant': 'RESTAURANT',
+      '/login/admin': 'ADMIN'
+    };
+    const portal = portalByRoute[route];
+    if (portal) {
+      this.loginPortal = portal;
+      this.signupRestaurant = portal === 'RESTAURANT';
+      this.view = 'login';
+      return;
+    }
+    if (route === '/' && !this.user && (this.view === 'login' || this.view === 'signup')) {
+      this.loginPortal = 'CUSTOMER';
+      this.signupRestaurant = false;
+      this.view = 'home';
+      this.loadRestaurants();
+    }
   }
 
   loadRestaurants(): void {
@@ -347,6 +454,7 @@ export class AppComponent implements OnInit {
         this.promotions = data.promotions;
         this.advertisements = data.advertisements;
         this.error = '';
+        this.changeDetector.markForCheck();
       },
       error: (error) => this.showError(error)
     });
@@ -358,30 +466,231 @@ export class AppComponent implements OnInit {
 
   chooseLocation(): void {
     if (!navigator.geolocation) {
-      this.notice = 'Location is unavailable in this browser. Enter your delivery address at checkout.';
+      this.openMapPicker('delivery');
       return;
     }
     navigator.geolocation.getCurrentPosition(
       (position) => {
-        this.deliveryLatitude = position.coords.latitude;
-        this.deliveryLongitude = position.coords.longitude;
+        this.setDeliveryLocation(position.coords.latitude, position.coords.longitude, 'Current location');
         this.notice = 'Nearby restaurants updated for your location.';
         this.loadRestaurants();
       },
       () => {
-        this.notice = 'Location permission was not granted. You can still browse and enter an address manually.';
+        this.notice = 'Location permission was not granted. Choose your delivery point on the map instead.';
+        this.openMapPicker('delivery');
       },
       { timeout: 8000 }
     );
   }
 
+  openMapPicker(purpose: AppComponent['mapPickerPurpose']): void {
+    this.mapPickerPurpose = purpose;
+    this.mapPickerOpen = true;
+    this.mapSelection = this.savedMapPoint(purpose);
+    this.mapSelectionAddress = this.mapSelection
+      ? purpose === 'delivery' ? this.deliveryLocationLabel
+        : purpose === 'signupRestaurant' ? this.signupAddress
+          : purpose === 'adminCreateRestaurant' ? this.newAdminRestaurantAddress
+            : this.adminRestaurant?.address || ''
+      : '';
+    this.mapError = '';
+    this.mapNotice = '';
+    this.mapLoading = true;
+    this.changeDetector.markForCheck();
+    window.setTimeout(() => void this.initializeMapPicker(), 0);
+  }
+
+  closeMapPicker(): void {
+    this.mapPickerOpen = false;
+    this.mapSelectionRequest += 1;
+    this.mapPicker?.remove();
+    this.mapPicker = null;
+    this.mapMarker = null;
+    if (this.mapGeocodeTimer) {
+      clearTimeout(this.mapGeocodeTimer);
+      this.mapGeocodeTimer = null;
+    }
+  }
+
+  useCurrentLocationInPicker(): void {
+    if (!navigator.geolocation) {
+      this.mapNotice = 'Location services are unavailable in this browser. Click your location on the map.';
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        const point = { lat: position.coords.latitude, lng: position.coords.longitude };
+        this.mapPicker?.setView([point.lat, point.lng], 15);
+        this.setMapSelection(point);
+      },
+      () => {
+        this.mapNotice = 'Location permission was not granted. Click the correct location on the map.';
+        this.changeDetector.markForCheck();
+      },
+      { timeout: 10000 }
+    );
+  }
+
+  confirmMapSelection(): void {
+    if (!this.mapSelection) return;
+    const { lat, lng } = this.mapSelection;
+    const locationLabel = this.mapSelectionAddress || `${lat.toFixed(5)}, ${lng.toFixed(5)}`;
+    if (this.mapPickerPurpose === 'delivery') {
+      const previousLabel = this.deliveryLocationLabel;
+      const addressFollowsPin = this.deliveryAddress.trim() === previousLabel && !!previousLabel;
+      this.setDeliveryLocation(lat, lng, locationLabel);
+      if (addressFollowsPin) {
+        this.deliveryAddress = locationLabel;
+      }
+      this.notice = 'Showing restaurants that deliver to your selected location.';
+      this.loadRestaurants();
+    } else if (this.mapPickerPurpose === 'signupRestaurant') {
+      this.signupLatitude = lat;
+      this.signupLongitude = lng;
+      this.signupAddress = locationLabel;
+    } else if (this.mapPickerPurpose === 'adminCreateRestaurant') {
+      this.newAdminRestaurantLatitude = lat;
+      this.newAdminRestaurantLongitude = lng;
+      this.newAdminRestaurantAddress = locationLabel;
+    } else if (this.adminRestaurant) {
+      this.adminRestaurant.latitude = lat;
+      this.adminRestaurant.longitude = lng;
+      this.adminRestaurant.address = locationLabel;
+    }
+    this.closeMapPicker();
+    this.changeDetector.markForCheck();
+  }
+
+  private setDeliveryLocation(latitude: number, longitude: number, label: string): void {
+    this.deliveryLatitude = latitude;
+    this.deliveryLongitude = longitude;
+    this.deliveryLocationLabel = label;
+    localStorage.setItem(this.deliveryLocationKeys.latitude, String(latitude));
+    localStorage.setItem(this.deliveryLocationKeys.longitude, String(longitude));
+    localStorage.setItem(this.deliveryLocationKeys.label, label);
+  }
+
+  private isCoordinate(value: number, min: number, max: number): boolean {
+    return Number.isFinite(value) && value >= min && value <= max;
+  }
+
+  private distanceKm(latitude1: number, longitude1: number, latitude2: number, longitude2: number): number {
+    const radians = (degrees: number) => degrees * Math.PI / 180;
+    const latitudeDelta = radians(latitude2 - latitude1);
+    const longitudeDelta = radians(longitude2 - longitude1);
+    const a = Math.sin(latitudeDelta / 2) ** 2 +
+      Math.cos(radians(latitude1)) * Math.cos(radians(latitude2)) * Math.sin(longitudeDelta / 2) ** 2;
+    return 6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  }
+
+  private async initializeMapPicker(): Promise<void> {
+    try {
+      if (!this.mapPickerOpen) return;
+      const element = document.getElementById('location-picker-map');
+      if (!element) throw new Error('The location map could not be initialized. Close it and try again.');
+      const center = this.mapInitialPoint();
+      this.mapPicker = L.map(element, { zoomControl: true, scrollWheelZoom: false })
+        .setView([center.lat, center.lng], this.mapSelection ? 15 : 11);
+      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+        maxZoom: 19,
+        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap</a> contributors'
+      }).addTo(this.mapPicker);
+      if (this.mapSelection) {
+        this.setMapMarker(this.mapSelection);
+      }
+      this.mapPicker.on('click', (event: L.LeafletMouseEvent) => {
+        this.setMapSelection({ lat: event.latlng.lat, lng: event.latlng.lng });
+      });
+    } catch (error) {
+      this.mapError = error instanceof Error ? error.message : 'The OpenStreetMap picker could not be initialized.';
+    } finally {
+      this.mapLoading = false;
+      this.changeDetector.markForCheck();
+      window.setTimeout(() => this.mapPicker?.invalidateSize(), 0);
+    }
+  }
+
+  private mapInitialPoint(): MapPoint {
+    return this.savedMapPoint(this.mapPickerPurpose) || { lat: 25.2854, lng: 51.531 };
+  }
+
+  private savedMapPoint(purpose: AppComponent['mapPickerPurpose']): MapPoint | null {
+    if (purpose === 'delivery' && this.deliveryLatitude !== null && this.deliveryLongitude !== null) {
+      return { lat: this.deliveryLatitude, lng: this.deliveryLongitude };
+    }
+    if (purpose === 'signupRestaurant' && this.signupLatitude !== null && this.signupLongitude !== null) {
+      return { lat: this.signupLatitude, lng: this.signupLongitude };
+    }
+    if (purpose === 'adminCreateRestaurant' && this.newAdminRestaurantLatitude !== null && this.newAdminRestaurantLongitude !== null) {
+      return { lat: this.newAdminRestaurantLatitude, lng: this.newAdminRestaurantLongitude };
+    }
+    if (purpose === 'adminEditRestaurant' && this.adminRestaurant?.latitude != null && this.adminRestaurant.longitude != null) {
+      return { lat: this.adminRestaurant.latitude, lng: this.adminRestaurant.longitude };
+    }
+    return null;
+  }
+
+  private setMapSelection(point: MapPoint): void {
+    this.mapSelection = point;
+    this.setMapMarker(point);
+    this.mapSelectionAddress = `${point.lat.toFixed(5)}, ${point.lng.toFixed(5)}`;
+    this.mapError = '';
+    this.mapNotice = '';
+    const requestId = ++this.mapSelectionRequest;
+    if (this.mapGeocodeTimer) clearTimeout(this.mapGeocodeTimer);
+    this.mapGeocodeTimer = window.setTimeout(() => {
+      void this.reverseGeocodeSelection(point, requestId);
+    }, 1100);
+    this.changeDetector.markForCheck();
+  }
+
+  private setMapMarker(point: MapPoint): void {
+    if (!this.mapPicker) return;
+    if (this.mapMarker) {
+      this.mapMarker.setLatLng([point.lat, point.lng]);
+      return;
+    }
+    this.mapMarker = L.circleMarker([point.lat, point.lng], {
+      radius: 9,
+      color: '#ffffff',
+      weight: 3,
+      fillColor: '#0e4037',
+      fillOpacity: 1
+    }).addTo(this.mapPicker);
+  }
+
+  private async reverseGeocodeSelection(point: MapPoint, requestId: number): Promise<void> {
+    try {
+      const result = await firstValueFrom(this.http.get<{ display_name?: string }>(
+        'https://nominatim.openstreetmap.org/reverse',
+        { params: { format: 'jsonv2', lat: String(point.lat), lon: String(point.lng), zoom: '18' } }
+      ));
+      if (requestId === this.mapSelectionRequest && result.display_name) {
+        this.mapSelectionAddress = result.display_name;
+      }
+    } catch {
+      if (requestId === this.mapSelectionRequest) {
+        this.mapNotice = 'Could not look up a nearby address. Your map pin is still selected; enter the full address at checkout.';
+      }
+    } finally {
+      this.changeDetector.markForCheck();
+    }
+  }
+
   openRestaurant(restaurant: Restaurant): void {
     this.http.get<{ restaurant: Restaurant; items: MenuItem[] }>(`${this.api}/restaurants/${restaurant._id}/menu`).subscribe({
       next: (data) => {
-        this.selectedRestaurant = data.restaurant;
+        this.selectedRestaurant = {
+          ...data.restaurant,
+          distanceKm: this.deliveryLatitude !== null && this.deliveryLongitude !== null &&
+            data.restaurant.latitude != null && data.restaurant.longitude != null
+            ? Number(this.distanceKm(this.deliveryLatitude, this.deliveryLongitude, data.restaurant.latitude, data.restaurant.longitude).toFixed(2))
+            : null
+        };
         this.menu = data.items;
         this.view = 'restaurant';
         this.error = '';
+        this.changeDetector.markForCheck();
       },
       error: (error) => this.showError(error)
     });
@@ -412,37 +721,66 @@ export class AppComponent implements OnInit {
 
   placeOrder(): void {
     if (!this.selectedRestaurant || !this.cartItems.length) return;
+    if (this.deliveryLatitude === null || this.deliveryLongitude === null) {
+      this.error = 'Choose your delivery location on the map first.';
+      return;
+    }
+    if (!this.isSelectedRestaurantInDeliveryRange) {
+      this.error = "This restaurant's free-delivery area does not include your selected pin.";
+      return;
+    }
+    const address = this.deliveryAddress.trim();
+    if (address.length < 5) {
+      this.error = 'Enter a delivery address with at least 5 characters.';
+      return;
+    }
+    const guestName = this.guestName.trim();
+    const guestPhone = this.guestPhone.trim();
+    if (!this.isCustomer && !guestName) {
+      this.error = 'Enter your name for guest checkout.';
+      return;
+    }
+    if (!this.isCustomer && !/^\+?[0-9 ()-]{8,20}$/.test(guestPhone)) {
+      this.error = 'Enter a valid Qatar mobile or WhatsApp number.';
+      return;
+    }
     this.loading = true;
     this.error = '';
     const idempotencyKey = crypto.randomUUID();
     const body: { [key: string]: unknown } = {
       restaurantId: this.selectedRestaurant._id,
       items: this.cartItems.map(({ item, quantity }) => ({ menuItemId: item._id, quantity })),
-      address: this.deliveryAddress,
+      address,
       promotionCode: this.promotionCode || undefined,
       idempotencyKey,
-      guestName: this.guestName,
-      guestPhone: this.guestPhone
+      guestName,
+      guestPhone
     };
     if (this.deliveryLatitude !== null && this.deliveryLongitude !== null) {
       body['latitude'] = this.deliveryLatitude;
       body['longitude'] = this.deliveryLongitude;
     }
-    this.http.post<{ order: Order }>(`${this.api}/orders`, body, { headers: this.headers().set('Idempotency-Key', idempotencyKey) }).subscribe({
-      next: ({ order }) => {
+    this.http.post<{ order?: Order }>(`${this.api}/orders`, body, { headers: this.headers().set('Idempotency-Key', idempotencyKey) }).pipe(
+      finalize(() => {
         this.loading = false;
+        this.changeDetector.markForCheck();
+      })
+    ).subscribe({
+      next: (response) => {
+        if (!response?.order) {
+          this.error = 'The order was created, but the server returned an invalid response. Check your order history before retrying.';
+          return;
+        }
+        const { order } = response;
         this.cart = {};
         sessionStorage.removeItem('kahbi.cartRestaurant');
         this.trackedOrder = order;
         this.trackReference = order.reference;
         this.trackPhone = this.isCustomer ? this.user?.phone || '' : this.guestPhone;
         this.view = 'track';
-        this.notice = `Order ${order.reference} placed. Restaurant notifications are in demo mode.`;
+        this.notice = `Order ${order.reference} placed successfully. Restaurant notifications are in demo mode.`;
       },
-      error: (error) => {
-        this.loading = false;
-        this.showError(error);
-      }
+      error: (error) => this.showError(error)
     });
   }
 
@@ -482,9 +820,11 @@ export class AppComponent implements OnInit {
   }
 
   signIn(): void {
-    this.error = '';
-    this.loading = true;
-    this.http.post<{ token: string; user: User }>(`${this.api}/auth/login`, { email: this.authEmail, password: this.authPassword }).subscribe({
+    this.http.post<{ token: string; user: User }>(`${this.api}/auth/login`, {
+      email: this.authEmail,
+      password: this.authPassword,
+      portal: this.loginPortal
+    }).subscribe({
       next: ({ token, user }) => {
         this.loading = false;
         if (!this.roleMatchesLoginPortal(user)) {
@@ -505,6 +845,13 @@ export class AppComponent implements OnInit {
   }
 
   signUp(): void {
+    if (this.signupRestaurant && (
+      this.signupLatitude === null || this.signupLongitude === null ||
+      !Number.isFinite(this.signupServiceRadiusKm) || this.signupServiceRadiusKm < 0.5 || this.signupServiceRadiusKm > 100
+    )) {
+      this.error = 'Select your restaurant location on the map and set a delivery radius from 0.5 to 100 km.';
+      return;
+    }
     const endpoint = this.signupRestaurant ? '/auth/register-restaurant' : '/auth/register';
     const body = this.signupRestaurant
       ? {
@@ -514,7 +861,10 @@ export class AppComponent implements OnInit {
           phone: this.signupPhone,
           restaurantName: this.signupRestaurantName,
           cuisine: this.signupCuisine,
-          address: this.signupAddress
+          address: this.signupAddress,
+          latitude: this.signupLatitude,
+          longitude: this.signupLongitude,
+          serviceRadiusKm: this.signupServiceRadiusKm
         }
       : { name: this.signupName, email: this.authEmail, password: this.authPassword, phone: this.signupPhone };
     this.http.post<{ token: string; user: User; message?: string }>(`${this.api}${endpoint}`, body).subscribe({
@@ -534,6 +884,8 @@ export class AppComponent implements OnInit {
     this.user = null;
     this.orders = [];
     this.view = 'home';
+    this.loginPortal = 'CUSTOMER';
+    window.history.replaceState(null, '', '/');
     this.loadRestaurants();
     this.notice = 'You have been signed out.';
   }
@@ -610,66 +962,208 @@ export class AppComponent implements OnInit {
     });
   }
 
+  async chooseRestaurantImage(event: Event): Promise<void> {
+    const input = event.currentTarget as HTMLInputElement;
+    const file = input.files?.[0];
+    if (!file) return;
+    try {
+      this.restaurantImageDraft = await this.optimizeImage(file);
+      this.error = '';
+    } catch (error) {
+      this.showError({ error: { error: error instanceof Error ? error.message : 'Could not process this image.' } });
+    } finally {
+      input.value = '';
+      this.changeDetector.markForCheck();
+    }
+  }
+
+  async chooseMenuImage(itemId: string, event: Event): Promise<void> {
+    const input = event.currentTarget as HTMLInputElement;
+    const file = input.files?.[0];
+    if (!file) return;
+    try {
+      this.menuImageDrafts[itemId] = await this.optimizeImage(file);
+      this.error = '';
+    } catch (error) {
+      this.showError({ error: { error: error instanceof Error ? error.message : 'Could not process this image.' } });
+    } finally {
+      input.value = '';
+      this.changeDetector.markForCheck();
+    }
+  }
+
+  async chooseNewItemImage(event: Event): Promise<void> {
+    const input = event.currentTarget as HTMLInputElement;
+    const file = input.files?.[0];
+    if (!file) return;
+    try {
+      this.newItemImageData = await this.optimizeImage(file);
+      this.error = '';
+    } catch (error) {
+      this.showError({ error: { error: error instanceof Error ? error.message : 'Could not process this image.' } });
+    } finally {
+      input.value = '';
+      this.changeDetector.markForCheck();
+    }
+  }
+
+  async chooseAdminRestaurantImage(event: Event): Promise<void> {
+    const input = event.currentTarget as HTMLInputElement;
+    const file = input.files?.[0];
+    if (!file) return;
+    try {
+      this.adminRestaurantImageDraft = await this.optimizeImage(file);
+      this.error = '';
+    } catch (error) {
+      this.showError({ error: { error: error instanceof Error ? error.message : 'Could not process this image.' } });
+    } finally {
+      input.value = '';
+      this.changeDetector.markForCheck();
+    }
+  }
+
+  async chooseAdminMenuImage(itemId: string, event: Event): Promise<void> {
+    const input = event.currentTarget as HTMLInputElement;
+    const file = input.files?.[0];
+    if (!file) return;
+    try {
+      this.adminMenuImageDrafts[itemId] = await this.optimizeImage(file);
+      this.error = '';
+    } catch (error) {
+      this.showError({ error: { error: error instanceof Error ? error.message : 'Could not process this image.' } });
+    } finally {
+      input.value = '';
+      this.changeDetector.markForCheck();
+    }
+  }
+
+  async chooseNewAdminItemImage(event: Event): Promise<void> {
+    const input = event.currentTarget as HTMLInputElement;
+    const file = input.files?.[0];
+    if (!file) return;
+    try {
+      this.newAdminItemImageData = await this.optimizeImage(file);
+      this.error = '';
+    } catch (error) {
+      this.showError({ error: { error: error instanceof Error ? error.message : 'Could not process this image.' } });
+    } finally {
+      input.value = '';
+      this.changeDetector.markForCheck();
+    }
+  }
+
+  private async optimizeImage(file: File): Promise<string> {
+    if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type)) {
+      throw new Error('Choose a JPEG, PNG, or WebP image.');
+    }
+    if (file.size > this.maxSourceImageBytes) {
+      throw new Error('Choose an image smaller than 10 MB before optimization.');
+    }
+
+    let bitmap: ImageBitmap;
+    try {
+      bitmap = await createImageBitmap(file);
+    } catch {
+      throw new Error('This image could not be opened. Choose a valid image file.');
+    }
+    try {
+      if (bitmap.width * bitmap.height > this.maxImagePixels) {
+        throw new Error('This image has too many pixels. Choose a smaller image.');
+      }
+      const scale = Math.min(1, 1000 / Math.max(bitmap.width, bitmap.height));
+      let width = Math.max(1, Math.round(bitmap.width * scale));
+      let height = Math.max(1, Math.round(bitmap.height * scale));
+      const canvas = document.createElement('canvas');
+      const context = canvas.getContext('2d');
+      if (!context) throw new Error('Your browser could not prepare this image.');
+
+      for (let attempt = 0; attempt < 9; attempt += 1) {
+        canvas.width = width;
+        canvas.height = height;
+        context.fillStyle = '#ffffff';
+        context.fillRect(0, 0, width, height);
+        context.drawImage(bitmap, 0, 0, width, height);
+        const quality = [0.84, 0.72, 0.6][attempt % 3];
+        const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/jpeg', quality));
+        if (!blob) throw new Error('Your browser could not compress this image.');
+        if (blob.size <= this.maxImageBytes) {
+          return new Promise<string>((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => typeof reader.result === 'string' ? resolve(reader.result) : reject(new Error('Could not read the optimized image.'));
+            reader.onerror = () => reject(new Error('Could not read the optimized image.'));
+            reader.readAsDataURL(blob);
+          });
+        }
+        if (attempt % 3 === 2) {
+          width = Math.max(1, Math.round(width * 0.8));
+          height = Math.max(1, Math.round(height * 0.8));
+        }
+      }
+      throw new Error('This image could not be reduced below 256 KB. Choose a simpler or smaller image.');
+    } finally {
+      bitmap.close();
+    }
+  }
+
+  saveRestaurantImage(): void {
+    if (this.restaurantImageDraft === null) return;
+    this.http.patch<{ restaurant: Restaurant }>(`${this.api}/restaurant/profile/image`, { imageData: this.restaurantImageDraft }, { headers: this.headers() }).subscribe({
+      next: ({ restaurant }) => {
+        this.selectedRestaurant = restaurant;
+        this.restaurantImageDraft = null;
+        this.notice = 'Restaurant photo saved.';
+      },
+      error: (error) => this.showError(error)
+    });
+  }
+
+  removeRestaurantImage(): void {
+    this.http.patch<{ restaurant: Restaurant }>(`${this.api}/restaurant/profile/image`, { imageData: '' }, { headers: this.headers() }).subscribe({
+      next: ({ restaurant }) => {
+        this.selectedRestaurant = restaurant;
+        this.restaurantImageDraft = null;
+        this.notice = 'Restaurant photo removed.';
+      },
+      error: (error) => this.showError(error)
+    });
+  }
+
+  saveMenuImage(item: MenuItem): void {
+    const imageData = this.menuImageDrafts[item._id];
+    if (imageData === undefined) return;
+    this.updateMenuImage(item, imageData, 'Menu item photo saved.');
+  }
+
+  removeMenuImage(item: MenuItem): void {
+    this.updateMenuImage(item, '', 'Menu item photo removed.');
+  }
+
+  private updateMenuImage(item: MenuItem, imageData: string, notice: string): void {
+    this.http.patch<{ item: MenuItem }>(`${this.api}/restaurant/menu/${item._id}`, { imageData }, { headers: this.headers() }).subscribe({
+      next: ({ item: updatedItem }) => {
+        this.restaurantMenu = this.restaurantMenu.map((entry) => entry._id === updatedItem._id ? updatedItem : entry);
+        this.menu = this.menu.map((entry) => entry._id === updatedItem._id ? updatedItem : entry);
+        delete this.menuImageDrafts[updatedItem._id];
+        this.notice = notice;
+      },
+      error: (error) => this.showError(error)
+    });
+  }
+
   addMenuItem(): void {
     this.http.post(`${this.api}/restaurant/menu`, {
       name: this.newItemName,
       category: this.newItemCategory,
       price: this.newItemPrice,
       description: this.newItemDescription,
-      preparationMinutes: this.newItemPreparationMinutes,
-      bestSeller: this.newItemBestSeller,
-      chefRecommended: this.newItemChefRecommended
+      imageData: this.newItemImageData
     }, { headers: this.headers() }).subscribe({
       next: () => {
         this.newItemName = '';
         this.newItemCategory = '';
         this.newItemPrice = 0;
         this.newItemDescription = '';
-        this.newItemPreparationMinutes = 15;
-        this.newItemBestSeller = false;
-        this.newItemChefRecommended = false;
-        this.loadRestaurantPortal();
-      },
-      error: (error) => this.showError(error)
-    });
-  }
-
-  editMenuItem(item: MenuItem): void {
-    this.editingMenuItemId = item._id;
-    this.menuItemDraft = {
-      name: item.name,
-      category: item.category,
-      description: item.description || '',
-      price: item.price,
-      availability: item.availability,
-      preparationMinutes: item.preparationMinutes || 15,
-      bestSeller: item.bestSeller,
-      chefRecommended: item.chefRecommended
-    };
-  }
-
-  saveMenuItem(item: MenuItem): void {
-    this.http.patch(`${this.api}/restaurant/menu/${item._id}`, this.menuItemDraft, { headers: this.headers() }).subscribe({
-      next: () => {
-        this.editingMenuItemId = '';
-        this.menuItemDraft = this.emptyMenuItemDraft();
-        this.notice = `${item.name} updated.`;
-        this.loadRestaurantPortal();
-      },
-      error: (error) => this.showError(error)
-    });
-  }
-
-  cancelMenuItemEdit(): void {
-    this.editingMenuItemId = '';
-    this.menuItemDraft = this.emptyMenuItemDraft();
-  }
-
-  archiveMenuItem(item: MenuItem): void {
-    if (!window.confirm(`Remove ${item.name} from your menu? Existing order records will be kept.`)) return;
-    this.http.delete(`${this.api}/restaurant/menu/${item._id}`, { headers: this.headers() }).subscribe({
-      next: () => {
-        this.notice = `${item.name} removed from your menu.`;
+        this.newItemImageData = '';
         this.loadRestaurantPortal();
       },
       error: (error) => this.showError(error)
@@ -701,6 +1195,7 @@ export class AppComponent implements OnInit {
       next: ({ messages }) => (this.messageLogs = messages),
       error: (error) => this.showError(error)
     });
+    this.loadAdminRestaurants();
     this.http.get<{ transactions: BillingRecord[] }>(`${this.api}/admin/billing`, { headers: this.headers() }).subscribe({
       next: ({ transactions }) => (this.billingTransactions = transactions),
       error: (error) => this.showError(error)
@@ -719,63 +1214,248 @@ export class AppComponent implements OnInit {
     });
   }
 
-  loadAdminRestaurants(): void {
-    const query = new URLSearchParams({
-      page: String(this.adminRestaurantPage),
-      limit: String(this.adminRestaurantPageSize),
-      status: this.adminRestaurantStatus
-    });
-    if (this.adminRestaurantSearch.trim()) query.set('search', this.adminRestaurantSearch.trim());
-    this.http.get<{ restaurants: Restaurant[]; total: number; totalPages: number }>(`${this.api}/admin/restaurants?${query.toString()}`, { headers: this.headers() }).subscribe({
-      next: (data) => {
-        this.adminRestaurants = data.restaurants;
-        this.adminRestaurantTotal = data.total;
-        this.adminRestaurantTotalPages = data.totalPages;
+  createAdminRestaurant(): void {
+    if (this.newAdminRestaurantLatitude === null || this.newAdminRestaurantLongitude === null ||
+        !Number.isFinite(this.newAdminRestaurantRadiusKm) || this.newAdminRestaurantRadiusKm < 0.5 || this.newAdminRestaurantRadiusKm > 100) {
+      this.error = 'Choose the restaurant location on the map and enter a delivery radius from 0.5 to 100 km.';
+      return;
+    }
+    this.http.post<{ restaurant: Restaurant }>(`${this.api}/admin/restaurants`, {
+      name: this.newAdminRestaurantName,
+      cuisine: this.newAdminRestaurantCuisine,
+      address: this.newAdminRestaurantAddress,
+      description: this.newAdminRestaurantDescription,
+      phone: this.newAdminRestaurantPhone,
+      email: this.newAdminRestaurantEmail,
+      latitude: this.newAdminRestaurantLatitude,
+      longitude: this.newAdminRestaurantLongitude,
+      serviceRadiusKm: this.newAdminRestaurantRadiusKm
+    }, { headers: this.headers() }).subscribe({
+      next: ({ restaurant }) => {
+        this.newAdminRestaurantName = '';
+        this.newAdminRestaurantCuisine = '';
+        this.newAdminRestaurantAddress = '';
+        this.newAdminRestaurantDescription = '';
+        this.newAdminRestaurantPhone = '';
+        this.newAdminRestaurantEmail = '';
+        this.newAdminRestaurantLatitude = null;
+        this.newAdminRestaurantLongitude = null;
+        this.newAdminRestaurantRadiusKm = 5;
+        this.adminRestaurant = restaurant;
+        this.adminCuisineDraft = restaurant.cuisine.join(', ');
+        this.adminRestaurantImageDraft = '';
+        this.adminMenu = [];
+        this.adminMenuImageDrafts = {};
+        this.view = 'adminRestaurantEditor';
+        this.notice = `${restaurant.name} added. Add its menu items here.`;
+        this.loadAdminRestaurants();
       },
       error: (error) => this.showError(error)
     });
   }
 
-  setAdminRestaurantStatus(status: string): void {
-    this.adminRestaurantStatus = status;
-    this.adminRestaurantPage = 1;
+  openAdminRestaurantList(): void {
+    this.view = 'adminRestaurantList';
+    this.adminRestaurantSearch = '';
     this.loadAdminRestaurants();
   }
 
-  searchAdminRestaurants(): void {
-    this.adminRestaurantPage = 1;
+  private loadAdminRestaurants(): void {
+    this.http.get<{ restaurants: Restaurant[] }>(`${this.api}/admin/restaurants`, { headers: this.headers() }).subscribe({
+      next: ({ restaurants }) => {
+        this.adminRestaurants = restaurants;
+        if (this.adminRestaurant) {
+          this.adminRestaurant = restaurants.find((restaurant) => restaurant._id === this.adminRestaurant?._id) || null;
+          this.adminCuisineDraft = this.adminRestaurant?.cuisine.join(', ') || '';
+        }
+      },
+      error: (error) => this.showError(error)
+    });
+  }
+
+  selectAdminRestaurant(id: string): void {
+    this.adminRestaurant = this.adminRestaurants.find((restaurant) => restaurant._id === id) || null;
+    this.adminCuisineDraft = this.adminRestaurant?.cuisine.join(', ') || '';
+    this.adminRestaurantImageDraft = '';
+    this.adminMenuImageDrafts = {};
+    this.adminMenu = [];
+    if (!this.adminRestaurant) return;
+    this.view = 'adminRestaurantEditor';
+    this.http.get<{ items: MenuItem[] }>(`${this.api}/admin/restaurants/${this.adminRestaurant._id}/menu`, { headers: this.headers() }).subscribe({
+      next: ({ items }) => (this.adminMenu = items),
+      error: (error) => this.showError(error)
+    });
+  }
+
+  backToAdminRestaurantList(): void {
+    this.view = 'adminRestaurantList';
+    this.adminRestaurantImageDraft = '';
+    this.adminMenuImageDrafts = {};
     this.loadAdminRestaurants();
   }
 
-  changeAdminRestaurantPage(page: number): void {
-    this.adminRestaurantPage = Math.max(1, Math.min(this.adminRestaurantTotalPages, page));
-    this.loadAdminRestaurants();
+  saveAdminRestaurant(): void {
+    if (!this.adminRestaurant) return;
+    const restaurant = this.adminRestaurant;
+    this.http.patch<{ restaurant: Restaurant }>(`${this.api}/admin/restaurants/${restaurant._id}`, {
+      name: restaurant.name,
+      cuisine: this.adminCuisineDraft,
+      description: restaurant.description,
+      address: restaurant.address,
+      phone: restaurant.phone || '',
+      email: restaurant.email || '',
+      preparationMinutes: restaurant.preparationMinutes,
+      minOrder: restaurant.minOrder,
+      availability: restaurant.availability,
+      latitude: restaurant.latitude,
+      longitude: restaurant.longitude,
+      serviceRadiusKm: restaurant.serviceRadiusKm
+    }, { headers: this.headers() }).subscribe({
+      next: ({ restaurant: updated }) => {
+        this.adminRestaurant = updated;
+        this.adminCuisineDraft = updated.cuisine.join(', ');
+        this.adminRestaurants = this.adminRestaurants.map((entry) => entry._id === updated._id ? updated : entry);
+        this.notice = `${updated.name} details saved.`;
+      },
+      error: (error) => this.showError(error)
+    });
   }
 
-  goToAdminRestaurants(): void {
-    this.view = 'adminPortal';
-    setTimeout(() => document.getElementById('admin-restaurants')?.scrollIntoView({ behavior: 'smooth' }), 0);
+  saveAdminRestaurantImage(): void {
+    if (!this.adminRestaurant || !this.adminRestaurantImageDraft) return;
+    this.http.patch<{ restaurant: Restaurant }>(`${this.api}/admin/restaurants/${this.adminRestaurant._id}`, { imageData: this.adminRestaurantImageDraft }, { headers: this.headers() }).subscribe({
+      next: ({ restaurant }) => {
+        this.adminRestaurant = restaurant;
+        this.adminCuisineDraft = restaurant.cuisine.join(', ');
+        this.adminRestaurants = this.adminRestaurants.map((entry) => entry._id === restaurant._id ? restaurant : entry);
+        this.adminRestaurantImageDraft = '';
+        this.notice = 'Restaurant photo saved.';
+      },
+      error: (error) => this.showError(error)
+    });
   }
 
-  updateAdminRestaurantStatus(restaurant: Restaurant, status: string): void {
-    if (status !== 'APPROVED' && !window.confirm(`Change ${restaurant.name} status to ${this.statusLabel(status)}?`)) return;
-    this.http.patch(`${this.api}/admin/restaurants/${restaurant._id}/status`, { status }, { headers: this.headers() }).subscribe({
-      next: () => {
+  removeAdminRestaurantImage(): void {
+    if (!this.adminRestaurant) return;
+    this.http.patch<{ restaurant: Restaurant }>(`${this.api}/admin/restaurants/${this.adminRestaurant._id}`, { imageData: '' }, { headers: this.headers() }).subscribe({
+      next: ({ restaurant }) => {
+        this.adminRestaurant = restaurant;
+        this.adminCuisineDraft = restaurant.cuisine.join(', ');
+        this.adminRestaurants = this.adminRestaurants.map((entry) => entry._id === restaurant._id ? restaurant : entry);
+        this.adminRestaurantImageDraft = '';
+        this.notice = 'Restaurant photo removed.';
+      },
+      error: (error) => this.showError(error)
+    });
+  }
+
+  updateAdminRestaurantStatus(status: string): void {
+    if (!this.adminRestaurant) return;
+    this.http.patch<{ restaurant: Restaurant }>(`${this.api}/admin/restaurants/${this.adminRestaurant._id}`, { status }, { headers: this.headers() }).subscribe({
+      next: ({ restaurant }) => {
+        this.adminRestaurant = restaurant;
+        this.adminCuisineDraft = restaurant.cuisine.join(', ');
+        this.adminRestaurants = this.adminRestaurants.map((entry) => entry._id === restaurant._id ? restaurant : entry);
         this.notice = `${restaurant.name} marked ${this.statusLabel(status)}.`;
+        this.loadAdminRestaurants();
+      },
+      error: (error) => this.showError(error)
+    });
+  }
+
+  addAdminMenuItem(): void {
+    if (!this.adminRestaurant) return;
+    this.http.post<{ item: MenuItem }>(`${this.api}/admin/restaurants/${this.adminRestaurant._id}/menu`, {
+      name: this.newAdminItemName,
+      category: this.newAdminItemCategory,
+      price: this.newAdminItemPrice,
+      description: this.newAdminItemDescription,
+      imageData: this.newAdminItemImageData
+    }, { headers: this.headers() }).subscribe({
+      next: ({ item }) => {
+        this.adminMenu = [...this.adminMenu, item];
+        this.newAdminItemName = '';
+        this.newAdminItemCategory = '';
+        this.newAdminItemPrice = 0;
+        this.newAdminItemDescription = '';
+        this.newAdminItemImageData = '';
+        this.notice = `${item.name} added to the menu.`;
+      },
+      error: (error) => this.showError(error)
+    });
+  }
+
+  saveAdminMenuItem(item: MenuItem): void {
+    const imageData = this.adminMenuImageDrafts[item._id];
+    const updates: { name: string; category: string; price: number; description: string; availability: string; imageData?: string; active: boolean } = {
+      name: item.name,
+      category: item.category,
+      price: item.price,
+      description: item.description,
+      availability: item.availability,
+      active: item.active !== false
+    };
+    if (imageData !== undefined) updates.imageData = imageData;
+    this.http.patch<{ item: MenuItem }>(`${this.api}/admin/menu/${item._id}`, updates, { headers: this.headers() }).subscribe({
+      next: ({ item: updated }) => {
+        this.adminMenu = this.adminMenu.map((entry) => entry._id === updated._id ? updated : entry);
+        delete this.adminMenuImageDrafts[updated._id];
+        this.notice = `${updated.name} updated.`;
+      },
+      error: (error) => this.showError(error)
+    });
+  }
+
+  removeAdminMenuImage(item: MenuItem): void {
+    this.http.patch<{ item: MenuItem }>(`${this.api}/admin/menu/${item._id}`, { imageData: '' }, { headers: this.headers() }).subscribe({
+      next: ({ item: updated }) => {
+        this.adminMenu = this.adminMenu.map((entry) => entry._id === updated._id ? updated : entry);
+        delete this.adminMenuImageDrafts[updated._id];
+        this.notice = `${updated.name} photo removed.`;
+      },
+      error: (error) => this.showError(error)
+    });
+  }
+
+  removeAdminMenuItem(item: MenuItem): void {
+    this.setAdminMenuItemActive(item, false);
+  }
+
+  reactivateAdminMenuItem(item: MenuItem): void {
+    this.setAdminMenuItemActive(item, true);
+  }
+
+  private setAdminMenuItemActive(item: MenuItem, active: boolean): void {
+    this.http.patch<{ item: MenuItem }>(`${this.api}/admin/menu/${item._id}`, { active }, { headers: this.headers() }).subscribe({
+      next: ({ item: updated }) => {
+        this.adminMenu = this.adminMenu.map((entry) => entry._id === updated._id ? updated : entry);
+        this.notice = `${updated.name} ${active ? 'restored to' : 'removed from'} the active menu.`;
+      },
+      error: (error) => this.showError(error)
+    });
+  }
+
+  adminOrderAction(order: Order, status: string): void {
+    this.http.patch<{ order: Order }>(`${this.api}/admin/orders/${order._id}/status`, { status }, { headers: this.headers() }).subscribe({
+      next: ({ order: updated }) => {
+        this.allOrders = this.allOrders.map((entry) => entry._id === updated._id ? updated : entry);
+        this.notice = `${order.reference} marked ${this.statusLabel(status)}.`;
         this.loadAdmin();
       },
       error: (error) => this.showError(error)
     });
   }
 
-  updateAdminRestaurantAvailability(restaurant: Restaurant, availability: string): void {
-    this.http.patch(`${this.api}/admin/restaurants/${restaurant._id}/availability`, { availability }, { headers: this.headers() }).subscribe({
-      next: () => {
-        this.notice = `${restaurant.name} availability set to ${this.statusLabel(availability)}.`;
-        this.loadAdminRestaurants();
-      },
-      error: (error) => this.showError(error)
-    });
+  adminOrderActions(order: Order): { status: string; label: string }[] {
+    const actions: Record<string, { status: string; label: string }[]> = {
+      RESTAURANT_PENDING: [{ status: 'ACCEPTED', label: 'Accept' }, { status: 'REJECTED', label: 'Reject' }, { status: 'CANCELLED', label: 'Cancel' }],
+      ACCEPTED: [{ status: 'PREPARING', label: 'Start preparing' }, { status: 'CANCELLED', label: 'Cancel' }],
+      PREPARING: [{ status: 'READY', label: 'Mark ready' }],
+      READY: [{ status: 'OUT_FOR_DELIVERY', label: 'Out for delivery' }],
+      OUT_FOR_DELIVERY: [{ status: 'DELIVERED', label: 'Mark delivered' }],
+      DELIVERED: [{ status: 'CLOSED', label: 'Complete order' }]
+    };
+    return actions[order.status] || [];
   }
 
   rateOrder(order: Order, stars: number): void {
@@ -854,6 +1534,10 @@ export class AppComponent implements OnInit {
 
   statusLabel(status: string): string {
     return status.replaceAll('_', ' ').toLowerCase().replace(/(^|\s)\S/g, (letter) => letter.toUpperCase());
+  }
+
+  orderStatusClass(status: string): string {
+    return `order-status-${status.toLowerCase().replaceAll('_', '-')}`;
   }
 
   money(value: number, currency = 'QAR'): string {

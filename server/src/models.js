@@ -30,6 +30,7 @@ UserSchema.methods.verifyPassword = function verifyPassword(password) {
 const RestaurantSchema = new Schema(
   {
     name: { type: String, required: true, trim: true },
+    imageData: { type: String, default: "", maxlength: 350100 },
     hotelName: { type: String, default: "" },
     cuisine: { type: [String], default: [] },
     description: { type: String, default: "" },
@@ -62,6 +63,7 @@ const MenuItemSchema = new Schema(
     restaurantId: { type: Schema.Types.ObjectId, ref: "Restaurant", required: true, index: true },
     category: { type: String, required: true, trim: true },
     name: { type: String, required: true, trim: true },
+    imageData: { type: String, default: "", maxlength: 350100 },
     description: { type: String, default: "" },
     price: { type: Number, required: true, min: 0 },
     currency: { type: String, default: "QAR" },

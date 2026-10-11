@@ -8,18 +8,18 @@ const {
   User, Restaurant, MenuItem, Order, Promotion, Rating, AuditLog, MessageLog, BillingTransaction,
   Advertisement, AdvertisementEvent
 } = require("./models");
-const { canTransition, haversineKm, isValidCoordinate } = require("./rules");
+const { canTransition, haversineKm, isValidCoordinate, isValidServiceRadius, isWithinServiceArea } = require("./rules");
+const { validateImageDataUrl } = require("./images");
 const { writeAudit, logNotification, changeOrderStatus } = require("./services");
 
 const app = express();
 const secret = process.env.JWT_SECRET || "local-development-secret-change-before-deploy";
 const currency = process.env.CURRENCY || "QAR";
-const defaultRadius = Number(process.env.DEFAULT_SERVICE_RADIUS_KM || 20);
 const apiOrigin = process.env.CLIENT_ORIGIN || "http://localhost:4200";
 
 app.use(helmet());
 app.use(cors({ origin: apiOrigin }));
-app.use(express.json({ limit: "1mb" }));
+app.use(express.json({ limit: "512kb" }));
 app.use("/api/auth", rateLimit({ windowMs: 15 * 60 * 1000, limit: 100, standardHeaders: true, legacyHeaders: false }));
 
 function asyncRoute(handler) {
@@ -107,15 +107,24 @@ app.post("/api/auth/register", asyncRoute(async (req, res) => {
 }));
 
 app.post("/api/auth/register-restaurant", asyncRoute(async (req, res) => {
-  const { ownerName, email, password, phone, restaurantName, cuisine, address } = req.body;
+  const { ownerName, email, password, phone, restaurantName, cuisine, address, latitude, longitude, serviceRadiusKm } = req.body;
   if (!ownerName || !restaurantName || !address || !email || typeof password !== "string" || password.length < 10 || !validatePhone(phone || "")) {
     return res.status(400).json({ error: "Complete all business and owner fields; use a valid mobile number and a password of at least 10 characters." });
+  }
+  const restaurantLatitude = Number(latitude);
+  const restaurantLongitude = Number(longitude);
+  const deliveryRadius = Number(serviceRadiusKm);
+  if (!isValidCoordinate(restaurantLatitude, -90, 90) || !isValidCoordinate(restaurantLongitude, -180, 180) || !isValidServiceRadius(deliveryRadius)) {
+    return res.status(400).json({ error: "Choose the restaurant location on the map and set a delivery radius between 0.5 and 100 km." });
   }
   if (await User.exists({ email: String(email).toLowerCase() })) return res.status(409).json({ error: "An account already uses that email." });
   const restaurant = await Restaurant.create({
     name: restaurantName,
     cuisine: Array.isArray(cuisine) ? cuisine : String(cuisine || "Other").split(",").map((entry) => entry.trim()).filter(Boolean),
     address,
+    latitude: restaurantLatitude,
+    longitude: restaurantLongitude,
+    serviceRadiusKm: deliveryRadius,
     phone,
     status: "PENDING_REVIEW",
     availability: "CLOSED"
@@ -133,6 +142,15 @@ app.post("/api/auth/login", asyncRoute(async (req, res) => {
   if (!user || !(await user.verifyPassword(String(req.body.password || "")))) {
     return res.status(401).json({ error: "Email or password is incorrect." });
   }
+  const portal = String(req.body.portal || "").toUpperCase();
+  if (portal && !["CUSTOMER", "RESTAURANT", "ADMIN"].includes(portal)) {
+    return res.status(400).json({ error: "Choose a valid sign-in portal." });
+  }
+  const roleMatchesPortal = !portal ||
+    (portal === "CUSTOMER" && user.role === "CUSTOMER") ||
+    (portal === "RESTAURANT" && user.role.startsWith("RESTAURANT_")) ||
+    (portal === "ADMIN" && ["ADMIN", "SUPER_ADMIN"].includes(user.role));
+  if (!roleMatchesPortal) return res.status(403).json({ error: "This account cannot sign in through the selected portal." });
   if (user.status !== "ACTIVE") return res.status(403).json({ error: "This account has been suspended or deactivated." });
   await writeAudit({ user, action: "LOGIN", entity: "User", entityId: user._id });
   res.json({ token: issueToken(user), user: publicUser(user) });
@@ -157,7 +175,7 @@ app.get("/api/restaurants", asyncRoute(async (req, res) => {
   }
   if (req.query.open === "true") query.availability = "OPEN";
   const restaurants = await Restaurant.find(query)
-    .select("name hotelName cuisine description address latitude longitude serviceRadiusKm preparationMinutes minOrder maxOrder status availability category ratingAverage ratingCount demo")
+    .select("name imageData hotelName cuisine description address latitude longitude serviceRadiusKm preparationMinutes minOrder maxOrder status availability category ratingAverage ratingCount demo")
     .sort({ demo: -1, name: 1 })
     .limit(50)
     .lean();
@@ -170,10 +188,13 @@ app.get("/api/restaurants", asyncRoute(async (req, res) => {
   const result = restaurants.map((restaurant) => {
     let distanceKm = null;
     let eligible = true;
-    if (locationProvided && restaurant.latitude !== null && restaurant.longitude !== null) {
+    if (locationProvided && restaurant.latitude !== null && restaurant.latitude !== undefined &&
+        restaurant.longitude !== null && restaurant.longitude !== undefined &&
+        isValidServiceRadius(restaurant.serviceRadiusKm)) {
       distanceKm = roundMoney(haversineKm(lat, lng, restaurant.latitude, restaurant.longitude));
-      const radius = restaurant.serviceRadiusKm || defaultRadius;
-      eligible = distanceKm <= radius;
+      eligible = isWithinServiceArea(lat, lng, restaurant.latitude, restaurant.longitude, restaurant.serviceRadiusKm);
+    } else if (locationProvided) {
+      eligible = false;
     }
     return { ...restaurant, distanceKm, eligible };
   });
@@ -189,13 +210,15 @@ app.get("/api/restaurants", asyncRoute(async (req, res) => {
   if (advertisements.length) {
     await AdvertisementEvent.insertMany(advertisements.map((advertisement) => ({ advertisementId: advertisement._id, eventType: "IMPRESSION" })));
   }
-  res.json({ restaurants: eligibleOnly ? result.filter((item) => item.eligible) : result, promotions, advertisements });
+  const visibleRestaurants = eligibleOnly ? result.filter((item) => item.eligible) : result;
+  if (locationProvided) visibleRestaurants.sort((left, right) => left.distanceKm - right.distanceKm);
+  res.json({ restaurants: visibleRestaurants, promotions, advertisements });
 }));
 
 app.get("/api/restaurants/:id/menu", asyncRoute(async (req, res) => {
   if (!mongoose.isValidObjectId(req.params.id)) return res.status(404).json({ error: "Restaurant not found." });
   const restaurant = await Restaurant.findOne({ _id: req.params.id, status: "APPROVED" })
-    .select("name hotelName cuisine description address latitude longitude serviceRadiusKm preparationMinutes minOrder maxOrder status availability category ratingAverage ratingCount demo")
+    .select("name imageData hotelName cuisine description address latitude longitude serviceRadiusKm preparationMinutes minOrder maxOrder status availability category ratingAverage ratingCount demo")
     .lean();
   if (!restaurant) return res.status(404).json({ error: "Restaurant not found." });
   const items = await MenuItem.find({ restaurantId: restaurant._id, active: true }).sort({ category: 1, name: 1 }).lean();
@@ -230,25 +253,36 @@ app.post("/api/orders", auth(false), asyncRoute(async (req, res) => {
     if (!signedOwner && !guestPhoneMatch) return res.status(409).json({ error: "This order request key has already been used." });
     return res.status(200).json({ order: previous, duplicate: true });
   }
-  if (!mongoose.isValidObjectId(restaurantId) || !Array.isArray(items) || items.length < 1 || items.length > 50 || typeof address !== "string" || address.trim().length < 5) {
-    return res.status(400).json({ error: "Restaurant, order items, and a complete delivery address are required." });
+  if (!mongoose.isValidObjectId(restaurantId)) return res.status(400).json({ error: "Choose a valid restaurant." });
+  if (!Array.isArray(items) || items.length < 1 || items.length > 50) {
+    return res.status(400).json({ error: "Add between 1 and 50 items to your order." });
+  }
+  if (typeof address !== "string" || address.trim().length < 5) {
+    return res.status(400).json({ error: "Enter a delivery address with at least 5 characters." });
   }
   const signedCustomer = req.user && req.user.role === "CUSTOMER" ? req.user : null;
   const guestName = String(req.body.guestName || "").trim();
   const guestPhone = String(req.body.guestPhone || "").trim().replace(/[^\d+]/g, "");
-  if (!signedCustomer && (!guestName || !validatePhone(guestPhone))) {
-    return res.status(400).json({ error: "Guest checkout requires a name and valid Qatar contact number." });
+  if (!signedCustomer && !guestName) return res.status(400).json({ error: "Enter your name for guest checkout." });
+  if (!signedCustomer && !validatePhone(guestPhone)) {
+    return res.status(400).json({ error: "Enter a valid Qatar mobile or WhatsApp number." });
   }
   const restaurant = await Restaurant.findOne({ _id: restaurantId, status: "APPROVED" });
   if (!restaurant) return res.status(404).json({ error: "This restaurant is not available for ordering." });
   if (restaurant.availability !== "OPEN") return res.status(409).json({ error: "This restaurant is not accepting orders right now." });
-  const hasCoordinates = latitude !== undefined && longitude !== undefined;
-  if (hasCoordinates && (!isValidCoordinate(Number(latitude), -90, 90) || !isValidCoordinate(Number(longitude), -180, 180))) {
-    return res.status(400).json({ error: "Provide valid delivery coordinates." });
+  const hasLatitude = latitude !== undefined;
+  const hasLongitude = longitude !== undefined;
+  if (hasLatitude !== hasLongitude || !hasLatitude ||
+      !isValidCoordinate(Number(latitude), -90, 90) || !isValidCoordinate(Number(longitude), -180, 180)) {
+    return res.status(400).json({ error: "Choose your delivery location on the map before placing your order." });
   }
-  if (hasCoordinates && restaurant.latitude !== null && restaurant.longitude !== null) {
-    const distance = haversineKm(Number(latitude), Number(longitude), restaurant.latitude, restaurant.longitude);
-    if (distance > (restaurant.serviceRadiusKm || defaultRadius)) return res.status(400).json({ error: "This delivery location is outside the restaurant service area." });
+  if (!isValidCoordinate(restaurant.latitude, -90, 90) ||
+      !isValidCoordinate(restaurant.longitude, -180, 180) ||
+      !isValidServiceRadius(restaurant.serviceRadiusKm)) {
+    return res.status(409).json({ error: "This restaurant has not configured its free-delivery area yet." });
+  }
+  if (!isWithinServiceArea(Number(latitude), Number(longitude), restaurant.latitude, restaurant.longitude, restaurant.serviceRadiusKm)) {
+    return res.status(400).json({ error: "This delivery location is outside the restaurant's free-delivery area." });
   }
   const quantities = new Map();
   for (const item of items) {
@@ -291,7 +325,7 @@ app.post("/api/orders", auth(false), asyncRoute(async (req, res) => {
       ? roundMoney(Math.min(subtotal * promotion.discountValue / 100, promotion.maximumDiscount))
       : roundMoney(Math.min(promotion.discountValue, subtotal));
   }
-  const deliveryFee = Math.max(0, Number(process.env.DEFAULT_DELIVERY_FEE || 0));
+  const deliveryFee = 0;
   const adminFee = Math.max(0, Number(process.env.CUSTOMER_ADMIN_FEE || 0));
   const total = roundMoney(Math.max(0, subtotal - discount) + deliveryFee + adminFee);
   const today = new Date(Date.now() + 3 * 60 * 60 * 1000).toISOString().slice(0, 10).replaceAll("-", "");
@@ -305,8 +339,8 @@ app.post("/api/orders", auth(false), asyncRoute(async (req, res) => {
     restaurantName: restaurant.name,
     items: orderItems,
     address: address.trim(),
-    latitude: hasCoordinates ? Number(latitude) : null,
-    longitude: hasCoordinates ? Number(longitude) : null,
+    latitude: Number(latitude),
+    longitude: Number(longitude),
     subtotal,
     discount,
     deliveryFee,
@@ -457,52 +491,38 @@ app.patch("/api/restaurant/availability", auth(), roles(...restaurantRoles), asy
   res.json({ restaurant });
 }));
 
-app.patch("/api/restaurant/menu/:id", auth(), roles(...restaurantRoles), asyncRoute(async (req, res) => {
+app.patch("/api/restaurant/profile/image", auth(), roles(...restaurantRoles), asyncRoute(async (req, res) => {
   const restaurant = await restaurantForUser(req.user);
-  if (req.user.role === "RESTAURANT_STAFF" && Object.keys(req.body).some((field) => field !== "availability")) {
-    return res.status(403).json({ error: "Restaurant staff can update menu availability but cannot edit menu details." });
-  }
-  const item = await MenuItem.findOne({ _id: req.params.id, restaurantId: restaurant._id });
-  if (!item) return res.status(404).json({ error: "Menu item not found." });
-  const fields = ["name", "category", "description", "price", "availability", "preparationMinutes", "bestSeller", "chefRecommended"];
-  const updates = {};
-  for (const field of fields) {
-    if (Object.hasOwn(req.body, field)) updates[field] = req.body[field];
-  }
-  if (typeof updates.name !== "undefined" && !String(updates.name).trim()) return res.status(400).json({ error: "Item name is required." });
-  if (typeof updates.category !== "undefined" && !String(updates.category).trim()) return res.status(400).json({ error: "Item category is required." });
-  if (typeof updates.price !== "undefined") {
-    updates.price = Number(updates.price);
-    if (!Number.isFinite(updates.price) || updates.price <= 0) return res.status(400).json({ error: "Item price must be greater than zero." });
-    updates.price = roundMoney(updates.price);
-  }
-  if (typeof updates.availability !== "undefined" && !["AVAILABLE", "UNAVAILABLE", "TEMPORARILY_UNAVAILABLE"].includes(String(updates.availability))) {
-    return res.status(400).json({ error: "Choose a valid menu item availability." });
-  }
-  if (typeof updates.preparationMinutes !== "undefined") {
-    updates.preparationMinutes = Number(updates.preparationMinutes);
-    if (!Number.isInteger(updates.preparationMinutes) || updates.preparationMinutes < 1 || updates.preparationMinutes > 600) {
-      return res.status(400).json({ error: "Item preparation time must be between 1 and 600 minutes." });
-    }
-  }
-  for (const field of ["bestSeller", "chefRecommended"]) {
-    if (typeof updates[field] !== "undefined" && typeof updates[field] !== "boolean") return res.status(400).json({ error: `${field} must be true or false.` });
-  }
-  Object.assign(item, updates);
-  await item.save();
-  await writeAudit({ user: req.user, action: "MENU_ITEM_UPDATED", entity: "MenuItem", entityId: item._id });
-  res.json({ item });
+  if (!Object.hasOwn(req.body, "imageData")) return res.status(400).json({ error: "Provide an image or an empty value to remove the current image." });
+  const image = validateImageDataUrl(req.body.imageData);
+  if (image?.error) return res.status(400).json({ error: image.error });
+  restaurant.imageData = image?.imageData || "";
+  await restaurant.save();
+  await writeAudit({ user: req.user, action: "RESTAURANT_IMAGE_UPDATED", entity: "Restaurant", entityId: restaurant._id });
+  res.json({ restaurant });
 }));
 
-app.delete("/api/restaurant/menu/:id", auth(), roles("RESTAURANT_OWNER", "RESTAURANT_MANAGER"), asyncRoute(async (req, res) => {
+app.patch("/api/restaurant/menu/:id", auth(), roles(...restaurantRoles), asyncRoute(async (req, res) => {
   const restaurant = await restaurantForUser(req.user);
-  const item = await MenuItem.findOneAndUpdate(
-    { _id: req.params.id, restaurantId: restaurant._id, active: true },
-    { $set: { active: false } },
-    { new: true }
-  );
+  const hasAvailability = Object.hasOwn(req.body, "availability");
+  const hasImage = Object.hasOwn(req.body, "imageData");
+  if (!hasAvailability && !hasImage) return res.status(400).json({ error: "Provide an availability or image update." });
+  const availability = String(req.body.availability || "");
+  if (hasAvailability && !["AVAILABLE", "UNAVAILABLE", "TEMPORARILY_UNAVAILABLE"].includes(availability)) return res.status(400).json({ error: "Choose a valid menu item availability." });
+  const image = hasImage ? validateImageDataUrl(req.body.imageData) : null;
+  if (image?.error) return res.status(400).json({ error: image.error });
+  const item = await MenuItem.findOne({ _id: req.params.id, restaurantId: restaurant._id });
   if (!item) return res.status(404).json({ error: "Menu item not found." });
-  await writeAudit({ user: req.user, action: "MENU_ITEM_ARCHIVED", entity: "MenuItem", entityId: item._id });
+  if (hasAvailability) item.availability = availability;
+  if (hasImage) item.imageData = image?.imageData || "";
+  await item.save();
+  await writeAudit({
+    user: req.user,
+    action: hasImage ? "MENU_ITEM_UPDATED" : "MENU_AVAILABILITY_CHANGED",
+    entity: "MenuItem",
+    entityId: item._id,
+    details: hasAvailability ? { availability } : {}
+  });
   res.json({ item });
 }));
 
@@ -510,19 +530,9 @@ app.post("/api/restaurant/menu", auth(), roles("RESTAURANT_OWNER", "RESTAURANT_M
   const restaurant = await restaurantForUser(req.user);
   const { name, category, price, description } = req.body;
   if (!name || !category || !Number.isFinite(Number(price)) || Number(price) <= 0) return res.status(400).json({ error: "Item name, category and a positive price are required." });
-  const preparationMinutes = Number(req.body.preparationMinutes || 15);
-  if (!Number.isInteger(preparationMinutes) || preparationMinutes < 1 || preparationMinutes > 600) return res.status(400).json({ error: "Item preparation time must be between 1 and 600 minutes." });
-  const item = await MenuItem.create({
-    restaurantId: restaurant._id,
-    name: String(name).trim(),
-    category: String(category).trim(),
-    description: String(description || ""),
-    price: roundMoney(Number(price)),
-    preparationMinutes,
-    bestSeller: req.body.bestSeller === true,
-    chefRecommended: req.body.chefRecommended === true,
-    currency
-  });
+  const image = Object.hasOwn(req.body, "imageData") ? validateImageDataUrl(req.body.imageData) : null;
+  if (image?.error) return res.status(400).json({ error: image.error });
+  const item = await MenuItem.create({ restaurantId: restaurant._id, name: String(name).trim(), category: String(category).trim(), description: String(description || ""), price: roundMoney(Number(price)), currency, imageData: image?.imageData || "" });
   await writeAudit({ user: req.user, action: "MENU_ITEM_CREATED", entity: "MenuItem", entityId: item._id, details: { name: item.name, price: item.price } });
   res.status(201).json({ item });
 }));
@@ -569,25 +579,189 @@ app.get("/api/admin/summary", auth(), roles("ADMIN", "SUPER_ADMIN"), asyncRoute(
 }));
 
 app.get("/api/admin/restaurants", auth(), roles("ADMIN", "SUPER_ADMIN"), asyncRoute(async (req, res) => {
-  const query = req.query.status && req.query.status !== "ALL" ? { status: String(req.query.status) } : {};
-  if (req.query.search) {
-    const search = String(req.query.search).slice(0, 80).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    query.$or = [
-      { name: { $regex: search, $options: "i" } },
-      { hotelName: { $regex: search, $options: "i" } },
-      { address: { $regex: search, $options: "i" } },
-      { cuisine: { $elemMatch: { $regex: search, $options: "i" } } },
-      { email: { $regex: search, $options: "i" } }
-    ];
+  const query = req.query.status ? { status: String(req.query.status) } : {};
+  const restaurants = await Restaurant.find(query).sort({ createdAt: -1 }).limit(100).lean();
+  res.json({ restaurants });
+}));
+
+app.post("/api/admin/restaurants", auth(), roles("ADMIN", "SUPER_ADMIN"), asyncRoute(async (req, res) => {
+  const name = String(req.body.name || "").trim();
+  const address = String(req.body.address || "").trim();
+  const latitude = Number(req.body.latitude);
+  const longitude = Number(req.body.longitude);
+  const serviceRadiusKm = Number(req.body.serviceRadiusKm);
+  const cuisine = Array.isArray(req.body.cuisine)
+    ? req.body.cuisine.map((entry) => String(entry).trim()).filter(Boolean)
+    : String(req.body.cuisine || "").split(",").map((entry) => entry.trim()).filter(Boolean);
+  if (!name || !address || !cuisine.length) {
+    return res.status(400).json({ error: "Restaurant name, cuisine and address are required." });
   }
-  const requestedPage = Number(req.query.page || 1);
-  if (!Number.isSafeInteger(requestedPage) || requestedPage < 1) return res.status(400).json({ error: "Page must be a positive whole number." });
-  const limit = Math.min(100, Math.max(1, Number.parseInt(req.query.limit, 10) || 50));
-  const total = await Restaurant.countDocuments(query);
-  const totalPages = Math.max(1, Math.ceil(total / limit));
-  const page = Math.min(requestedPage, totalPages);
-  const restaurants = await Restaurant.find(query).sort({ createdAt: -1 }).skip((page - 1) * limit).limit(limit).lean();
-  res.json({ restaurants, total, page, limit, totalPages });
+  if (!isValidCoordinate(latitude, -90, 90) || !isValidCoordinate(longitude, -180, 180) || !isValidServiceRadius(serviceRadiusKm)) {
+    return res.status(400).json({ error: "Choose the restaurant location on the map and set a delivery radius between 0.5 and 100 km." });
+  }
+  const image = Object.hasOwn(req.body, "imageData") ? validateImageDataUrl(req.body.imageData) : null;
+  if (image?.error) return res.status(400).json({ error: image.error });
+  const restaurant = await Restaurant.create({
+    name,
+    cuisine,
+    address,
+    latitude,
+    longitude,
+    serviceRadiusKm,
+    description: String(req.body.description || "").trim(),
+    phone: String(req.body.phone || "").trim(),
+    email: String(req.body.email || "").trim().toLowerCase(),
+    imageData: image?.imageData || "",
+    status: "APPROVED",
+    availability: "CLOSED"
+  });
+  await writeAudit({ user: req.user, action: "ADMIN_RESTAURANT_CREATED", entity: "Restaurant", entityId: restaurant._id });
+  res.status(201).json({ restaurant });
+}));
+
+app.patch("/api/admin/restaurants/:id", auth(), roles("ADMIN", "SUPER_ADMIN"), asyncRoute(async (req, res) => {
+  if (!mongoose.isValidObjectId(req.params.id)) return res.status(404).json({ error: "Restaurant not found." });
+  const restaurant = await Restaurant.findById(req.params.id);
+  if (!restaurant) return res.status(404).json({ error: "Restaurant not found." });
+  const updates = {};
+  for (const field of ["name", "description", "address", "phone", "email", "category"]) {
+    if (Object.hasOwn(req.body, field)) updates[field] = String(req.body[field] || "").trim();
+  }
+  if (Object.hasOwn(updates, "name") && !updates.name) return res.status(400).json({ error: "Restaurant name cannot be empty." });
+  if (Object.hasOwn(updates, "address") && !updates.address) return res.status(400).json({ error: "Restaurant address cannot be empty." });
+  if (Object.hasOwn(updates, "email")) updates.email = updates.email.toLowerCase();
+  if (Object.hasOwn(req.body, "cuisine")) {
+    const cuisine = Array.isArray(req.body.cuisine)
+      ? req.body.cuisine.map((entry) => String(entry).trim()).filter(Boolean)
+      : String(req.body.cuisine || "").split(",").map((entry) => entry.trim()).filter(Boolean);
+    if (!cuisine.length) return res.status(400).json({ error: "Provide at least one cuisine." });
+    updates.cuisine = cuisine;
+  }
+  if (Object.hasOwn(req.body, "availability")) {
+    if (!["OPEN", "CLOSED", "TEMPORARILY_UNAVAILABLE", "PAUSED"].includes(req.body.availability)) {
+      return res.status(400).json({ error: "Choose a valid restaurant availability." });
+    }
+    updates.availability = req.body.availability;
+  }
+  if (Object.hasOwn(req.body, "status")) {
+    if (!["APPROVED", "REJECTED", "SUSPENDED"].includes(req.body.status)) {
+      return res.status(400).json({ error: "Choose APPROVED, REJECTED or SUSPENDED." });
+    }
+    updates.status = req.body.status;
+    if (req.body.status !== "APPROVED") updates.availability = "CLOSED";
+  }
+  if (Object.hasOwn(req.body, "imageData")) {
+    const image = validateImageDataUrl(req.body.imageData);
+    if (image?.error) return res.status(400).json({ error: image.error });
+    updates.imageData = image?.imageData || "";
+  }
+  if (Object.hasOwn(req.body, "preparationMinutes")) {
+    const minutes = Number(req.body.preparationMinutes);
+    if (!Number.isInteger(minutes) || minutes < 1 || minutes > 240) return res.status(400).json({ error: "Preparation time must be from 1 to 240 minutes." });
+    updates.preparationMinutes = minutes;
+  }
+  if (Object.hasOwn(req.body, "minOrder")) {
+    const amount = Number(req.body.minOrder);
+    if (!Number.isFinite(amount) || amount < 0 || amount > 100000) return res.status(400).json({ error: "Enter a valid minimum order amount." });
+    updates.minOrder = roundMoney(amount);
+  }
+  const hasLatitude = Object.hasOwn(req.body, "latitude");
+  const hasLongitude = Object.hasOwn(req.body, "longitude");
+  const hasRadius = Object.hasOwn(req.body, "serviceRadiusKm");
+  if (hasLatitude || hasLongitude || hasRadius) {
+    const latitude = hasLatitude ? Number(req.body.latitude) : restaurant.latitude;
+    const longitude = hasLongitude ? Number(req.body.longitude) : restaurant.longitude;
+    const serviceRadiusKm = hasRadius ? Number(req.body.serviceRadiusKm) : restaurant.serviceRadiusKm;
+    if (!isValidCoordinate(latitude, -90, 90) || !isValidCoordinate(longitude, -180, 180) || !isValidServiceRadius(serviceRadiusKm)) {
+      return res.status(400).json({ error: "Choose a valid restaurant map location and set a delivery radius between 0.5 and 100 km." });
+    }
+    updates.latitude = latitude;
+    updates.longitude = longitude;
+    updates.serviceRadiusKm = serviceRadiusKm;
+  }
+  Object.assign(restaurant, updates);
+  await restaurant.save();
+  await writeAudit({ user: req.user, action: "ADMIN_RESTAURANT_UPDATED", entity: "Restaurant", entityId: restaurant._id, details: { fields: Object.keys(updates) } });
+  res.json({ restaurant });
+}));
+
+app.get("/api/admin/restaurants/:id/menu", auth(), roles("ADMIN", "SUPER_ADMIN"), asyncRoute(async (req, res) => {
+  if (!mongoose.isValidObjectId(req.params.id)) return res.status(404).json({ error: "Restaurant not found." });
+  const restaurant = await Restaurant.findById(req.params.id).select("_id").lean();
+  if (!restaurant) return res.status(404).json({ error: "Restaurant not found." });
+  const items = await MenuItem.find({ restaurantId: restaurant._id }).sort({ active: -1, category: 1, name: 1 }).lean();
+  res.json({ items });
+}));
+
+app.post("/api/admin/restaurants/:id/menu", auth(), roles("ADMIN", "SUPER_ADMIN"), asyncRoute(async (req, res) => {
+  if (!mongoose.isValidObjectId(req.params.id)) return res.status(404).json({ error: "Restaurant not found." });
+  const restaurant = await Restaurant.findById(req.params.id).select("_id").lean();
+  if (!restaurant) return res.status(404).json({ error: "Restaurant not found." });
+  const name = String(req.body.name || "").trim();
+  const category = String(req.body.category || "").trim();
+  const price = Number(req.body.price);
+  if (!name || !category || !Number.isFinite(price) || price <= 0) {
+    return res.status(400).json({ error: "Item name, category and a positive price are required." });
+  }
+  const image = Object.hasOwn(req.body, "imageData") ? validateImageDataUrl(req.body.imageData) : null;
+  if (image?.error) return res.status(400).json({ error: image.error });
+  const item = await MenuItem.create({
+    restaurantId: restaurant._id,
+    name,
+    category,
+    description: String(req.body.description || "").trim(),
+    price: roundMoney(price),
+    currency,
+    imageData: image?.imageData || ""
+  });
+  await writeAudit({ user: req.user, action: "ADMIN_MENU_ITEM_CREATED", entity: "MenuItem", entityId: item._id, details: { restaurantId: restaurant._id, name } });
+  res.status(201).json({ item });
+}));
+
+app.patch("/api/admin/menu/:id", auth(), roles("ADMIN", "SUPER_ADMIN"), asyncRoute(async (req, res) => {
+  if (!mongoose.isValidObjectId(req.params.id)) return res.status(404).json({ error: "Menu item not found." });
+  const item = await MenuItem.findById(req.params.id);
+  if (!item) return res.status(404).json({ error: "Menu item not found." });
+  const updates = {};
+  for (const field of ["name", "category", "description"]) {
+    if (Object.hasOwn(req.body, field)) updates[field] = String(req.body[field] || "").trim();
+  }
+  if ((Object.hasOwn(updates, "name") && !updates.name) || (Object.hasOwn(updates, "category") && !updates.category)) {
+    return res.status(400).json({ error: "Menu item name and category cannot be empty." });
+  }
+  if (Object.hasOwn(req.body, "price")) {
+    const price = Number(req.body.price);
+    if (!Number.isFinite(price) || price <= 0) return res.status(400).json({ error: "Enter a positive menu item price." });
+    updates.price = roundMoney(price);
+  }
+  if (Object.hasOwn(req.body, "availability")) {
+    if (!["AVAILABLE", "UNAVAILABLE", "TEMPORARILY_UNAVAILABLE"].includes(req.body.availability)) {
+      return res.status(400).json({ error: "Choose a valid menu item availability." });
+    }
+    updates.availability = req.body.availability;
+  }
+  if (Object.hasOwn(req.body, "active")) {
+    if (typeof req.body.active !== "boolean") return res.status(400).json({ error: "An active true/false value is required." });
+    updates.active = req.body.active;
+  }
+  if (Object.hasOwn(req.body, "imageData")) {
+    const image = validateImageDataUrl(req.body.imageData);
+    if (image?.error) return res.status(400).json({ error: image.error });
+    updates.imageData = image?.imageData || "";
+  }
+  if (!Object.keys(updates).length) return res.status(400).json({ error: "Provide at least one menu item update." });
+  Object.assign(item, updates);
+  await item.save();
+  await writeAudit({ user: req.user, action: "ADMIN_MENU_ITEM_UPDATED", entity: "MenuItem", entityId: item._id, details: { fields: Object.keys(updates) } });
+  res.json({ item });
+}));
+
+app.delete("/api/admin/menu/:id", auth(), roles("ADMIN", "SUPER_ADMIN"), asyncRoute(async (req, res) => {
+  if (!mongoose.isValidObjectId(req.params.id)) return res.status(404).json({ error: "Menu item not found." });
+  const item = await MenuItem.findOneAndUpdate({ _id: req.params.id, active: true }, { $set: { active: false } }, { new: true });
+  if (!item) return res.status(404).json({ error: "Menu item not found." });
+  await writeAudit({ user: req.user, action: "ADMIN_MENU_ITEM_DEACTIVATED", entity: "MenuItem", entityId: item._id, details: { restaurantId: item.restaurantId } });
+  res.json({ item });
 }));
 
 app.get("/api/admin/customers", auth(), roles("ADMIN", "SUPER_ADMIN"), asyncRoute(async (_req, res) => {
@@ -640,6 +814,16 @@ app.patch("/api/admin/restaurants/:id/availability", auth(), roles("ADMIN", "SUP
 app.get("/api/admin/orders", auth(), roles("ADMIN", "SUPER_ADMIN"), asyncRoute(async (_req, res) => {
   const orders = await Order.find().sort({ createdAt: -1 }).limit(100).lean();
   res.json({ orders });
+}));
+
+app.patch("/api/admin/orders/:id/status", auth(), roles("ADMIN", "SUPER_ADMIN"), asyncRoute(async (req, res) => {
+  if (!mongoose.isValidObjectId(req.params.id)) return res.status(404).json({ error: "Order not found." });
+  const order = await Order.findById(req.params.id);
+  if (!order) return res.status(404).json({ error: "Order not found." });
+  const nextStatus = String(req.body.status || "");
+  if (!canTransition(order.status, nextStatus)) return res.status(409).json({ error: `This order cannot move from ${order.status} to ${nextStatus}.` });
+  const updated = await changeOrderStatus(order, nextStatus, req.user, String(req.body.reason || "").slice(0, 250));
+  res.json({ order: updated });
 }));
 
 app.get("/api/admin/audit", auth(), roles("ADMIN", "SUPER_ADMIN"), asyncRoute(async (_req, res) => {

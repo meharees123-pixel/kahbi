@@ -1,0 +1,12 @@
+{
+    "chat.tools.terminal.autoApprove": {
+        "/^node --check server\\\\src\\\\index\\.js; if \\(\\$\\?\\) \\{ node --check server\\\\src\\\\seed\\.js \\}; if \\(\\$\\?\\) \\{ node -e \"JSON\\.parse\\(require\\('fs'\\)\\.readFileSync\\('package\\.json', 'utf8'\\)\\); console\\.log\\('package\\.json is valid JSON'\\)\" \\}; if \\(\\$\\?\\) \\{ git diff --check \\}$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "/^git diff --check; node --check server\\\\src\\\\index\\.js; node --check server\\\\src\\\\seed\\.js; node -e \"const p = require\\('\\./package\\.json'\\); if \\(p\\.scripts\\.local !== 'docker compose up --build'\\) process\\.exit\\(1\\); console\\.log\\('Local run script is configured'\\)\"$/": {
+            "approve": true,
+            "matchCommandLine": true
+        }
+    }
+}

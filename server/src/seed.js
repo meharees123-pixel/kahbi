@@ -1,4 +1,4 @@
-require("./config");
+require("dotenv").config({ path: require("path").resolve(__dirname, "../../.env") });
 const mongoose = require("mongoose");
 const { User, Restaurant, MenuItem, Promotion, Advertisement } = require("./models");
 
@@ -66,6 +66,119 @@ async function seed() {
   await upsertUser({ name: "Demo Customer", email: "customer@kahbi.demo", phone: "+97450000002", role: "CUSTOMER" });
   await upsertUser({ name: "Demo Restaurant Owner", email: "restaurant@kahbi.demo", phone: "+97450000001", role: "RESTAURANT_OWNER", restaurantId: restaurant._id });
   await upsertUser({ name: "Demo Admin", email: "admin@kahbi.demo", phone: "+97450000003", role: "ADMIN" });
+  const additionalRestaurants = [
+    {
+      name: "Pearl Garden Kitchen",
+      ownerName: "Pearl Garden Owner",
+      ownerEmail: "owner.pearl@kahbi.demo",
+      phone: "+97450000011",
+      cuisine: ["Chinese", "Asian"],
+      category: "Restaurant",
+      description: "Fresh Asian favorites made for sharing.",
+      address: "The Pearl, Doha, Qatar",
+      latitude: 25.3678,
+      longitude: 51.5507,
+      serviceRadiusKm: 18,
+      items: [
+        ["Crispy Chicken Dumplings", "Starters", 24],
+        ["Beef Chow Mein", "Noodles", 38],
+        ["Sweet and Sour Chicken", "Main Course", 42],
+        ["Vegetable Fried Rice", "Rice", 29]
+      ]
+    },
+    {
+      name: "Souq Flame Grill",
+      ownerName: "Souq Flame Owner",
+      ownerEmail: "owner.souq@kahbi.demo",
+      phone: "+97450000012",
+      cuisine: ["Arabic", "Grill"],
+      category: "Restaurant",
+      description: "Charcoal-grilled classics with warm Arabic sides.",
+      address: "Msheireb Downtown, Doha, Qatar",
+      latitude: 25.2856,
+      longitude: 51.5333,
+      serviceRadiusKm: 16,
+      items: [
+        ["Chicken Shish Tawook", "Grill", 36],
+        ["Lamb Kofta Plate", "Grill", 48],
+        ["Hummus and Fresh Bread", "Starters", 18],
+        ["Mixed Grill for Two", "Grill", 78]
+      ]
+    },
+    {
+      name: "Corniche Breakfast Club",
+      ownerName: "Corniche Breakfast Owner",
+      ownerEmail: "owner.corniche@kahbi.demo",
+      phone: "+97450000013",
+      cuisine: ["Breakfast", "Cafe"],
+      category: "Cafe",
+      description: "All-day breakfast, specialty coffee, and cafe favorites.",
+      address: "Al Corniche, Doha, Qatar",
+      latitude: 25.3042,
+      longitude: 51.5328,
+      serviceRadiusKm: 15,
+      items: [
+        ["Shakshuka and Toast", "Breakfast", 32],
+        ["Halloumi Avocado Toast", "Breakfast", 34],
+        ["Pancake Stack", "Breakfast", 28],
+        ["Iced Spanish Latte", "Coffee", 22]
+      ]
+    },
+    {
+      name: "Lusail Spice House",
+      ownerName: "Lusail Spice Owner",
+      ownerEmail: "owner.lusail@kahbi.demo",
+      phone: "+97450000014",
+      cuisine: ["Indian", "Pakistani"],
+      category: "Restaurant",
+      description: "Slow-cooked curries, fragrant rice, and tandoor favorites.",
+      address: "Marina District, Lusail, Qatar",
+      latitude: 25.4208,
+      longitude: 51.4905,
+      serviceRadiusKm: 20,
+      items: [
+        ["Chicken Dum Biryani", "Biryani", 32],
+        ["Paneer Tikka Masala", "Main Course", 35],
+        ["Beef Nihari", "Main Course", 45],
+        ["Garlic Naan", "Bread", 8]
+      ]
+    }
+  ];
+  for (const entry of additionalRestaurants) {
+    const { items, ownerName, ownerEmail, ...restaurantFields } = entry;
+    const additionalRestaurant = await Restaurant.findOneAndUpdate(
+      { name: restaurantFields.name, demo: true },
+      {
+        $set: {
+          ...restaurantFields,
+          hotelName: "",
+          whatsapp: restaurantFields.phone,
+          email: ownerEmail,
+          preparationMinutes: 30,
+          minOrder: 0,
+          maxOrder: 1000,
+          status: "APPROVED",
+          availability: "OPEN",
+          demo: true
+        }
+      },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    );
+    for (const [name, category, price] of items) {
+      await MenuItem.findOneAndUpdate(
+        { restaurantId: additionalRestaurant._id, name },
+        { $set: { restaurantId: additionalRestaurant._id, category, name, price, currency: "QAR", availability: "AVAILABLE", active: true, bestSeller: false, chefRecommended: false, demo: true } },
+        { upsert: true, new: true, setDefaultsOnInsert: true }
+      );
+    }
+    await upsertUser({
+      name: ownerName,
+      email: ownerEmail,
+      phone: restaurantFields.phone,
+      role: "RESTAURANT_OWNER",
+      restaurantId: additionalRestaurant._id
+    });
+  }
   console.log("KABHI demo data ready. All demo account passwords are Demo123! (local use only).");
   await mongoose.disconnect();
 }

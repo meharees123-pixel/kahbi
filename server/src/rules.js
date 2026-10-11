@@ -29,4 +29,17 @@ function isValidCoordinate(value, min, max) {
   return Number.isFinite(value) && value >= min && value <= max;
 }
 
-module.exports = { canTransition, haversineKm, isValidCoordinate };
+function isValidServiceRadius(value) {
+  return Number.isFinite(value) && value >= 0.5 && value <= 100;
+}
+
+function isWithinServiceArea(latitude, longitude, restaurantLatitude, restaurantLongitude, radiusKm) {
+  if (!isValidCoordinate(latitude, -90, 90) ||
+      !isValidCoordinate(longitude, -180, 180) ||
+      !isValidCoordinate(restaurantLatitude, -90, 90) ||
+      !isValidCoordinate(restaurantLongitude, -180, 180) ||
+      !isValidServiceRadius(radiusKm)) return false;
+  return haversineKm(latitude, longitude, restaurantLatitude, restaurantLongitude) <= radiusKm;
+}
+
+module.exports = { canTransition, haversineKm, isValidCoordinate, isValidServiceRadius, isWithinServiceArea };
