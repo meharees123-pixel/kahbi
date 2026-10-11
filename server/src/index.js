@@ -4,7 +4,7 @@ const app = require("./app");
 const { expirePendingOrders } = require("./services");
 
 const port = Number(process.env.PORT || 3000);
-const mongoUri = process.env.MONGODB_URI || "mongodb://localhost:27017/kahbi";
+const mongoUri = process.env.MONGODB_URI || "mongodb://localhost:27017/kabhi";
 
 async function start() {
   await mongoose.connect(mongoUri);
