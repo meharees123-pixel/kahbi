@@ -11,7 +11,7 @@ async function upsertUser({ name, email, phone, role, restaurantId = null }) {
 }
 
 async function seed() {
-  await mongoose.connect(process.env.MONGODB_URI || "mongodb://localhost:27017/kahbi");
+  await mongoose.connect(process.env.MONGODB_URI || "mongodb://localhost:27017/kabhi");
   let restaurant = await Restaurant.findOne({ name: "KABHI Demo Hotel", demo: true });
   if (!restaurant) {
     restaurant = await Restaurant.create({
