@@ -56,6 +56,9 @@ jobs:
       API_SERVICE: ${{ vars.GCP_API_SERVICE || 'kahbi-api' }}
       WEB_SERVICE: ${{ vars.GCP_WEB_SERVICE || 'kahbi-web' }}
     steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
       - name: Validate deployment configuration
         shell: bash
         run: |
