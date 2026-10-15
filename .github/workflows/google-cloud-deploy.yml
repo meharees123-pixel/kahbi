@@ -107,7 +107,6 @@ jobs:
           region: ${{ env.GCP_REGION }}
           env_vars: |-
             NODE_ENV=production
-            PORT=8080
             CURRENCY=QAR
           secrets: |-
             MONGODB_URI=${{ env.MONGODB_SECRET }}:latest
@@ -131,7 +130,6 @@ jobs:
           project_id: ${{ env.GCP_PROJECT_ID }}
           region: ${{ env.GCP_REGION }}
           env_vars: |-
-            PORT=8080
             API_UPSTREAM=${{ steps.deploy_api.outputs.url }}
           flags: >-
             --service-account=${{ env.RUNTIME_SERVICE_ACCOUNT }}
