@@ -19,7 +19,7 @@
     <div class="nav-actions">
       <button class="icon-button" *ngIf="(!user || isCustomer) && cartCount" (click)="openCart()">Cart <span class="cart-count">{{ cartCount }}</span></button>
       <span class="signed-user" *ngIf="user">{{ user.name }}</span>
-      <button class="button button-dark button-small" *ngIf="!user" (click)="openLogin('CUSTOMER')">Customer sign in</button>
+      <button class="button button-dark button-small" *ngIf="!user" (click)="openLogin('CUSTOMER')">signin</button>
       <button class="button button-quiet button-small" *ngIf="user" (click)="logout()">Sign out</button>
     </div>
   </header>
