@@ -139,6 +139,9 @@ h1 em, h2 em { color: #cde08e; font-weight: 500; }
 .restaurant-cover { height: 164px; position: relative; display: grid; place-items: center; overflow: hidden; background: linear-gradient(135deg, #dbebd9, #a6c6a8); }
 .restaurant-cover-image { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
 .restaurant-cover:has(.restaurant-cover-image)::after { position: absolute; inset: 45% 0 0; content: ''; background: linear-gradient(transparent, #10251f88); pointer-events: none; }
+.restaurant-rating-chip { position: absolute; z-index: 1; top: 12px; left: 12px; display: inline-flex; align-items: center; gap: 4px; max-width: calc(100% - 70px); padding: 6px 9px; border: 1px solid #ffffffa8; border-radius: 7px; color: #624a22; background: #fffefaed; font-size: 10px; font-weight: 700; white-space: nowrap; }
+.restaurant-rating-chip small { color: #66736a; font-size: 9px; font-weight: 500; }
+.restaurant-rating-chip.no-ratings { color: #53685d; font-size: 9px; }
 .restaurant-card:nth-child(3n + 2) .restaurant-cover { background: linear-gradient(135deg, #f3dfbe, #d9a77b); }
 .restaurant-card:nth-child(3n) .restaurant-cover { background: linear-gradient(135deg, #d9dce9, #9fa7bf); }
 .cover-closed { filter: saturate(.6); }
@@ -163,6 +166,33 @@ h1 em, h2 em { color: #cde08e; font-weight: 500; }
 .flash button { border: 0; background: none; font-size: 19px; }
 .error { background: #fff1ed; color: #a74737; }
 .notice { background: #edf5e7; color: #466a46; }
+.feedback-home-banner { display: flex; align-items: center; justify-content: space-between; gap: 18px; max-width: 1240px; margin: 18px auto 0; padding: 18px 20px; border: 1px solid #dfe9d7; border-radius: 14px; background: linear-gradient(135deg, #edf6e8, #f9faef); box-shadow: 0 10px 25px rgba(10, 47, 39, 0.06); }
+.feedback-banner-copy { display: grid; gap: 4px; }
+.feedback-banner-copy .eyebrow { color: #5d8b63; letter-spacing: .14em; }
+.feedback-banner-copy strong { color: var(--green); font-size: 18px; }
+.feedback-banner-copy p { margin: 0; color: var(--muted); font-size: 11px; }
+.feedback-banner-actions { display: flex; align-items: center; gap: 12px; }
+.feedback-banner-close { width: 30px; height: 30px; border: 1px solid #d7e5d2; border-radius: 50%; background: rgba(255, 255, 255, 0.55); color: var(--green); font-size: 20px; line-height: 1; }
+
+.feedback-modal-backdrop { position: fixed; inset: 0; z-index: 1300; display: grid; place-items: center; padding: 20px; background: rgba(16, 36, 30, 0.54); }
+.feedback-modal { width: min(100%, 560px); padding: 22px; border: 1px solid var(--line); border-radius: 18px; background: var(--paper); box-shadow: 0 28px 85px rgba(14, 37, 30, 0.25); }
+.feedback-modal-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.feedback-modal-header h2 { margin: 6px 0 0; font-size: 31px; color: var(--green); }
+.feedback-header { display: flex; flex-direction: column; gap: 5px; margin-top: 18px; }
+.feedback-header strong { color: var(--green); font-size: 15px; }
+.feedback-header small { color: var(--muted); font-size: 11px; line-height: 1.5; }
+.feedback-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-top: 14px; }
+.feedback-row label { color: #586f66; font-size: 11px; font-weight: 600; }
+.feedback-row.two-up { display: grid; grid-template-columns: 1fr 1fr; }
+.feedback-row.two-up > div { display: grid; gap: 8px; }
+.star-row { display: flex; align-items: center; gap: 8px; }
+.star-row button { width: 28px; height: 28px; padding: 0; border: 0; background: transparent; color: #cfcfc8; font-size: 22px; }
+.star-row.compact button { font-size: 18px; }
+.star-row button.active { color: #d98f4d; }
+.feedback-comment { display: grid; gap: 7px; margin-top: 16px; color: #5d6d67; font-size: 10px; font-weight: 600; }
+.feedback-comment small { color: var(--muted); font-weight: 500; }
+.feedback-comment textarea { min-height: 80px; resize: vertical; }
+.feedback-modal-actions { display: flex; justify-content: flex-end; align-items: center; gap: 10px; margin-top: 16px; }
 .restaurant-page { padding-top: 30px; }
 .back-link { padding: 0; margin-bottom: 23px; color: #63736a; font-size: 12px; }
 .restaurant-banner { display: flex; align-items: center; gap: 24px; padding: 32px; background: #e5ecdc; border-radius: 17px; }
@@ -318,6 +348,23 @@ h1 em, h2 em { color: #cde08e; font-weight: 500; }
 .portal-order-top strong, .admin-order-row strong, .review-row strong { font-size: 11px; }
 .portal-order-top span, .admin-order-row small, .review-row small, .availability-row small { color: var(--muted); font-size: 9px; }
 .portal-order .order-detail-row { padding: 7px 0; font-size: 9px; }
+.portal-tabs { display: flex; gap: 5px; overflow-x: auto; margin: 0 0 6px; border-bottom: 1px solid var(--line); }
+.portal-tabs button { flex: 0 0 auto; padding: 10px 12px; border: 0; border-bottom: 2px solid transparent; color: var(--muted); background: transparent; font-size: 10px; font-weight: 600; white-space: nowrap; }
+.portal-tabs button.active { border-bottom-color: var(--green); color: var(--green); }
+.admin-restaurant-tabs { margin: 22px 0 18px; }
+.completed-order-card, .admin-feedback-order { padding: 15px 0; border-top: 1px solid var(--line); }
+.completed-order-meta { display: grid; grid-template-columns: 1fr auto; gap: 8px 12px; padding: 10px 0; color: var(--muted); font-size: 9px; }
+.completed-order-meta strong { color: var(--ink); font-size: 10px; text-align: right; }
+.order-feedback-result { padding: 11px 12px; border: 1px solid #e3eadc; border-radius: 8px; background: #f7f9f2; overflow-wrap: anywhere; }
+.order-feedback-result strong { color: #9b6b2e; font-size: 11px; }
+.order-feedback-result p { margin: 6px 0; color: var(--ink); font-size: 10px; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
+.order-feedback-result small, .order-feedback-empty { color: var(--muted); font-size: 9px; }
+.order-feedback-empty { padding: 10px 0; }
+.admin-feedback-order-heading { display: flex; align-items: start; justify-content: space-between; gap: 12px; }
+.admin-feedback-order-heading > div { display: grid; gap: 5px; }
+.admin-feedback-order-heading strong { color: var(--green); font-size: 11px; }
+.admin-feedback-order-heading small { color: var(--muted); font-size: 9px; }
+.pagination-controls { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding-top: 12px; border-top: 1px solid var(--line); color: var(--muted); font-size: 9px; }
 .order-actions { display: flex; gap: 8px; margin-top: 10px; }
 .availability-row, .review-row, .admin-order-row, .log-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 0; border-top: 1px solid var(--line); }
 .availability-row strong { font-size: 10px; }

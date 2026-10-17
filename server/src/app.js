@@ -6,11 +6,13 @@ const jwt = require("jsonwebtoken");
 const mongoose = require("mongoose");
 const crypto = require("crypto");
 const {
-  User, Restaurant, MenuItem, Order, Promotion, Rating, AuditLog, MessageLog, BillingTransaction,
+  User, Restaurant, MenuItem, Order, Promotion, Rating, Feedback, AuditLog, MessageLog, BillingTransaction,
   Advertisement, AdvertisementEvent, WhatsappOtp, WhatsappSettings, WhatsappOtpControl
 } = require("./models");
 const { canTransition, haversineKm, isValidCoordinate, isValidServiceRadius, isWithinServiceArea } = require("./rules");
 const { validateImageDataUrl } = require("./images");
+const { validateFeedbackSubmission, buildFeedbackSummary, attachFeedbackToOrders } = require("./feedback");
+const { buildRestaurantRatingSummary } = require("./ratings");
 const { writeAudit, logNotification, changeOrderStatus } = require("./services");
 const {
   normalizeWhatsappPhone,
@@ -117,6 +119,79 @@ async function restaurantForUser(user) {
     throw error;
   }
   return restaurant;
+}
+
+async function ordersWithFeedback(orders, restaurantId) {
+  if (!orders.length) return attachFeedbackToOrders(orders, []);
+  const orderIds = orders.map((order) => order._id);
+  const [feedbackEntries, legacyRatings] = await Promise.all([
+    Feedback.find({ restaurantId, orderId: { $in: orderIds } })
+      .select("orderId restaurantId overallRating foodRating deliveryRating comment submittedAt").lean(),
+    Rating.find({ restaurantId, orderId: { $in: orderIds } })
+      .select("orderId restaurantId stars comment createdAt").lean()
+  ]);
+  const legacyFeedback = legacyRatings.map((rating) => ({
+    orderId: rating.orderId,
+    restaurantId: rating.restaurantId,
+    overallRating: rating.stars,
+    foodRating: null,
+    deliveryRating: null,
+    comment: rating.comment,
+    submittedAt: rating.createdAt
+  }));
+  return attachFeedbackToOrders(orders, [...feedbackEntries, ...legacyFeedback]);
+}
+
+async function refreshRestaurantRating(restaurantId) {
+  const summaries = await restaurantRatingSummaries([restaurantId]);
+  const summary = summaries.get(String(restaurantId)) || { average: 0, count: 0 };
+  await Restaurant.findByIdAndUpdate(restaurantId, {
+    ratingAverage: summary.average,
+    ratingCount: summary.count
+  });
+}
+
+async function restaurantRatingSummaries(restaurantIds) {
+  if (!restaurantIds.length) return new Map();
+  const validRating = { restaurantId: { $in: restaurantIds }, orderId: { $ne: null } };
+  const entries = await Feedback.aggregate([
+    { $match: { ...validRating, overallRating: { $type: "number", $gte: 1, $lte: 5 } } },
+    { $lookup: { from: Order.collection.name, localField: "orderId", foreignField: "_id", as: "order" } },
+    { $unwind: "$order" },
+    { $match: { $expr: { $eq: ["$restaurantId", "$order.restaurantId"] } } },
+    { $project: { restaurantId: 1, orderId: 1, rating: "$overallRating", source: { $literal: 1 } } },
+    {
+      $unionWith: {
+        coll: Rating.collection.name,
+        pipeline: [
+          { $match: { ...validRating, stars: { $type: "number", $gte: 1, $lte: 5 } } },
+          { $lookup: { from: Order.collection.name, localField: "orderId", foreignField: "_id", as: "order" } },
+          { $unwind: "$order" },
+          { $match: { $expr: { $eq: ["$restaurantId", "$order.restaurantId"] } } },
+          { $project: { restaurantId: 1, orderId: 1, rating: "$stars", source: { $literal: 0 } } }
+        ]
+      }
+    },
+    { $sort: { source: -1 } },
+    { $group: { _id: { restaurantId: "$restaurantId", orderId: "$orderId" }, rating: { $first: "$rating" } } },
+    { $project: { _id: 0, restaurantId: "$_id.restaurantId", orderId: "$_id.orderId", overallRating: "$rating" } }
+  ]);
+  const entriesByRestaurant = new Map();
+  for (const entry of entries) {
+    const key = String(entry.restaurantId);
+    const restaurantEntries = entriesByRestaurant.get(key) || [];
+    restaurantEntries.push(entry);
+    entriesByRestaurant.set(key, restaurantEntries);
+  }
+  return new Map(restaurantIds.map((restaurantId) => {
+    const key = String(restaurantId);
+    return [key, buildRestaurantRatingSummary([], entriesByRestaurant.get(key) || [])];
+  }));
+}
+
+function requestedPage(value) {
+  const page = Number.parseInt(String(value || "1"), 10);
+  return Number.isInteger(page) && page > 0 ? page : 1;
 }
 
 app.get("/api/health", (_req, res) => res.json({ status: "ok", service: "kahbi-api", currency }));
@@ -315,6 +390,7 @@ app.get("/api/restaurants", asyncRoute(async (req, res) => {
     .sort({ demo: -1, name: 1 })
     .limit(50)
     .lean();
+  const ratingSummaries = await restaurantRatingSummaries(restaurants.map((restaurant) => restaurant._id));
   const lat = Number(req.query.lat);
   const lng = Number(req.query.lng);
   const locationProvided = req.query.lat !== undefined || req.query.lng !== undefined;
@@ -332,7 +408,8 @@ app.get("/api/restaurants", asyncRoute(async (req, res) => {
     } else if (locationProvided) {
       eligible = false;
     }
-    return { ...restaurant, distanceKm, eligible };
+    const ratingSummary = ratingSummaries.get(String(restaurant._id)) || { average: 0, count: 0 };
+    return { ...restaurant, ratingAverage: ratingSummary.average, ratingCount: ratingSummary.count, distanceKm, eligible };
   });
   const eligibleOnly = req.query.eligible === "true" || locationProvided;
   const now = new Date();
@@ -364,7 +441,10 @@ app.get("/api/restaurants/:id/menu", asyncRoute(async (req, res) => {
 
 app.get("/api/orders/mine", auth(), roles("CUSTOMER"), asyncRoute(async (req, res) => {
   const orders = await Order.find({ customerId: req.user._id }).sort({ createdAt: -1 }).limit(50).lean();
-  res.json({ orders });
+  const feedbackOrderIds = await Feedback.find({ customerId: req.user._id }, { orderId: 1 }).lean();
+  const feedbackSet = new Set(feedbackOrderIds.map((entry) => String(entry.orderId)));
+  const responses = orders.map((order) => ({ ...order, feedbackSubmitted: feedbackSet.has(String(order._id)) }));
+  res.json({ orders: responses });
 }));
 
 app.post("/api/orders/track", asyncRoute(async (req, res) => {
@@ -522,9 +602,44 @@ app.post("/api/orders/:id/rating", auth(), roles("CUSTOMER"), asyncRoute(async (
   const order = await Order.findOne({ _id: req.params.id, customerId: req.user._id, status: "CLOSED" });
   if (!order) return res.status(400).json({ error: "Only your completed orders can be rated." });
   const rating = await Rating.create({ orderId: order._id, customerId: req.user._id, restaurantId: order.restaurantId, stars, comment: String(req.body.comment || "").slice(0, 1000) });
-  const aggregate = await Rating.aggregate([{ $match: { restaurantId: order.restaurantId } }, { $group: { _id: "$restaurantId", average: { $avg: "$stars" }, count: { $sum: 1 } } }]);
-  if (aggregate[0]) await Restaurant.findByIdAndUpdate(order.restaurantId, { ratingAverage: roundMoney(aggregate[0].average), ratingCount: aggregate[0].count });
+  await refreshRestaurantRating(order.restaurantId);
   res.status(201).json({ rating });
+}));
+
+app.get("/api/orders/:id/feedback", auth(), roles("CUSTOMER"), asyncRoute(async (req, res) => {
+  const order = await Order.findOne({ _id: req.params.id, customerId: req.user._id, status: "CLOSED" }).lean();
+  if (!order) return res.status(404).json({ error: "That completed order was not found for this customer." });
+  const feedback = await Feedback.findOne({ orderId: order._id }).lean();
+  res.json({ feedbackExists: Boolean(feedback), feedback: feedback || null });
+}));
+
+app.post("/api/orders/:id/feedback", auth(), roles("CUSTOMER"), asyncRoute(async (req, res) => {
+  const order = await Order.findOne({ _id: req.params.id, customerId: req.user._id, status: "CLOSED" });
+  if (!order) return res.status(404).json({ error: "Only your completed orders may receive feedback." });
+  if (await Feedback.exists({ orderId: order._id })) {
+    return res.status(409).json({ error: "Feedback has already been submitted for this order. It cannot be edited after submission." });
+  }
+  const feedbackPayload = validateFeedbackSubmission(req.body);
+  const feedback = await Feedback.create({
+    orderId: order._id,
+    customerId: req.user._id,
+    customerContact: req.user.phone || "",
+    restaurantId: order.restaurantId,
+    overallRating: feedbackPayload.overallRating,
+    foodRating: feedbackPayload.foodRating,
+    deliveryRating: feedbackPayload.deliveryRating,
+    comment: feedbackPayload.comment,
+    submittedAt: new Date()
+  });
+  await refreshRestaurantRating(order.restaurantId);
+  await writeAudit({
+    user: req.user,
+    action: "ORDER_FEEDBACK_SUBMITTED",
+    entity: "Feedback",
+    entityId: feedback._id,
+    details: { orderId: order._id, restaurantId: order.restaurantId, overallRating: feedback.overallRating }
+  });
+  res.status(201).json({ feedback });
 }));
 
 const restaurantRoles = ["RESTAURANT_OWNER", "RESTAURANT_MANAGER", "RESTAURANT_STAFF"];
@@ -586,6 +701,24 @@ app.get("/api/restaurant/orders", auth(), roles(...restaurantRoles), asyncRoute(
   const restaurant = await restaurantForUser(req.user);
   const orders = await Order.find({ restaurantId: restaurant._id }).sort({ createdAt: -1 }).limit(100).lean();
   res.json({ orders });
+}));
+
+app.get("/api/restaurant/completed-orders", auth(), roles(...restaurantRoles), asyncRoute(async (req, res) => {
+  const restaurant = await restaurantForUser(req.user);
+  const page = requestedPage(req.query.page);
+  const pageSize = 25;
+  const filter = { restaurantId: restaurant._id, status: "CLOSED" };
+  const [total, orders] = await Promise.all([
+    Order.countDocuments(filter),
+    Order.find(filter).sort({ completedAt: -1, createdAt: -1 }).skip((page - 1) * pageSize).limit(pageSize).lean()
+  ]);
+  res.json({
+    orders: await ordersWithFeedback(orders, restaurant._id),
+    page,
+    pageSize,
+    total,
+    totalPages: Math.ceil(total / pageSize)
+  });
 }));
 
 app.get("/api/restaurant/menu", auth(), roles(...restaurantRoles), asyncRoute(async (req, res) => {
@@ -812,6 +945,26 @@ app.get("/api/admin/restaurants", auth(), roles("ADMIN", "SUPER_ADMIN"), asyncRo
   const query = req.query.status ? { status: String(req.query.status) } : {};
   const restaurants = await Restaurant.find(query).sort({ createdAt: -1 }).limit(100).lean();
   res.json({ restaurants });
+}));
+
+app.get("/api/admin/restaurants/:id/orders-feedback", auth(), roles("ADMIN", "SUPER_ADMIN"), asyncRoute(async (req, res) => {
+  if (!mongoose.isValidObjectId(req.params.id)) return res.status(404).json({ error: "Restaurant not found." });
+  const restaurant = await Restaurant.findById(req.params.id).select("_id").lean();
+  if (!restaurant) return res.status(404).json({ error: "Restaurant not found." });
+  const page = requestedPage(req.query.page);
+  const pageSize = 25;
+  const filter = { restaurantId: restaurant._id };
+  const [total, orders] = await Promise.all([
+    Order.countDocuments(filter),
+    Order.find(filter).sort({ createdAt: -1 }).skip((page - 1) * pageSize).limit(pageSize).lean()
+  ]);
+  res.json({
+    orders: await ordersWithFeedback(orders, restaurant._id),
+    page,
+    pageSize,
+    total,
+    totalPages: Math.ceil(total / pageSize)
+  });
 }));
 
 app.post("/api/admin/restaurants", auth(), roles("ADMIN", "SUPER_ADMIN"), asyncRoute(async (req, res) => {
@@ -1069,6 +1222,12 @@ app.get("/api/admin/messages", auth(), roles("ADMIN", "SUPER_ADMIN"), asyncRoute
 app.get("/api/admin/billing", auth(), roles("ADMIN", "SUPER_ADMIN"), asyncRoute(async (_req, res) => {
   const transactions = await BillingTransaction.find().sort({ createdAt: -1 }).limit(100).lean();
   res.json({ transactions });
+}));
+
+app.get("/api/admin/feedback", auth(), roles("ADMIN", "SUPER_ADMIN"), asyncRoute(async (_req, res) => {
+  const feedbackEntries = await Feedback.find().sort({ submittedAt: -1 }).limit(100).lean();
+  const summary = buildFeedbackSummary(feedbackEntries);
+  res.json({ feedback: feedbackEntries, summary });
 }));
 
 app.get("/api/admin/marketing", auth(), roles("ADMIN", "SUPER_ADMIN"), asyncRoute(async (_req, res) => {

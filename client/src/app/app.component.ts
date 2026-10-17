@@ -82,7 +82,32 @@ interface Order {
   status: string;
   statusHistory: { status: string; createdAt: string }[];
   createdAt: string;
+  updatedAt?: string;
   commissionAmount?: number;
+  feedbackSubmitted?: boolean;
+  completedAt?: string | null;
+  feedback?: FeedbackEntry | null;
+}
+
+interface FeedbackEntry {
+  _id: string;
+  orderId: string;
+  restaurantId: string;
+  customerId?: string | null;
+  customerContact?: string;
+  overallRating: number;
+  foodRating?: number | null;
+  deliveryRating?: number | null;
+  comment?: string;
+  submittedAt: string;
+}
+
+interface FeedbackSummary {
+  totalFeedback: number;
+  averageOverallRating: number;
+  averageFoodRating: number;
+  averageDeliveryRating: number;
+  trend: { bucket: string; averageOverallRating: number; count: number }[];
 }
 
 interface Promotion {
@@ -173,10 +198,22 @@ export class AppComponent implements OnInit {
   cart: { [id: string]: number } = {};
   orders: Order[] = [];
   restaurantOrders: Order[] = [];
+  completedRestaurantOrders: Order[] = [];
+  restaurantOrderTab: 'active' | 'completed' = 'active';
+  completedRestaurantOrdersPage = 1;
+  completedRestaurantOrdersTotal = 0;
+  completedRestaurantOrdersTotalPages = 0;
+  completedRestaurantOrdersLoading = false;
   restaurantMenu: MenuItem[] = [];
   pendingRestaurants: Restaurant[] = [];
   adminRestaurants: Restaurant[] = [];
   adminRestaurant: Restaurant | null = null;
+  adminRestaurantTab: 'details' | 'ordersFeedback' = 'details';
+  adminRestaurantOrders: Order[] = [];
+  adminRestaurantOrdersPage = 1;
+  adminRestaurantOrdersTotal = 0;
+  adminRestaurantOrdersTotalPages = 0;
+  adminRestaurantOrdersLoading = false;
   adminCuisineDraft = '';
   adminRestaurantSearch = '';
   adminMenu: MenuItem[] = [];
@@ -187,6 +224,19 @@ export class AppComponent implements OnInit {
   billingTransactions: BillingRecord[] = [];
   restaurantBilling: BillingRecord[] = [];
   customers: CustomerRecord[] = [];
+  feedbackEntries: FeedbackEntry[] = [];
+  feedbackSummary: FeedbackSummary = {
+    totalFeedback: 0,
+    averageOverallRating: 0,
+    averageFoodRating: 0,
+    averageDeliveryRating: 0,
+    trend: []
+  };
+  feedbackDrafts: Record<string, { overallRating: number; foodRating: number; deliveryRating: number; comment: string }> = {};
+  feedbackSubmitted: Record<string, boolean> = {};
+  feedbackBannerDismissed = false;
+  feedbackModalOrder: Order | null = null;
+  feedbackModalOpen = false;
   adminWhatsappStatus: WhatsappConfigStatus | null = null;
   whatsappAccessToken = '';
   whatsappPhoneNumberId = '';
@@ -374,6 +424,10 @@ export class AppComponent implements OnInit {
     );
   }
 
+  get activeRestaurantOrders(): Order[] {
+    return this.restaurantOrders.filter((order) => order.status !== 'CLOSED');
+  }
+
   headers(): HttpHeaders {
     const token = localStorage.getItem(this.tokenKey);
     return token ? new HttpHeaders({ Authorization: `Bearer ${token}` }) : new HttpHeaders();
@@ -388,6 +442,7 @@ export class AppComponent implements OnInit {
     window.history.replaceState(null, '', '/');
     if (this.user?.role === 'CUSTOMER') {
       this.view = 'home';
+      this.loadFeedbackOrders(false);
       this.loadRestaurants();
     } else if (this.user?.role.startsWith('RESTAURANT_')) {
       this.loadRestaurantPortal();
@@ -431,7 +486,57 @@ export class AppComponent implements OnInit {
     this.signupRestaurant = false;
     this.view = 'home';
     window.history.pushState(null, '', '/');
+    this.feedbackBannerDismissed = false;
     this.loadRestaurants();
+  }
+
+  private loadFeedbackOrders(redirectToOrders: boolean): void {
+    if (!this.user || this.user.role !== 'CUSTOMER') return;
+    this.http.get<{ orders: Order[] }>(`${this.api}/orders/mine`, { headers: this.headers() }).subscribe({
+      next: ({ orders }) => {
+        this.orders = orders;
+        this.feedbackSubmitted = Object.fromEntries(
+          orders.filter((order) => order.feedbackSubmitted).map((order) => [order._id, true])
+        );
+        if (redirectToOrders) {
+          this.view = 'orders';
+          this.openFeedbackModal(this.getUnsubmittedFeedbackOrder(orders) || null);
+        } else {
+          this.feedbackBannerDismissed = false;
+        }
+      },
+      error: (error) => this.showError(error)
+    });
+  }
+
+  private getUnsubmittedFeedbackOrder(orders: Order[] = this.orders): Order | null {
+    const candidate = orders.filter((order) => order.status === 'CLOSED' && !(this.feedbackSubmitted[order._id] || order.feedbackSubmitted)).sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())[0];
+    return candidate || null;
+  }
+
+  get feedbackBannerOrder(): Order | null {
+    if (!this.isCustomer || this.view !== 'home') return null;
+    return this.getUnsubmittedFeedbackOrder();
+  }
+
+  get showFeedbackBanner(): boolean {
+    return !this.feedbackBannerDismissed && !!this.feedbackBannerOrder;
+  }
+
+  openFeedbackModal(order: Order | null): void {
+    if (!order || order.status !== 'CLOSED' || this.feedbackSubmitted[order._id] || order.feedbackSubmitted) return;
+    this.feedbackModalOrder = order;
+    this.feedbackModalOpen = true;
+    this.feedbackBannerDismissed = false;
+    const draft = this.getFeedbackDraft(order._id);
+    if (!draft.overallRating && !draft.foodRating && !draft.deliveryRating && !draft.comment) {
+      this.feedbackDrafts[order._id] = { overallRating: 0, foodRating: 0, deliveryRating: 0, comment: '' };
+    }
+  }
+
+  closeFeedbackModal(): void {
+    this.feedbackModalOpen = false;
+    this.feedbackModalOrder = null;
   }
 
   private applyLocationRoute(): void {
@@ -802,6 +907,9 @@ export class AppComponent implements OnInit {
       this.http.get<{ orders: Order[] }>(`${this.api}/orders/mine`, { headers: this.headers() }).subscribe({
         next: (result) => {
           this.trackedOrder = result.orders.find((order) => order.reference === this.trackReference.trim().toUpperCase()) || null;
+          if (this.trackedOrder && this.trackedOrder.status === 'CLOSED' && !(this.feedbackSubmitted[this.trackedOrder._id] || this.trackedOrder.feedbackSubmitted)) {
+            this.openFeedbackModal(this.trackedOrder);
+          }
           this.error = this.trackedOrder ? '' : 'No order with that reference was found in your account.';
         },
         error: (error) => this.showError(error)
@@ -811,6 +919,9 @@ export class AppComponent implements OnInit {
     this.http.post<{ order: Order }>(`${this.api}/orders/track`, { reference: this.trackReference, phone: this.trackPhone }).subscribe({
       next: ({ order }) => {
         this.trackedOrder = order;
+        if (this.trackedOrder && this.trackedOrder.status === 'CLOSED' && !(this.feedbackSubmitted[this.trackedOrder._id] || this.trackedOrder.feedbackSubmitted)) {
+          this.openFeedbackModal(this.trackedOrder);
+        }
         this.error = '';
         this.notice = '';
       },
@@ -967,13 +1078,7 @@ export class AppComponent implements OnInit {
   }
 
   loadMyOrders(): void {
-    this.http.get<{ orders: Order[] }>(`${this.api}/orders/mine`, { headers: this.headers() }).subscribe({
-      next: ({ orders }) => {
-        this.orders = orders;
-        this.view = 'orders';
-      },
-      error: (error) => this.showError(error)
-    });
+    this.loadFeedbackOrders(true);
   }
 
   loadRestaurantPortal(): void {
@@ -985,6 +1090,7 @@ export class AppComponent implements OnInit {
           next: ({ orders }) => (this.restaurantOrders = orders),
           error: (error) => this.showError(error)
         });
+        if (this.restaurantOrderTab === 'completed') this.loadCompletedRestaurantOrders(this.completedRestaurantOrdersPage);
         this.http.get<{ items: MenuItem[] }>(`${this.api}/restaurant/menu`, { headers: this.headers() }).subscribe({
           next: ({ items }) => (this.restaurantMenu = items),
           error: (error) => this.showError(error)
@@ -995,6 +1101,34 @@ export class AppComponent implements OnInit {
         });
       },
       error: (error) => this.showError(error)
+    });
+  }
+
+  selectRestaurantOrderTab(tab: 'active' | 'completed'): void {
+    this.restaurantOrderTab = tab;
+    if (tab === 'completed') this.loadCompletedRestaurantOrders(1);
+  }
+
+  loadCompletedRestaurantOrders(page = 1): void {
+    this.completedRestaurantOrdersLoading = true;
+    this.http.get<{
+      orders: Order[];
+      page: number;
+      pageSize: number;
+      total: number;
+      totalPages: number;
+    }>(`${this.api}/restaurant/completed-orders?page=${page}`, { headers: this.headers() }).subscribe({
+      next: (result) => {
+        this.completedRestaurantOrders = result.orders;
+        this.completedRestaurantOrdersPage = result.page;
+        this.completedRestaurantOrdersTotal = result.total;
+        this.completedRestaurantOrdersTotalPages = result.totalPages;
+        this.completedRestaurantOrdersLoading = false;
+      },
+      error: (error) => {
+        this.completedRestaurantOrdersLoading = false;
+        this.showError(error);
+      }
     });
   }
 
@@ -1256,6 +1390,13 @@ export class AppComponent implements OnInit {
       next: ({ messages }) => (this.messageLogs = messages),
       error: (error) => this.showError(error)
     });
+    this.http.get<{ feedback: FeedbackEntry[]; summary: FeedbackSummary }>(`${this.api}/admin/feedback`, { headers: this.headers() }).subscribe({
+      next: ({ feedback, summary }) => {
+        this.feedbackEntries = feedback;
+        this.feedbackSummary = summary;
+      },
+      error: (error) => this.showError(error)
+    });
     this.loadAdminRestaurants();
     this.http.get<{ transactions: BillingRecord[] }>(`${this.api}/admin/billing`, { headers: this.headers() }).subscribe({
       next: ({ transactions }) => (this.billingTransactions = transactions),
@@ -1371,6 +1512,12 @@ export class AppComponent implements OnInit {
         this.newAdminRestaurantLongitude = null;
         this.newAdminRestaurantRadiusKm = 5;
         this.adminRestaurant = restaurant;
+        this.adminRestaurantTab = 'details';
+        this.adminRestaurantOrders = [];
+        this.adminRestaurantOrdersPage = 1;
+        this.adminRestaurantOrdersTotal = 0;
+        this.adminRestaurantOrdersTotalPages = 0;
+        this.adminRestaurantOrdersLoading = false;
         this.adminCuisineDraft = restaurant.cuisine.join(', ');
         this.adminRestaurantImageDraft = '';
         this.adminMenu = [];
@@ -1405,6 +1552,12 @@ export class AppComponent implements OnInit {
   selectAdminRestaurant(id: string): void {
     this.adminRestaurant = this.adminRestaurants.find((restaurant) => restaurant._id === id) || null;
     this.adminCuisineDraft = this.adminRestaurant?.cuisine.join(', ') || '';
+    this.adminRestaurantTab = 'details';
+    this.adminRestaurantOrders = [];
+    this.adminRestaurantOrdersPage = 1;
+    this.adminRestaurantOrdersTotal = 0;
+    this.adminRestaurantOrdersTotalPages = 0;
+    this.adminRestaurantOrdersLoading = false;
     this.adminRestaurantImageDraft = '';
     this.adminMenuImageDrafts = {};
     this.adminMenu = [];
@@ -1413,6 +1566,38 @@ export class AppComponent implements OnInit {
     this.http.get<{ items: MenuItem[] }>(`${this.api}/admin/restaurants/${this.adminRestaurant._id}/menu`, { headers: this.headers() }).subscribe({
       next: ({ items }) => (this.adminMenu = items),
       error: (error) => this.showError(error)
+    });
+  }
+
+  selectAdminRestaurantTab(tab: 'details' | 'ordersFeedback'): void {
+    this.adminRestaurantTab = tab;
+    if (tab === 'ordersFeedback') this.loadAdminRestaurantOrders(1);
+  }
+
+  loadAdminRestaurantOrders(page = 1): void {
+    if (!this.adminRestaurant) return;
+    const restaurantId = this.adminRestaurant._id;
+    this.adminRestaurantOrdersLoading = true;
+    this.http.get<{
+      orders: Order[];
+      page: number;
+      pageSize: number;
+      total: number;
+      totalPages: number;
+    }>(`${this.api}/admin/restaurants/${restaurantId}/orders-feedback?page=${page}`, { headers: this.headers() }).subscribe({
+      next: (result) => {
+        if (this.adminRestaurant?._id !== restaurantId) return;
+        this.adminRestaurantOrders = result.orders;
+        this.adminRestaurantOrdersPage = result.page;
+        this.adminRestaurantOrdersTotal = result.total;
+        this.adminRestaurantOrdersTotalPages = result.totalPages;
+        this.adminRestaurantOrdersLoading = false;
+      },
+      error: (error) => {
+        if (this.adminRestaurant?._id !== restaurantId) return;
+        this.adminRestaurantOrdersLoading = false;
+        this.showError(error);
+      }
     });
   }
 
@@ -1587,10 +1772,36 @@ export class AppComponent implements OnInit {
     return actions[order.status] || [];
   }
 
-  rateOrder(order: Order, stars: number): void {
-    this.http.post(`${this.api}/orders/${order._id}/rating`, { stars }, { headers: this.headers() }).subscribe({
+  getFeedbackDraft(orderId: string): { overallRating: number; foodRating: number; deliveryRating: number; comment: string } {
+    if (!this.feedbackDrafts[orderId]) {
+      this.feedbackDrafts[orderId] = { overallRating: 0, foodRating: 0, deliveryRating: 0, comment: '' };
+    }
+    return this.feedbackDrafts[orderId];
+  }
+
+  setFeedbackRating(orderId: string, field: 'overallRating' | 'foodRating' | 'deliveryRating', value: number): void {
+    this.feedbackDrafts[orderId] = this.getFeedbackDraft(orderId);
+    this.feedbackDrafts[orderId][field] = value;
+  }
+
+  submitOrderFeedback(order: Order): void {
+    const draft = this.getFeedbackDraft(order._id);
+    if (!draft.overallRating || draft.overallRating < 1 || draft.overallRating > 5) {
+      this.error = 'Choose an overall star rating before submitting your feedback.';
+      return;
+    }
+    const payload: { overallRating: number; foodRating?: number; deliveryRating?: number; comment?: string } = {
+      overallRating: draft.overallRating
+    };
+    if (draft.foodRating) payload.foodRating = draft.foodRating;
+    if (draft.deliveryRating) payload.deliveryRating = draft.deliveryRating;
+    if (draft.comment.trim()) payload.comment = draft.comment.trim();
+    this.http.post<{ feedback: FeedbackEntry }>(`${this.api}/orders/${order._id}/feedback`, payload, { headers: this.headers() }).subscribe({
       next: () => {
-        this.notice = `Thanks for rating ${order.restaurantName}.`;
+        this.feedbackSubmitted[order._id] = true;
+        this.feedbackDrafts[order._id] = { overallRating: 0, foodRating: 0, deliveryRating: 0, comment: '' };
+        this.closeFeedbackModal();
+        this.notice = `Thanks for your feedback on ${order.restaurantName}.`;
         this.loadMyOrders();
       },
       error: (error) => this.showError(error)

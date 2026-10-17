@@ -41,6 +41,18 @@
   <main>
     <div class="flash notice" *ngIf="notice">{{ notice }} <button (click)="notice = ''" aria-label="Dismiss">×</button></div>
 
+    <div class="feedback-home-banner" *ngIf="showFeedbackBanner && feedbackBannerOrder" role="status" aria-live="polite">
+      <div class="feedback-banner-copy">
+        <span class="eyebrow">WE'D LOVE YOUR FEEDBACK</span>
+        <strong>How was {{ feedbackBannerOrder.restaurantName }}?</strong>
+        <p>Rate your recent order and tell us what stood out.</p>
+      </div>
+      <div class="feedback-banner-actions">
+        <button class="button button-dark button-small" type="button" (click)="openFeedbackModal(feedbackBannerOrder)">Give feedback</button>
+        <button class="feedback-banner-close" type="button" aria-label="Dismiss feedback banner" (click)="feedbackBannerDismissed = true">×</button>
+      </div>
+    </div>
+
     <section class="hero" *ngIf="view === 'home'">
       <div class="hero-copy">
         <span class="eyebrow">MADE FOR DOHA</span>
@@ -81,6 +93,8 @@
           <div class="restaurant-cover" [class.cover-closed]="restaurant.availability !== 'OPEN'">
             <img *ngIf="restaurant.imageData; else restaurantInitial" class="restaurant-cover-image" [src]="restaurant.imageData" [alt]="restaurant.name">
             <ng-template #restaurantInitial><div class="cover-initial">{{ restaurant.name.slice(0, 1) }}</div></ng-template>
+            <span class="restaurant-rating-chip" *ngIf="restaurant.ratingCount; else noRestaurantRating">★ {{ restaurant.ratingAverage | number:'1.1-1' }} <small>· {{ restaurant.ratingCount }} reviews</small></span>
+            <ng-template #noRestaurantRating><span class="restaurant-rating-chip no-ratings">No ratings yet</span></ng-template>
             <span class="status-pill" [class.status-open]="restaurant.availability === 'OPEN'">{{ restaurant.availability === 'OPEN' ? 'Open now' : statusLabel(restaurant.availability) }}</span>
             <span class="demo-pill" *ngIf="restaurant.demo">DEMO</span>
           </div>
@@ -173,8 +187,7 @@
       <article class="order-history-card" *ngFor="let order of orders">
         <div class="track-top"><div><span class="eyebrow">{{ order.reference }}</span><h2>{{ order.restaurantName }}</h2><p>{{ order.createdAt | date:'medium' }}</p></div><span class="order-status" [ngClass]="orderStatusClass(order.status)">{{ statusLabel(order.status) }}</span></div>
         <div class="order-detail-row"><span>{{ order.items.length }} items</span><strong>{{ money(order.total, order.currency) }}</strong></div>
-        <button class="text-button" (click)="trackReference = order.reference; trackPhone = user?.phone || ''; trackedOrder = order; view = 'track'">View order details →</button>
-        <div class="rating-actions" *ngIf="order.status === 'CLOSED'"><span>Rate your order</span><button *ngFor="let star of [1, 2, 3, 4, 5]" (click)="rateOrder(order, star)" aria-label="Rate this order">★</button></div>
+        <button class="text-button" (click)="trackReference = order.reference; trackPhone = user?.phone || ''; trackedOrder = order; view = 'track'; openFeedbackModal(order)">View order details →</button>
       </article>
       <div class="empty-state" *ngIf="!orders.length"><h3>No orders yet</h3><p>Your next favorite meal is waiting.</p><button class="button button-dark" (click)="view = 'home'">Explore restaurants</button></div>
     </section>
@@ -231,8 +244,13 @@
         <button class="text-button" *ngIf="selectedRestaurant?.imageData && restaurantImageDraft === null" (click)="removeRestaurantImage()">Remove photo</button>
       </div>
       <div class="portal-columns">
-        <div class="portal-panel"><div class="panel-heading"><div><span class="eyebrow">LIVE SERVICE</span><h2>Orders</h2></div><button class="text-button" (click)="loadRestaurantPortal()">Refresh ↻</button></div>
-          <article class="portal-order" *ngFor="let order of restaurantOrders">
+        <div class="portal-panel"><div class="panel-heading"><div><span class="eyebrow">LIVE SERVICE</span><h2>{{ restaurantOrderTab === 'active' ? 'Orders' : 'Completed Orders' }}</h2></div><button class="text-button" (click)="restaurantOrderTab === 'completed' ? loadCompletedRestaurantOrders(completedRestaurantOrdersPage) : loadRestaurantPortal()">Refresh ↻</button></div>
+          <div class="portal-tabs" role="tablist" aria-label="Restaurant orders">
+            <button type="button" role="tab" [attr.aria-selected]="restaurantOrderTab === 'active'" [class.active]="restaurantOrderTab === 'active'" (click)="selectRestaurantOrderTab('active')">Active orders</button>
+            <button type="button" role="tab" [attr.aria-selected]="restaurantOrderTab === 'completed'" [class.active]="restaurantOrderTab === 'completed'" (click)="selectRestaurantOrderTab('completed')">Completed Orders</button>
+          </div>
+          <ng-container *ngIf="restaurantOrderTab === 'active'">
+          <article class="portal-order" *ngFor="let order of activeRestaurantOrders">
             <div class="portal-order-top"><div><strong>{{ order.reference }}</strong><span>{{ order.createdAt | date:'short' }} · {{ order.guest.name || 'Customer' }} · {{ order.guest.phone }}</span></div><span class="order-status" [ngClass]="orderStatusClass(order.status)">{{ statusLabel(order.status) }}</span></div>
             <div class="order-detail-row" *ngFor="let item of order.items"><span>{{ item.quantity }} × {{ item.name }}</span><strong>{{ money(item.lineTotal) }}</strong></div>
             <div class="order-detail-row"><span>{{ order.address }}</span><strong>{{ money(order.total) }}</strong></div>
@@ -243,7 +261,19 @@
             <div class="order-actions" *ngIf="order.status === 'OUT_FOR_DELIVERY'"><button class="button button-accent" (click)="restaurantAction(order, 'DELIVERED')">Mark delivered</button></div>
             <div class="order-actions" *ngIf="order.status === 'DELIVERED'"><button class="button button-dark" (click)="restaurantAction(order, 'CLOSED')">Complete order</button></div>
           </article>
-          <p class="muted" *ngIf="!restaurantOrders.length">No orders yet. New orders will appear here.</p>
+          <p class="muted" *ngIf="!activeRestaurantOrders.length">No active orders right now.</p>
+          </ng-container>
+          <ng-container *ngIf="restaurantOrderTab === 'completed'">
+            <p class="muted" *ngIf="completedRestaurantOrdersLoading">Loading completed orders…</p>
+            <article class="completed-order-card" *ngFor="let order of completedRestaurantOrders">
+              <div class="portal-order-top"><div><strong>{{ order.reference }}</strong><span>{{ order.createdAt | date:'short' }} · {{ order.guest.name || 'Customer' }}</span></div><span class="order-status order-status-closed">{{ statusLabel(order.status) }}</span></div>
+              <div class="completed-order-meta"><span>Total</span><strong>{{ money(order.total, order.currency) }}</strong><span>Completed</span><strong>{{ (order.completedAt || order.updatedAt || order.createdAt) | date:'short' }}</strong></div>
+              <div class="order-feedback-result" *ngIf="order.feedback; else ownerNoFeedback"><strong>★ {{ order.feedback.overallRating }}/5</strong><p *ngIf="order.feedback.comment">{{ order.feedback.comment }}</p><small>Submitted {{ order.feedback.submittedAt | date:'short' }}</small></div>
+              <ng-template #ownerNoFeedback><div class="order-feedback-empty">No feedback yet</div></ng-template>
+            </article>
+            <p class="muted" *ngIf="!completedRestaurantOrdersLoading && !completedRestaurantOrders.length">No completed orders yet.</p>
+            <div class="pagination-controls" *ngIf="completedRestaurantOrdersTotalPages > 1"><button class="button button-quiet button-small" [disabled]="completedRestaurantOrdersPage <= 1 || completedRestaurantOrdersLoading" (click)="loadCompletedRestaurantOrders(completedRestaurantOrdersPage - 1)">Previous</button><span>Page {{ completedRestaurantOrdersPage }} of {{ completedRestaurantOrdersTotalPages }}</span><button class="button button-quiet button-small" [disabled]="completedRestaurantOrdersPage >= completedRestaurantOrdersTotalPages || completedRestaurantOrdersLoading" (click)="loadCompletedRestaurantOrders(completedRestaurantOrdersPage + 1)">Next</button></div>
+          </ng-container>
         </div>
         <div class="portal-panel"><div class="panel-heading"><div><span class="eyebrow">YOUR KITCHEN</span><h2>Menu availability</h2></div></div>
           <div class="availability-row menu-management-row" *ngFor="let item of restaurantMenu">
@@ -306,6 +336,7 @@
         <div class="admin-order-row admin-order-manage" *ngFor="let order of allOrders"><div><strong>{{ order.reference }}</strong><small>{{ order.restaurantName }} · {{ order.createdAt | date:'short' }} · {{ order.guest.name || 'Customer' }} · {{ order.guest.phone }}</small></div><span class="order-status" [ngClass]="orderStatusClass(order.status)">{{ statusLabel(order.status) }}</span><strong>{{ money(order.total, order.currency) }}</strong><div class="order-actions"><button class="button button-accent button-small" *ngFor="let action of adminOrderActions(order)" [class.button-outline-danger]="action.status === 'REJECTED'" (click)="adminOrderAction(order, action.status)">{{ action.label }}</button></div></div>
       </div>
       <div class="portal-panel wide-panel"><div class="panel-heading"><div><span class="eyebrow">GOVERNANCE</span><h2>Recent audit activity</h2></div></div><div class="log-row" *ngFor="let log of auditLogs"><span>{{ log.action }} · {{ log.entity }}</span><small>{{ log.createdAt | date:'short' }}</small></div></div>
+      <div class="portal-panel wide-panel"><div class="panel-heading"><div><span class="eyebrow">FEEDBACK</span><h2>Customer experience</h2></div></div><div class="metrics-grid"><div class="metric-card"><span>Total feedback</span><strong>{{ feedbackSummary.totalFeedback }}</strong></div><div class="metric-card"><span>Avg overall</span><strong>{{ feedbackSummary.averageOverallRating ? (feedbackSummary.averageOverallRating | number:'1.1-1') : '—' }}</strong></div><div class="metric-card"><span>Avg food</span><strong>{{ feedbackSummary.averageFoodRating ? (feedbackSummary.averageFoodRating | number:'1.1-1') : '—' }}</strong></div><div class="metric-card"><span>Avg delivery</span><strong>{{ feedbackSummary.averageDeliveryRating ? (feedbackSummary.averageDeliveryRating | number:'1.1-1') : '—' }}</strong></div></div><div class="log-row" *ngFor="let entry of feedbackEntries.slice(0, 12)"><span>{{ entry.overallRating }}★ · {{ entry.customerContact || 'Verified customer' }}</span><small>{{ entry.comment || 'No comment left' }} · {{ entry.submittedAt | date:'short' }}</small></div><p class="muted" *ngIf="!feedbackEntries.length">No customer feedback has been submitted yet.</p></div>
       <div class="portal-panel wide-panel"><div class="panel-heading"><div><span class="eyebrow">FINANCE</span><h2>Recent billing transactions</h2></div></div><div class="admin-order-row" *ngFor="let transaction of billingTransactions"><div><strong>{{ transaction.createdAt | date:'short' }}</strong><small>{{ transaction.currency }} · gross {{ money(transaction.grossAmount, transaction.currency) }}</small></div><span>Commission {{ money(transaction.commissionAmount, transaction.currency) }}</span><strong>Net {{ money(transaction.netRestaurantAmount, transaction.currency) }}</strong></div><p class="muted" *ngIf="!billingTransactions.length">Billing entries are recorded when completed orders are closed.</p></div>
     </section>
 
@@ -335,7 +366,11 @@
     <section class="content-section portal admin-portal admin-restaurant-editor-page" *ngIf="view === 'adminRestaurantEditor' && adminRestaurant as managedRestaurant">
       <button class="back-link" (click)="backToAdminRestaurantList()">← All restaurants</button>
       <div class="portal-heading editor-page-heading"><div><span class="eyebrow">RESTAURANT MANAGEMENT</span><h1>{{ managedRestaurant.name }}.</h1><p class="muted">{{ managedRestaurant.cuisine.join(' · ') || 'Cuisine not set' }} · {{ managedRestaurant.address }}</p></div><span class="order-status">{{ statusLabel(managedRestaurant.status) }}</span></div>
-      <div class="admin-editor-grid">
+      <div class="portal-tabs admin-restaurant-tabs" role="tablist" aria-label="Restaurant management">
+        <button type="button" role="tab" [attr.aria-selected]="adminRestaurantTab === 'details'" [class.active]="adminRestaurantTab === 'details'" (click)="selectAdminRestaurantTab('details')">Restaurant details</button>
+        <button type="button" role="tab" [attr.aria-selected]="adminRestaurantTab === 'ordersFeedback'" [class.active]="adminRestaurantTab === 'ordersFeedback'" (click)="selectAdminRestaurantTab('ordersFeedback')">Orders &amp; Feedback</button>
+      </div>
+      <div class="admin-editor-grid" *ngIf="adminRestaurantTab === 'details'">
         <div class="portal-panel admin-profile-panel"><div class="panel-heading"><div><span class="eyebrow">PROFILE & SERVICE</span><h2>Restaurant details</h2></div></div>
           <div class="admin-restaurant-form">
             <label>Restaurant name<input [(ngModel)]="managedRestaurant.name" placeholder="Restaurant name"></label><label>Cuisines<input [(ngModel)]="adminCuisineDraft" placeholder="Cuisines, comma separated"></label><label>Address<input [(ngModel)]="managedRestaurant.address" placeholder="Address"></label><label>Phone<input [(ngModel)]="managedRestaurant.phone" placeholder="Phone"></label><label>Email<input [(ngModel)]="managedRestaurant.email" type="email" placeholder="Email"></label><label>Description<input [(ngModel)]="managedRestaurant.description" placeholder="Description"></label><label>Preparation time (minutes)<input [(ngModel)]="managedRestaurant.preparationMinutes" type="number" min="1" max="240"></label><label>Minimum order (QAR)<input [(ngModel)]="managedRestaurant.minOrder" type="number" min="0"></label>
@@ -357,8 +392,59 @@
           <details class="add-menu-form admin-add-menu-form" open><summary><strong>Add menu item</strong><span class="muted">＋</span></summary><div class="admin-menu-create-form"><label>Item name<input [(ngModel)]="newAdminItemName" placeholder="e.g. Chicken biryani"></label><label>Category<input [(ngModel)]="newAdminItemCategory" placeholder="e.g. Main course"></label><label>Price (QAR)<input [(ngModel)]="newAdminItemPrice" type="number" min="0.01" step="0.01" placeholder="0.00"></label><label>Description<input [(ngModel)]="newAdminItemDescription" placeholder="Short description"></label><label class="image-file-button button button-quiet button-small">Choose item photo<input type="file" accept="image/jpeg,image/png,image/webp" (change)="chooseNewAdminItemImage($event)"></label><img *ngIf="newAdminItemImageData" class="menu-management-image new-item-image" [src]="newAdminItemImageData" alt="New menu item photo preview"><button class="button button-accent" (click)="addAdminMenuItem()">Add to menu</button></div></details>
         </div>
       </div>
+      <div class="portal-panel wide-panel admin-restaurant-orders" *ngIf="adminRestaurantTab === 'ordersFeedback'">
+        <div class="panel-heading"><div><span class="eyebrow">ORDERS &amp; FEEDBACK</span><h2>{{ adminRestaurantOrdersTotal }} orders</h2></div><button class="text-button" [disabled]="adminRestaurantOrdersLoading" (click)="loadAdminRestaurantOrders(adminRestaurantOrdersPage)">Refresh ↻</button></div>
+        <p class="muted" *ngIf="adminRestaurantOrdersLoading">Loading restaurant orders…</p>
+        <article class="admin-feedback-order" *ngFor="let order of adminRestaurantOrders">
+          <div class="admin-feedback-order-heading"><div><strong>{{ order.reference }}</strong><small>{{ order.guest.name || 'Customer' }} · {{ order.createdAt | date:'medium' }}</small></div><span class="order-status" [ngClass]="orderStatusClass(order.status)">{{ statusLabel(order.status) }}</span></div>
+          <div class="completed-order-meta"><span>Order total</span><strong>{{ money(order.total, order.currency) }}</strong><span>Feedback</span><strong>{{ order.feedback ? 'Received' : 'No feedback' }}</strong></div>
+          <div class="order-feedback-result" *ngIf="order.feedback; else adminNoFeedback"><strong>★ {{ order.feedback.overallRating }}/5</strong><p *ngIf="order.feedback.comment">{{ order.feedback.comment }}</p><small>Submitted {{ order.feedback.submittedAt | date:'short' }}</small></div>
+          <ng-template #adminNoFeedback><div class="order-feedback-empty">No feedback received for this order.</div></ng-template>
+        </article>
+        <p class="muted" *ngIf="!adminRestaurantOrdersLoading && !adminRestaurantOrders.length">This restaurant has no orders yet.</p>
+        <div class="pagination-controls" *ngIf="adminRestaurantOrdersTotalPages > 1"><button class="button button-quiet button-small" [disabled]="adminRestaurantOrdersPage <= 1 || adminRestaurantOrdersLoading" (click)="loadAdminRestaurantOrders(adminRestaurantOrdersPage - 1)">Previous</button><span>Page {{ adminRestaurantOrdersPage }} of {{ adminRestaurantOrdersTotalPages }}</span><button class="button button-quiet button-small" [disabled]="adminRestaurantOrdersPage >= adminRestaurantOrdersTotalPages || adminRestaurantOrdersLoading" (click)="loadAdminRestaurantOrders(adminRestaurantOrdersPage + 1)">Next</button></div>
+      </div>
     </section>
   </main>
+  <div class="feedback-modal-backdrop" *ngIf="feedbackModalOpen && feedbackModalOrder" (click)="closeFeedbackModal()">
+    <section class="feedback-modal" role="dialog" aria-modal="true" aria-labelledby="feedback-modal-title" (click)="$event.stopPropagation()">
+      <div class="feedback-modal-header">
+        <div>
+          <span class="eyebrow">RATE YOUR EXPERIENCE</span>
+          <h2 id="feedback-modal-title">{{ feedbackModalOrder.restaurantName }}</h2>
+        </div>
+        <button class="map-close" type="button" aria-label="Close feedback dialog" (click)="closeFeedbackModal()">×</button>
+      </div>
+
+      <div class="feedback-header"><strong>Quick feedback</strong><small>Overall rating is required. Food and delivery are optional.</small></div>
+      <div class="feedback-row">
+        <label>Overall</label>
+        <div class="star-row">
+          <button *ngFor="let star of [1, 2, 3, 4, 5]" type="button" [class.active]="getFeedbackDraft(feedbackModalOrder._id).overallRating >= star" (click)="setFeedbackRating(feedbackModalOrder._id, 'overallRating', star)" aria-label="Rate order overall with {{ star }} stars">★</button>
+        </div>
+      </div>
+      <div class="feedback-row two-up">
+        <div>
+          <label>Food</label>
+          <div class="star-row compact">
+            <button *ngFor="let star of [1, 2, 3, 4, 5]" type="button" [class.active]="getFeedbackDraft(feedbackModalOrder._id).foodRating >= star" (click)="setFeedbackRating(feedbackModalOrder._id, 'foodRating', star)" aria-label="Rate food with {{ star }} stars">★</button>
+          </div>
+        </div>
+        <div>
+          <label>Delivery</label>
+          <div class="star-row compact">
+            <button *ngFor="let star of [1, 2, 3, 4, 5]" type="button" [class.active]="getFeedbackDraft(feedbackModalOrder._id).deliveryRating >= star" (click)="setFeedbackRating(feedbackModalOrder._id, 'deliveryRating', star)" aria-label="Rate delivery with {{ star }} stars">★</button>
+          </div>
+        </div>
+      </div>
+      <label class="feedback-comment"><span>Comments <small>optional</small></span><textarea [ngModel]="getFeedbackDraft(feedbackModalOrder._id).comment" (ngModelChange)="getFeedbackDraft(feedbackModalOrder._id).comment = $event" rows="2" maxlength="500" placeholder="Tell us what went well or what we should improve."></textarea></label>
+
+      <div class="feedback-modal-actions">
+        <button class="button button-quiet" type="button" (click)="closeFeedbackModal()">Maybe later</button>
+        <button class="button button-dark" type="button" [disabled]="!getFeedbackDraft(feedbackModalOrder._id).overallRating" (click)="submitOrderFeedback(feedbackModalOrder)">Send feedback</button>
+      </div>
+    </section>
+  </div>
   <div class="map-modal-backdrop" *ngIf="mapPickerOpen" (click)="closeMapPicker()">
     <section class="map-modal" role="dialog" aria-modal="true" aria-labelledby="map-modal-title" (click)="$event.stopPropagation()">
       <div class="map-modal-heading"><div><span class="eyebrow">{{ mapPickerPurpose === 'delivery' ? 'DELIVERY LOCATION' : 'RESTAURANT LOCATION' }}</span><h2 id="map-modal-title">{{ mapPickerPurpose === 'delivery' ? 'Where should we deliver?' : 'Set your restaurant pin.' }}</h2><p>{{ mapPickerPurpose === 'delivery' ? 'Click the map to choose where you want your order delivered.' : 'Click the restaurant entrance or central point on the map.' }}</p></div><button class="map-close" aria-label="Close map" (click)="closeMapPicker()">×</button></div>

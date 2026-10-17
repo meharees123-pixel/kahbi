@@ -190,6 +190,18 @@ const RatingSchema = new Schema({
   comment: { type: String, default: "", maxlength: 1000 }
 }, { timestamps: true });
 
+const FeedbackSchema = new Schema({
+  orderId: { type: Schema.Types.ObjectId, ref: "Order", required: true, unique: true, index: true },
+  customerId: { type: Schema.Types.ObjectId, ref: "User", default: null, index: true },
+  customerContact: { type: String, default: "", trim: true },
+  restaurantId: { type: Schema.Types.ObjectId, ref: "Restaurant", required: true, index: true },
+  overallRating: { type: Number, required: true, min: 1, max: 5 },
+  foodRating: { type: Number, default: null, min: 1, max: 5 },
+  deliveryRating: { type: Number, default: null, min: 1, max: 5 },
+  comment: { type: String, default: "", maxlength: 500 },
+  submittedAt: { type: Date, default: Date.now }
+}, { timestamps: true });
+
 const AuditSchema = new Schema({
   userId: { type: Schema.Types.ObjectId, ref: "User", default: null },
   role: { type: String, default: "SYSTEM" },
@@ -247,6 +259,7 @@ module.exports = {
   Advertisement: mongoose.model("Advertisement", AdvertisementSchema),
   AdvertisementEvent: mongoose.model("AdvertisementEvent", AdvertisementEventSchema),
   Rating: mongoose.model("Rating", RatingSchema),
+  Feedback: mongoose.model("Feedback", FeedbackSchema),
   AuditLog: mongoose.model("AuditLog", AuditSchema),
   MessageLog: mongoose.model("MessageLog", MessageLogSchema),
   WhatsappOtp: mongoose.model("WhatsappOtp", WhatsappOtpSchema),
