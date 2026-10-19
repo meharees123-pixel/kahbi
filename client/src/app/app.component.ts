@@ -26,6 +26,7 @@ interface Restaurant {
   address: string;
   phone?: string;
   email?: string;
+  approvalStatus?: string;
   latitude?: number | null;
   longitude?: number | null;
   serviceRadiusKm?: number | null;
@@ -35,6 +36,8 @@ interface Restaurant {
   maxOrder: number;
   status: string;
   availability: string;
+  availabilityStart: string;
+  availabilityEnd: string;
   whatsapp?: string;
   ratingAverage: number;
   ratingCount: number;
@@ -44,16 +47,45 @@ interface Restaurant {
 
 interface MenuItem {
   _id: string;
+  itemCode?: string;
   name: string;
   imageData?: string;
+  imageUrl?: string;
   active?: boolean;
   description: string;
   category: string;
   price: number;
+  discountPrice?: number | null;
+  foodType?: string | null;
+  customizationOptions?: string;
+  availabilityStart?: string;
+  availabilityEnd?: string;
   preparationMinutes?: number;
   availability: string;
+  approvalStatus?: string;
   bestSeller: boolean;
   chefRecommended: boolean;
+}
+
+interface BulkMenuRow {
+  rowNumber: number;
+  restaurantId: string;
+  itemId: string;
+  category: string;
+  name: string;
+  description: string;
+  price: number | string;
+  discountPrice?: number | string | null;
+  foodType?: string;
+  preparationMinutes?: number | string | null;
+  availability: string;
+  availabilityStart: string;
+  availabilityEnd: string;
+  imageUrl: string;
+  customizationOptions: string;
+  errors: string[];
+  existingItemId?: string;
+  existingItemName?: string;
 }
 
 interface OrderItem {
@@ -87,6 +119,16 @@ interface Order {
   feedbackSubmitted?: boolean;
   completedAt?: string | null;
   feedback?: FeedbackEntry | null;
+}
+
+interface OrderQuote {
+  subtotal: number;
+  discount: number;
+  deliveryFee: number;
+  serviceFee: number;
+  total: number;
+  currency: string;
+  promotionCode: string;
 }
 
 interface FeedbackEntry {
@@ -162,6 +204,70 @@ interface MapPoint {
   lng: number;
 }
 
+interface PartnerApplication {
+  restaurantName: string;
+  restaurantType: string;
+  primaryCuisine: string;
+  additionalCuisines: string[];
+  description: string;
+  logoImageData: string;
+  coverImageData: string;
+  ownerName: string;
+  phone: string;
+  whatsapp: string;
+  email: string;
+  address: string;
+  country: string;
+  city: string;
+  zoneNumber: string;
+  streetBuilding: string;
+  latitude: number | null;
+  longitude: number | null;
+  openingTime: string;
+  closingTime: string;
+  preparationMinutes: number;
+  estimatedDeliveryMinutes: number;
+  serviceRadiusKm: number;
+  extendedDeliveryAvailable: boolean;
+  extendedDeliveryRadiusKm: number | null;
+  minimumOrderValue: number | null;
+  maximumOrderValue: number | null;
+  deliveryManagedBy: string;
+  deliveryFee: number | null;
+  freeDeliveryThreshold: number | null;
+  currency: string;
+  declarations: {
+    authorized: boolean;
+    accurate: boolean;
+    terms: boolean;
+    approval: boolean;
+    adminReview: boolean;
+  };
+}
+
+interface PartnerRegistration {
+  registrationId: string;
+  status: string;
+  details?: PartnerApplication;
+  termsVersion: string;
+  termsAcceptedAt: string;
+  createdAt: string;
+  updatedAt: string;
+  reviewedAt?: string | null;
+  reviewReason?: string;
+  correctionAllowed: boolean;
+  restaurantId?: string | null;
+  activatedAt?: string | null;
+}
+
+type PartnerFormErrorField =
+  | 'restaurantName' | 'restaurantType' | 'primaryCuisine' | 'ownerName' | 'phone' | 'whatsapp' | 'email'
+  | 'address' | 'country' | 'city' | 'mapLocation' | 'openingTime' | 'closingTime' | 'preparationMinutes'
+  | 'estimatedDeliveryMinutes' | 'serviceRadiusKm' | 'extendedDeliveryRadiusKm' | 'minimumOrderValue'
+  | 'maximumOrderValue' | 'deliveryManagedBy' | 'deliveryFee' | 'freeDeliveryThreshold' | 'currency'
+  | 'declaration_authorized' | 'declaration_accurate' | 'declaration_terms' | 'declaration_approval'
+  | 'declaration_adminReview' | 'logoImageData' | 'coverImageData' | 'termsVersion';
+
 type LoginPortal = 'CUSTOMER' | 'RESTAURANT' | 'ADMIN';
 
 @Component({
@@ -196,6 +302,9 @@ export class AppComponent implements OnInit {
   promotions: Promotion[] = [];
   advertisements: Advertisement[] = [];
   cart: { [id: string]: number } = {};
+  orderQuote: OrderQuote | null = null;
+  orderQuoteLoading = false;
+  private orderQuoteRequest = 0;
   orders: Order[] = [];
   restaurantOrders: Order[] = [];
   completedRestaurantOrders: Order[] = [];
@@ -256,7 +365,7 @@ export class AppComponent implements OnInit {
   deliveryLongitude: number | null = null;
   deliveryLocationLabel = '';
   mapPickerOpen = false;
-  mapPickerPurpose: 'delivery' | 'signupRestaurant' | 'adminCreateRestaurant' | 'adminEditRestaurant' = 'delivery';
+  mapPickerPurpose: 'delivery' | 'signupRestaurant' | 'partnerRegistration' | 'adminCreateRestaurant' | 'adminEditRestaurant' = 'delivery';
   mapSelection: MapPoint | null = null;
   mapSelectionAddress = '';
   mapLoading = false;
@@ -282,10 +391,80 @@ export class AppComponent implements OnInit {
   signupLatitude: number | null = null;
   signupLongitude: number | null = null;
   signupServiceRadiusKm = 5;
+  partnerTermsVersion = '2026-10-v1';
+  partnerLogoData = '';
+  partnerReviewMode = false;
+  partnerRegistration: PartnerRegistration | null = null;
+  partnerRegistrationAccessToken = '';
+  partnerRequestId = '';
+  partnerFormErrors: Partial<Record<PartnerFormErrorField, string>> = {};
+  partnerReviewReasons: Record<string, string> = {};
+  adminPartnerRegistrations: PartnerRegistration[] = [];
+  adminActivationUrl = '';
+  legalPage = 'terms';
+  brandLogoData = '';
+  brandLogoDraft: string | null = null;
+  activationToken = '';
+  activationEmail = '';
+  activationPassword = '';
+  private readonly partnerAccessPrefix = 'kahbi.partner-registration.';
+  partnerApplication: PartnerApplication = {
+    restaurantName: '',
+    restaurantType: 'Restaurant',
+    primaryCuisine: '',
+    additionalCuisines: [],
+    description: '',
+    logoImageData: '',
+    coverImageData: '',
+    ownerName: '',
+    phone: '',
+    whatsapp: '',
+    email: '',
+    address: '',
+    country: 'Qatar',
+    city: '',
+    zoneNumber: '',
+    streetBuilding: '',
+    latitude: null,
+    longitude: null,
+    openingTime: '',
+    closingTime: '',
+    preparationMinutes: 35,
+    estimatedDeliveryMinutes: 45,
+    serviceRadiusKm: 5,
+    extendedDeliveryAvailable: false,
+    extendedDeliveryRadiusKm: null,
+    minimumOrderValue: null,
+    maximumOrderValue: null,
+    deliveryManagedBy: 'Restaurant',
+    deliveryFee: null,
+    freeDeliveryThreshold: null,
+    currency: 'QAR',
+    declarations: {
+      authorized: false,
+      accurate: false,
+      terms: false,
+      approval: false,
+      adminReview: false
+    }
+  };
   newItemName = '';
   newItemCategory = '';
   newItemPrice = 0;
   newItemDescription = '';
+  bulkMenuOpen = false;
+  bulkMenuFile: File | null = null;
+  bulkMenuRows: BulkMenuRow[] = [];
+  bulkMenuPreviewLoading = false;
+  bulkMenuImporting = false;
+  bulkMenuMode: 'ADD_NEW' | 'UPDATE_EXISTING' | 'REPLACE' = 'ADD_NEW';
+  bulkMenuReplaceConfirmed = false;
+  bulkMenuSummary: { totalRows: number; imported: number; updated: number; failed: number; mode: string } | null = null;
+  bulkMenuErrorReport = '';
+  bulkImageZipFile: File | null = null;
+  bulkImageUploading = false;
+  bulkImageResult = '';
+  bulkImageErrorReport = '';
   newItemPreparationMinutes = 15;
   newItemBestSeller = false;
   newItemChefRecommended = false;
@@ -343,6 +522,8 @@ export class AppComponent implements OnInit {
 
   ngOnInit(): void {
     this.applyLocationRoute();
+    this.loadBrandLogo();
+    if (this.view === 'partnerRegistration') this.restorePartnerRegistration();
     window.addEventListener('popstate', () => {
       this.applyLocationRoute();
       this.changeDetector.markForCheck();
@@ -363,7 +544,7 @@ export class AppComponent implements OnInit {
       this.http.get<{ user: User }>(`${this.api}/auth/me`, { headers: this.headers() }).subscribe({
         next: ({ user }) => {
           this.user = user;
-          this.loadRoleLanding();
+          if (!['partnerRegistration', 'activateRestaurant', 'legal'].includes(this.view)) this.loadRoleLanding();
         },
         error: () => {
           localStorage.removeItem(this.tokenKey);
@@ -382,7 +563,11 @@ export class AppComponent implements OnInit {
   }
 
   get subtotal(): number {
-    return this.cartItems.reduce((sum, entry) => sum + entry.item.price * entry.quantity, 0);
+    return this.cartItems.reduce((sum, entry) => sum + this.menuPrice(entry.item) * entry.quantity, 0);
+  }
+
+  menuPrice(item: MenuItem): number {
+    return item.discountPrice !== null && item.discountPrice !== undefined ? item.discountPrice : item.price;
   }
 
   get cartCount(): number {
@@ -438,6 +623,269 @@ export class AppComponent implements OnInit {
     this.changeDetector.markForCheck();
   }
 
+  private loadBrandLogo(): void {
+    this.http.get<{ logoData: string }>(`${this.api}/brand`).subscribe({
+      next: ({ logoData }) => {
+        this.brandLogoData = logoData || '';
+        this.changeDetector.markForCheck();
+      },
+      error: (error) => this.showError(error)
+    });
+  }
+
+  private restorePartnerRegistration(): void {
+    const registrationId = sessionStorage.getItem(`${this.partnerAccessPrefix}last-id`) || '';
+    if (registrationId) {
+      this.loadPartnerRegistrationStatus();
+    } else {
+      this.partnerRegistrationAccessToken = sessionStorage.getItem(`${this.partnerAccessPrefix}pending-token`) || '';
+      this.partnerRequestId = sessionStorage.getItem(`${this.partnerAccessPrefix}request-id`) || '';
+    }
+  }
+
+  scrollToPartnerForm(): void {
+    document.getElementById('partner-registration-form')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+
+  returnFromLegal(): void {
+    this.view = 'partnerRegistration';
+    window.history.pushState(null, '', '/partner/register');
+  }
+
+  openLegalPage(path: string): void {
+    this.legalPage = path.includes('privacy') ? 'privacy' : path.includes('policies') ? 'policies' : path.includes('contact') ? 'contact' : path.includes('about') ? 'about' : 'terms';
+    this.view = 'legal';
+    window.history.pushState(null, '', path);
+  }
+
+  private createPartnerAccessToken(): string {
+    const bytes = window.crypto.getRandomValues(new Uint8Array(32));
+    return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
+  }
+
+  private validatePartnerApplication(): boolean {
+    const form = this.partnerApplication;
+    const errors: Partial<Record<PartnerFormErrorField, string>> = {};
+    if (form.restaurantName.trim().length < 2) errors.restaurantName = 'Enter the restaurant or hotel name.';
+    if (!form.restaurantType) errors.restaurantType = 'Choose a restaurant type.';
+    if (form.primaryCuisine.trim().length < 2) errors.primaryCuisine = 'Enter the primary cuisine.';
+    if (form.ownerName.trim().length < 2) errors.ownerName = 'Enter the authorized representative name.';
+    const phonePattern = /^\+?[0-9 ()-]{8,20}$/;
+    if (!phonePattern.test(form.phone.trim()) || form.phone.replace(/\D/g, '').length < 8 || form.phone.replace(/\D/g, '').length > 15) errors.phone = 'Enter a valid official contact number.';
+    if (!phonePattern.test(form.whatsapp.trim()) || form.whatsapp.replace(/\D/g, '').length < 8 || form.whatsapp.replace(/\D/g, '').length > 15) errors.whatsapp = 'Enter a valid WhatsApp number.';
+    if (form.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(form.email.trim())) errors.email = 'Enter a valid business email.';
+    if (form.address.trim().length < 5) errors.address = 'Enter the restaurant address.';
+    if (!form.city.trim()) errors.city = 'Enter the city or municipality.';
+    if (form.latitude === null || form.longitude === null || form.latitude < 24.4 || form.latitude > 26.2 || form.longitude < 50.7 || form.longitude > 51.8) errors.mapLocation = 'Select the restaurant location on the map within Qatar.';
+    if (form.openingTime && !/^([01]\d|2[0-3]):[0-5]\d$/.test(form.openingTime)) errors.openingTime = 'Use 24-hour HH:MM time.';
+    if (form.closingTime && !/^([01]\d|2[0-3]):[0-5]\d$/.test(form.closingTime)) errors.closingTime = 'Use 24-hour HH:MM time.';
+    if (!Number.isInteger(Number(form.preparationMinutes)) || form.preparationMinutes < 1 || form.preparationMinutes > 360) errors.preparationMinutes = 'Use a whole number from 1 to 360.';
+    if (!Number.isInteger(Number(form.estimatedDeliveryMinutes)) || form.estimatedDeliveryMinutes < 1 || form.estimatedDeliveryMinutes > 720) errors.estimatedDeliveryMinutes = 'Use a whole number from 1 to 720.';
+    if (!Number.isFinite(Number(form.serviceRadiusKm)) || form.serviceRadiusKm < 0.5 || form.serviceRadiusKm > 100) errors.serviceRadiusKm = 'Enter a radius between 0.5 and 100 km.';
+    if (form.extendedDeliveryAvailable && (!form.extendedDeliveryRadiusKm || form.extendedDeliveryRadiusKm < 0.5 || form.extendedDeliveryRadiusKm > 200)) errors.extendedDeliveryRadiusKm = 'Enter an extended radius between 0.5 and 200 km.';
+    if (form.minimumOrderValue !== null && form.minimumOrderValue < 0) errors.minimumOrderValue = 'Minimum order cannot be negative.';
+    if (form.maximumOrderValue !== null && form.maximumOrderValue < 0) errors.maximumOrderValue = 'Maximum order cannot be negative.';
+    if (form.minimumOrderValue !== null && (form.maximumOrderValue ?? 1000) < form.minimumOrderValue) errors.maximumOrderValue = 'Maximum order must be at least the minimum (default QAR 1,000).';
+    if (form.deliveryFee !== null && (!Number.isFinite(form.deliveryFee) || form.deliveryFee < 0 || form.deliveryFee > 100000)) errors.deliveryFee = 'Enter a non-negative fee up to QAR 100,000.';
+    if (form.freeDeliveryThreshold !== null && (!Number.isFinite(form.freeDeliveryThreshold) || form.freeDeliveryThreshold < 0 || form.freeDeliveryThreshold > 100000)) errors.freeDeliveryThreshold = 'Enter a non-negative threshold up to QAR 100,000.';
+    if (!form.declarations.authorized) errors.declaration_authorized = 'Confirm you are authorized to register this restaurant.';
+    if (!form.declarations.accurate) errors.declaration_accurate = 'Confirm the information is accurate.';
+    if (!form.declarations.terms) errors.declaration_terms = 'Accept the Restaurant Partner Terms.';
+    if (!form.declarations.approval) errors.declaration_approval = 'Acknowledge that approval is not guaranteed.';
+    if (!form.declarations.adminReview) errors.declaration_adminReview = 'Acknowledge that changes may require Admin review.';
+    this.partnerFormErrors = errors;
+    return Object.keys(errors).length === 0;
+  }
+
+  reviewPartnerApplication(): void {
+    this.error = '';
+    if (!this.validatePartnerApplication()) {
+      this.notice = 'Please review the highlighted fields before continuing.';
+      return;
+    }
+    this.partnerReviewMode = true;
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
+  editPartnerApplication(): void {
+    this.partnerReviewMode = false;
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
+  submitPartnerApplication(): void {
+    if (this.loading || !this.validatePartnerApplication()) {
+      if (!this.loading) this.partnerReviewMode = false;
+      return;
+    }
+    if (!this.partnerRegistrationAccessToken) {
+      this.partnerRegistrationAccessToken = this.createPartnerAccessToken();
+    }
+    if (!this.partnerRequestId) this.partnerRequestId = window.crypto.randomUUID();
+    sessionStorage.setItem(`${this.partnerAccessPrefix}pending-token`, this.partnerRegistrationAccessToken);
+    sessionStorage.setItem(`${this.partnerAccessPrefix}request-id`, this.partnerRequestId);
+    const headers = this.headers()
+      .set('X-Registration-Token', this.partnerRegistrationAccessToken)
+      .set('Idempotency-Key', this.partnerRequestId);
+    const endpoint = this.partnerRegistration
+      ? `${this.api}/partner-registrations/${this.partnerRegistration.registrationId}`
+      : `${this.api}/partner-registrations`;
+    const request = this.partnerRegistration
+      ? this.http.patch<{ registration: PartnerRegistration }>(endpoint, { ...this.partnerApplication, termsVersion: this.partnerTermsVersion }, { headers })
+      : this.http.post<{ registration: PartnerRegistration }>(endpoint, { ...this.partnerApplication, termsVersion: this.partnerTermsVersion }, { headers });
+    this.loading = true;
+    request.pipe(finalize(() => {
+      this.loading = false;
+      this.changeDetector.markForCheck();
+    })).subscribe({
+      next: ({ registration }) => {
+        this.partnerRegistration = registration;
+        sessionStorage.setItem(`${this.partnerAccessPrefix}${registration.registrationId}`, this.partnerRegistrationAccessToken);
+        sessionStorage.setItem(`${this.partnerAccessPrefix}last-id`, registration.registrationId);
+        sessionStorage.removeItem(`${this.partnerAccessPrefix}pending-token`);
+        sessionStorage.removeItem(`${this.partnerAccessPrefix}request-id`);
+        this.partnerReviewMode = false;
+        this.partnerFormErrors = {};
+        this.notice = 'Thank you for partnering with KABHI! Your registration has been submitted successfully. Our team will review your details and contact you with the next steps.';
+        this.changeDetector.markForCheck();
+      },
+      error: (error) => {
+        const fieldErrors = error.error?.fields as Record<string, string> | undefined;
+        if (fieldErrors) this.partnerFormErrors = fieldErrors;
+        this.showError(error);
+      }
+    });
+  }
+
+  loadPartnerRegistrationStatus(): void {
+    const registrationId = this.partnerRegistration?.registrationId || sessionStorage.getItem(`${this.partnerAccessPrefix}last-id`) || '';
+    const token = this.partnerRegistrationAccessToken || (registrationId ? sessionStorage.getItem(`${this.partnerAccessPrefix}${registrationId}`) : '') || '';
+    if (!registrationId || !token) {
+      this.error = 'This browser does not have a saved registration access link.';
+      return;
+    }
+    this.partnerRegistrationAccessToken = token;
+    this.http.get<{ registration: PartnerRegistration }>(`${this.api}/partner-registrations/${registrationId}`, {
+      headers: this.headers().set('X-Registration-Token', token)
+    }).subscribe({
+      next: ({ registration }) => {
+        this.partnerRegistration = registration;
+        if (registration.details) this.partnerApplication = registration.details;
+        this.changeDetector.markForCheck();
+      },
+      error: (error) => this.showError(error)
+    });
+  }
+
+  async choosePartnerImage(field: 'logoImageData' | 'coverImageData', event: Event): Promise<void> {
+    const input = event.target as HTMLInputElement;
+    const file = input.files?.[0];
+    if (!file) return;
+    try {
+      this.partnerApplication[field] = await this.optimizeImage(file);
+      this.partnerFormErrors[field] = '';
+    } catch (error) {
+      this.showError({ error: { error: error instanceof Error ? error.message : 'Could not process this image.' } });
+    } finally {
+      input.value = '';
+      this.changeDetector.markForCheck();
+    }
+  }
+
+  loadAdminPartnerRegistrations(): void {
+    this.http.get<{ registrations: PartnerRegistration[] }>(`${this.api}/admin/partner-registrations`, { headers: this.headers() }).subscribe({
+      next: ({ registrations }) => {
+        this.adminPartnerRegistrations = registrations;
+        this.changeDetector.markForCheck();
+      },
+      error: (error) => this.showError(error)
+    });
+  }
+
+  reviewPartnerRegistration(registration: PartnerRegistration, action: string): void {
+    this.adminActivationUrl = '';
+    this.http.patch<{ registration: PartnerRegistration; activationUrl: string }>(
+      `${this.api}/admin/partner-registrations/${registration.registrationId}`,
+      { action, reason: this.partnerReviewReasons[registration.registrationId] || '' },
+      { headers: this.headers() }
+    ).subscribe({
+      next: ({ registration: updated, activationUrl }) => {
+        this.adminPartnerRegistrations = this.adminPartnerRegistrations.map((entry) => entry.registrationId === updated.registrationId ? updated : entry);
+        this.adminActivationUrl = activationUrl;
+        this.partnerReviewReasons[updated.registrationId] = '';
+        this.notice = action === 'APPROVED' ? `${updated.registrationId} approved. The activation link expires in 7 days.` : `${updated.registrationId}: ${this.statusLabel(updated.status)}.`;
+        this.changeDetector.markForCheck();
+      },
+      error: (error) => this.showError(error)
+    });
+  }
+
+  loadAdminBrandLogo(): void {
+    this.http.get<{ logoData: string }>(`${this.api}/admin/brand`, { headers: this.headers() }).subscribe({
+      next: ({ logoData }) => {
+        this.brandLogoData = logoData || '';
+        this.brandLogoDraft = null;
+      },
+      error: (error) => this.showError(error)
+    });
+  }
+
+  async chooseBrandLogo(event: Event): Promise<void> {
+    const input = event.target as HTMLInputElement;
+    const file = input.files?.[0];
+    if (!file) return;
+    try {
+      this.brandLogoDraft = await this.optimizeImage(file);
+    } catch (error) {
+      this.showError({ error: { error: error instanceof Error ? error.message : 'Could not process this logo.' } });
+    } finally {
+      input.value = '';
+      this.changeDetector.markForCheck();
+    }
+  }
+
+  saveBrandLogo(): void {
+    if (this.brandLogoDraft === null) return;
+    this.http.put<{ logoData: string }>(`${this.api}/admin/brand`, { logoData: this.brandLogoDraft }, { headers: this.headers() }).subscribe({
+      next: ({ logoData }) => {
+        this.brandLogoData = logoData;
+        this.brandLogoDraft = null;
+        this.notice = 'KABHI branding logo updated.';
+      },
+      error: (error) => this.showError(error)
+    });
+  }
+
+  removeBrandLogo(): void {
+    this.http.put<{ logoData: string }>(`${this.api}/admin/brand`, { logoData: '' }, { headers: this.headers() }).subscribe({
+      next: ({ logoData }) => {
+        this.brandLogoData = logoData;
+        this.brandLogoDraft = null;
+        this.notice = 'The KABHI text logo is now active.';
+      },
+      error: (error) => this.showError(error)
+    });
+  }
+
+  activateRestaurantAccount(): void {
+    this.loading = true;
+    this.http.post<{ token: string; user: User }>(`${this.api}/auth/activate-restaurant`, {
+      token: this.activationToken,
+      email: this.activationEmail,
+      password: this.activationPassword
+    }).pipe(finalize(() => {
+      this.loading = false;
+      this.changeDetector.markForCheck();
+    })).subscribe({
+      next: ({ token, user }) => {
+        localStorage.setItem(this.tokenKey, token);
+        this.user = user;
+        this.notice = 'Your restaurant account is active. Complete your setup and submit your menu for Admin approval.';
+        this.loadRoleLanding();
+      },
+      error: (error) => this.showError(error)
+    });
+  }
+
   private loadRoleLanding(): void {
     window.history.replaceState(null, '', '/');
     if (this.user?.role === 'CUSTOMER') {
@@ -472,9 +920,24 @@ export class AppComponent implements OnInit {
       this.notice = 'Enter your WhatsApp number and verify the code to create your account.';
       return;
     }
-    this.signupRestaurant = this.loginPortal === 'RESTAURANT';
-    this.view = 'signup';
+    this.openPartnerRegistration();
+  }
+
+  openPartnerRegistration(): void {
+    this.partnerReviewMode = false;
+    this.partnerFormErrors = {};
+    this.partnerRegistration = null;
+    this.view = 'partnerRegistration';
     this.error = '';
+    window.history.pushState(null, '', '/partner/register');
+    const registrationId = sessionStorage.getItem(`${this.partnerAccessPrefix}last-id`) || '';
+    if (registrationId) {
+      this.partnerRegistrationAccessToken = sessionStorage.getItem(`${this.partnerAccessPrefix}${registrationId}`) || '';
+      this.loadPartnerRegistrationStatus();
+    } else {
+      this.partnerRegistrationAccessToken = sessionStorage.getItem(`${this.partnerAccessPrefix}pending-token`) || '';
+      this.partnerRequestId = sessionStorage.getItem(`${this.partnerAccessPrefix}request-id`) || '';
+    }
   }
 
   navigateHome(): void {
@@ -546,6 +1009,20 @@ export class AppComponent implements OnInit {
       '/login/restaurant': 'RESTAURANT',
       '/login/admin': 'ADMIN'
     };
+    if (route === '/partner/register') {
+      this.view = 'partnerRegistration';
+      return;
+    }
+    if (route === '/activate-restaurant') {
+      this.activationToken = new URLSearchParams(window.location.search).get('token') || '';
+      this.view = 'activateRestaurant';
+      return;
+    }
+    if (route === '/terms/restaurant-partner' || route === '/privacy' || route === '/policies' || route === '/contact' || route === '/about') {
+      this.legalPage = route === '/privacy' ? 'privacy' : route === '/policies' ? 'policies' : route === '/contact' ? 'contact' : route === '/about' ? 'about' : 'terms';
+      this.view = 'legal';
+      return;
+    }
     const portal = portalByRoute[route];
     if (portal) {
       this.loginPortal = portal;
@@ -611,6 +1088,7 @@ export class AppComponent implements OnInit {
     this.mapSelectionAddress = this.mapSelection
       ? purpose === 'delivery' ? this.deliveryLocationLabel
         : purpose === 'signupRestaurant' ? this.signupAddress
+          : purpose === 'partnerRegistration' ? this.partnerApplication.address
           : purpose === 'adminCreateRestaurant' ? this.newAdminRestaurantAddress
             : this.adminRestaurant?.address || ''
       : '';
@@ -665,10 +1143,15 @@ export class AppComponent implements OnInit {
       }
       this.notice = 'Showing restaurants that deliver to your selected location.';
       this.loadRestaurants();
+      if (this.view === 'cart') this.refreshOrderQuote();
     } else if (this.mapPickerPurpose === 'signupRestaurant') {
       this.signupLatitude = lat;
       this.signupLongitude = lng;
       this.signupAddress = locationLabel;
+    } else if (this.mapPickerPurpose === 'partnerRegistration') {
+      this.partnerApplication.latitude = lat;
+      this.partnerApplication.longitude = lng;
+      this.partnerApplication.address = locationLabel;
     } else if (this.mapPickerPurpose === 'adminCreateRestaurant') {
       this.newAdminRestaurantLatitude = lat;
       this.newAdminRestaurantLongitude = lng;
@@ -741,6 +1224,9 @@ export class AppComponent implements OnInit {
     }
     if (purpose === 'signupRestaurant' && this.signupLatitude !== null && this.signupLongitude !== null) {
       return { lat: this.signupLatitude, lng: this.signupLongitude };
+    }
+    if (purpose === 'partnerRegistration' && this.partnerApplication.latitude !== null && this.partnerApplication.longitude !== null) {
+      return { lat: this.partnerApplication.latitude, lng: this.partnerApplication.longitude };
     }
     if (purpose === 'adminCreateRestaurant' && this.newAdminRestaurantLatitude !== null && this.newAdminRestaurantLongitude !== null) {
       return { lat: this.newAdminRestaurantLatitude, lng: this.newAdminRestaurantLongitude };
@@ -833,6 +1319,45 @@ export class AppComponent implements OnInit {
   setQuantity(itemId: string, quantity: number): void {
     if (quantity < 1) delete this.cart[itemId];
     else this.cart[itemId] = Math.min(20, quantity);
+    if (this.view === 'cart') this.refreshOrderQuote();
+  }
+
+  invalidateOrderQuote(): void {
+    this.orderQuoteRequest += 1;
+    this.orderQuote = null;
+    this.orderQuoteLoading = false;
+  }
+
+  refreshOrderQuote(): void {
+    const requestId = ++this.orderQuoteRequest;
+    this.orderQuote = null;
+    if (!this.selectedRestaurant || !this.cartItems.length ||
+        this.deliveryLatitude === null || this.deliveryLongitude === null) {
+      this.orderQuoteLoading = false;
+      return;
+    }
+    this.orderQuoteLoading = true;
+    this.http.post<{ quote: OrderQuote }>(`${this.api}/orders/quote`, {
+      restaurantId: this.selectedRestaurant._id,
+      items: this.cartItems.map(({ item, quantity }) => ({ menuItemId: item._id, quantity })),
+      promotionCode: this.promotionCode,
+      latitude: this.deliveryLatitude,
+      longitude: this.deliveryLongitude
+    }, { headers: this.headers() }).pipe(finalize(() => {
+      if (requestId === this.orderQuoteRequest) {
+        this.orderQuoteLoading = false;
+        this.changeDetector.markForCheck();
+      }
+    })).subscribe({
+      next: ({ quote }) => {
+        if (requestId !== this.orderQuoteRequest) return;
+        this.orderQuote = quote;
+        this.changeDetector.markForCheck();
+      },
+      error: (error) => {
+        if (requestId === this.orderQuoteRequest) this.showError(error);
+      }
+    });
   }
 
   openCart(): void {
@@ -843,6 +1368,7 @@ export class AppComponent implements OnInit {
     }
     this.view = 'cart';
     this.error = '';
+    this.refreshOrderQuote();
   }
 
   placeOrder(): void {
@@ -857,6 +1383,11 @@ export class AppComponent implements OnInit {
     }
     if (!this.isSelectedRestaurantInDeliveryRange) {
       this.error = "This restaurant's free-delivery area does not include your selected pin.";
+      return;
+    }
+    if (!this.orderQuote || this.orderQuoteLoading || this.orderQuote.promotionCode !== this.promotionCode.trim().toUpperCase()) {
+      this.error = 'Update the order total before confirming your order.';
+      this.refreshOrderQuote();
       return;
     }
     const address = this.deliveryAddress.trim();
@@ -891,6 +1422,7 @@ export class AppComponent implements OnInit {
         }
         const { order } = response;
         this.cart = {};
+        this.orderQuote = null;
         sessionStorage.removeItem('kahbi.cartRestaurant');
         this.trackedOrder = order;
         this.trackReference = order.reference;
@@ -1017,6 +1549,7 @@ export class AppComponent implements OnInit {
         if (purpose === 'ORDER') {
           this.notice = 'WhatsApp number verified. Your account is ready; you can now place your order.';
           this.view = 'cart';
+          this.refreshOrderQuote();
         } else {
           this.notice = 'Your WhatsApp number is verified. Welcome to KABHI.';
           this.loadRoleLanding();
@@ -1067,6 +1600,7 @@ export class AppComponent implements OnInit {
     localStorage.removeItem(this.tokenKey);
     this.user = null;
     this.orders = [];
+    this.orderQuote = null;
     this.view = 'home';
     this.loginPortal = 'CUSTOMER';
     this.customerOtpChallengeId = '';
@@ -1345,23 +1879,226 @@ export class AppComponent implements OnInit {
   }
 
   addMenuItem(): void {
-    this.http.post(`${this.api}/restaurant/menu`, {
+    this.http.post<{ item: MenuItem }>(`${this.api}/restaurant/menu`, {
       name: this.newItemName,
       category: this.newItemCategory,
       price: this.newItemPrice,
       description: this.newItemDescription,
       imageData: this.newItemImageData
     }, { headers: this.headers() }).subscribe({
-      next: () => {
+      next: ({ item }) => {
         this.newItemName = '';
         this.newItemCategory = '';
         this.newItemPrice = 0;
         this.newItemDescription = '';
         this.newItemImageData = '';
+        this.notice = item.approvalStatus === 'PENDING_REVIEW'
+          ? `${item.name} was submitted and is hidden from customers until Admin approval.`
+          : `${item.name} was added to the menu.`;
         this.loadRestaurantPortal();
       },
       error: (error) => this.showError(error)
     });
+  }
+
+  downloadMenuTemplate(): void {
+    this.http.get(`${this.api}/restaurant/menu/bulk/template`, {
+      headers: this.headers(),
+      responseType: 'blob'
+    }).subscribe({
+      next: (file) => this.downloadFile(file, 'kahbi-menu-template.csv', 'text/csv'),
+      error: (error) => this.showError(error)
+    });
+  }
+
+  selectBulkMenuFile(event: Event): void {
+    const input = event.target as HTMLInputElement;
+    const file = input.files?.[0] || null;
+    input.value = '';
+    if (file && !/\.(csv|xlsx)$/i.test(file.name)) {
+      this.error = 'Choose an Excel .xlsx or CSV .csv menu file.';
+      return;
+    }
+    this.bulkMenuFile = file;
+    this.bulkMenuRows = [];
+    this.bulkMenuSummary = null;
+    this.bulkMenuErrorReport = '';
+  }
+
+  previewBulkMenu(): void {
+    if (!this.bulkMenuFile || this.bulkMenuPreviewLoading) return;
+    const form = new FormData();
+    form.append('file', this.bulkMenuFile);
+    this.bulkMenuPreviewLoading = true;
+    this.http.post<{
+      rows: BulkMenuRow[];
+      totalRows: number;
+      validCount: number;
+      invalidCount: number;
+    }>(`${this.api}/restaurant/menu/bulk/preview`, form, { headers: this.headers() }).pipe(
+      finalize(() => {
+        this.bulkMenuPreviewLoading = false;
+        this.changeDetector.markForCheck();
+      })
+    ).subscribe({
+      next: (result) => {
+        this.bulkMenuRows = result.rows;
+        this.bulkMenuSummary = null;
+        this.bulkMenuErrorReport = '';
+        this.bulkMenuReplaceConfirmed = false;
+        this.validateBulkMenuRows();
+      },
+      error: (error) => this.showError(error)
+    });
+  }
+
+  validateBulkMenuRows(): void {
+    const seen = new Map<string, number>();
+    for (const row of this.bulkMenuRows) {
+      const errors: string[] = [];
+      if (!this.selectedRestaurant || row.restaurantId !== this.selectedRestaurant._id) errors.push('Restaurant ID must match your restaurant.');
+      if (!row.category.trim()) errors.push('Category is required.');
+      if (!row.name.trim()) errors.push('Item Name is required.');
+      const price = Number(row.price);
+      if (!Number.isFinite(price) || price <= 0 || price > 100000) errors.push('Price must be greater than 0 and no more than 100,000 QAR.');
+      const discount = row.discountPrice === '' || row.discountPrice === null ? null : Number(row.discountPrice);
+      if (discount !== null && (!Number.isFinite(discount) || discount < 0 || discount >= price)) errors.push('Discount price must be 0 or more and less than the regular price.');
+      if (row.category.length > 80) errors.push('Category must be 80 characters or fewer.');
+      if (row.name.length > 120) errors.push('Item Name must be 120 characters or fewer.');
+      if (row.description.length > 1000) errors.push('Item Description must be 1,000 characters or fewer.');
+      if (row.itemId.length > 100) errors.push('Item ID must be 100 characters or fewer.');
+      if (row.customizationOptions.length > 1000) errors.push('Customization Options must be 1,000 characters or fewer.');
+      if ((row.availabilityStart && !row.availabilityEnd) || (!row.availabilityStart && row.availabilityEnd)) errors.push('Enter both availability start and end times, or leave both blank.');
+      if ((row.availabilityStart && !/^([01]\d|2[0-3]):[0-5]\d$/.test(row.availabilityStart)) ||
+          (row.availabilityEnd && !/^([01]\d|2[0-3]):[0-5]\d$/.test(row.availabilityEnd))) errors.push('Availability times must use 24-hour HH:MM format.');
+      if (row.availabilityStart && row.availabilityEnd && row.availabilityStart === row.availabilityEnd) errors.push('Availability start and end times cannot be the same.');
+      if (row.imageUrl.trim()) {
+        try {
+          if (new URL(row.imageUrl).protocol !== 'https:') errors.push('Image URL must use HTTPS.');
+        } catch {
+          errors.push('Enter a valid HTTPS image URL.');
+        }
+      }
+      const identities = [
+        ...(row.itemId.trim() ? [`id:${row.itemId.trim().toLowerCase()}`] : []),
+        ...(row.category.trim() && row.name.trim() ? [`name:${row.category.trim().toLowerCase()}|${row.name.trim().toLowerCase()}`] : [])
+      ];
+      const duplicateRow = identities.map((identity) => seen.get(identity)).find(Boolean);
+      if (duplicateRow) {
+        errors.push(`Duplicate item in this file (first listed on row ${duplicateRow}).`);
+      } else {
+        for (const identity of identities) seen.set(identity, row.rowNumber);
+      }
+      row.errors = errors;
+    }
+  }
+
+  get bulkMenuValidCount(): number {
+    return this.bulkMenuRows.filter((row) => row.errors.length === 0).length;
+  }
+
+  get bulkMenuInvalidCount(): number {
+    return this.bulkMenuRows.length - this.bulkMenuValidCount;
+  }
+
+  importBulkMenu(): void {
+    if (!this.bulkMenuRows.length || this.bulkMenuImporting) return;
+    this.validateBulkMenuRows();
+    if (this.bulkMenuMode === 'REPLACE' && (this.bulkMenuInvalidCount > 0 || !this.bulkMenuReplaceConfirmed)) {
+      this.error = this.bulkMenuInvalidCount
+        ? 'Correct every invalid row before replacing the entire menu.'
+        : 'Confirm that you want to replace the entire menu.';
+      return;
+    }
+    this.bulkMenuImporting = true;
+    this.http.post<{
+      summary: { totalRows: number; imported: number; updated: number; failed: number; mode: string };
+      rows: BulkMenuRow[];
+      errorReportCsv: string;
+    }>(`${this.api}/restaurant/menu/bulk/import`, {
+      rows: this.bulkMenuRows,
+      mode: this.bulkMenuMode,
+      confirmReplace: this.bulkMenuReplaceConfirmed
+    }, { headers: this.headers() }).pipe(
+      finalize(() => {
+        this.bulkMenuImporting = false;
+        this.changeDetector.markForCheck();
+      })
+    ).subscribe({
+      next: (result) => {
+        this.bulkMenuRows = result.rows;
+        this.bulkMenuSummary = result.summary;
+        this.bulkMenuErrorReport = result.errorReportCsv;
+        this.notice = `${result.summary.imported} new items imported, ${result.summary.updated} items updated, ${result.summary.failed} rows failed.`;
+        this.loadRestaurantPortal();
+      },
+      error: (error) => {
+        if (Array.isArray(error.error?.rows)) {
+          this.bulkMenuRows = error.error.rows as BulkMenuRow[];
+          this.validateBulkMenuRows();
+        }
+        this.showError(error);
+      }
+    });
+  }
+
+  downloadBulkMenuErrors(): void {
+    if (!this.bulkMenuErrorReport) return;
+    this.downloadFile(new Blob([`\uFEFF${this.bulkMenuErrorReport}`], { type: 'text/csv;charset=utf-8' }), 'kahbi-menu-upload-errors.csv', 'text/csv');
+  }
+
+  downloadBulkImageErrors(): void {
+    if (!this.bulkImageErrorReport) return;
+    this.downloadFile(new Blob([`\uFEFF${this.bulkImageErrorReport}`], { type: 'text/csv;charset=utf-8' }), 'kahbi-menu-image-errors.csv', 'text/csv');
+  }
+
+  selectBulkImageZip(event: Event): void {
+    const input = event.target as HTMLInputElement;
+    const file = input.files?.[0] || null;
+    input.value = '';
+    if (file && !/\.zip$/i.test(file.name)) {
+      this.error = 'Choose a ZIP archive containing menu item photos.';
+      return;
+    }
+    this.bulkImageZipFile = file;
+    this.bulkImageResult = '';
+    this.bulkImageErrorReport = '';
+  }
+
+  uploadBulkImageZip(): void {
+    if (!this.bulkImageZipFile || this.bulkImageUploading) return;
+    const form = new FormData();
+    form.append('file', this.bulkImageZipFile);
+    this.bulkImageUploading = true;
+    this.http.post<{ uploaded: number; failed: number; failedFiles: { fileName: string; error: string }[] }>(
+      `${this.api}/restaurant/menu/bulk/images`,
+      form,
+      { headers: this.headers() }
+    ).pipe(finalize(() => {
+      this.bulkImageUploading = false;
+      this.changeDetector.markForCheck();
+    })).subscribe({
+      next: (result) => {
+        this.bulkImageResult = `${result.uploaded} images matched and saved; ${result.failed} files could not be matched.`;
+        if (result.failedFiles.length) {
+          this.bulkImageErrorReport = [
+            '"File","Error"',
+            ...result.failedFiles.map((entry) => `"${entry.fileName.replace(/"/g, '""')}","${entry.error.replace(/"/g, '""')}"`)
+          ].join('\r\n');
+        }
+        this.loadRestaurantPortal();
+      },
+      error: (error) => this.showError(error)
+    });
+  }
+
+  private downloadFile(file: Blob, fileName: string, type: string): void {
+    const url = URL.createObjectURL(new Blob([file], { type }));
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = fileName;
+    anchor.click();
+    URL.revokeObjectURL(url);
   }
 
   goToRestaurantMenu(): void {
@@ -1372,6 +2109,8 @@ export class AppComponent implements OnInit {
   loadAdmin(): void {
     this.view = 'adminPortal';
     this.loadAdminWhatsappConfig();
+    this.loadAdminPartnerRegistrations();
+    this.loadAdminBrandLogo();
     this.http.get<{
       metrics: { [key: string]: number };
       orders: Order[];
@@ -1715,6 +2454,16 @@ export class AppComponent implements OnInit {
         this.adminMenu = this.adminMenu.map((entry) => entry._id === updated._id ? updated : entry);
         delete this.adminMenuImageDrafts[updated._id];
         this.notice = `${updated.name} updated.`;
+      },
+      error: (error) => this.showError(error)
+    });
+  }
+
+  reviewAdminMenuItem(item: MenuItem, approvalStatus: 'APPROVED' | 'REJECTED'): void {
+    this.http.patch<{ item: MenuItem }>(`${this.api}/admin/menu/${item._id}`, { approvalStatus }, { headers: this.headers() }).subscribe({
+      next: ({ item: updated }) => {
+        this.adminMenu = this.adminMenu.map((entry) => entry._id === updated._id ? updated : entry);
+        this.notice = `${updated.name} ${approvalStatus === 'APPROVED' ? 'approved for customer menus' : 'rejected'}.`;
       },
       error: (error) => this.showError(error)
     });
