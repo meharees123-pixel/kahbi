@@ -41,6 +41,7 @@ In **Settings > Secrets and variables > Actions > Variables**, add:
 | `GCP_JWT_SECRET` | Secret Manager secret ID holding the JWT secret | Yes |
 | `GCP_OTP_SIGNING_SECRET` | Secret Manager secret ID holding the OTP signing secret | Yes |
 | `GCP_WHATSAPP_ENCRYPTION_SECRET` | Secret Manager secret ID holding the WhatsApp encryption key | Yes |
+| `GCP_CLIENT_ORIGIN` | Public HTTPS origin of the KABHI web app (for example, `https://kahbi.example.com`) | Yes |
 | `GCP_API_SERVICE` | Cloud Run API service name; defaults to `kahbi-api` | No |
 | `GCP_WEB_SERVICE` | Cloud Run frontend service name; defaults to `kahbi-web` | No |
 

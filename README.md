@@ -42,7 +42,7 @@ The first startup seeds a clearly labeled demo restaurant, menu, promotion, and 
 | Restaurant owner — Lusail Spice House | [http://localhost:4200/login/restaurant](http://localhost:4200/login/restaurant) | `owner.lusail@kahbi.demo` |
 | Admin | [http://localhost:4200/login/admin](http://localhost:4200/login/admin) | `admin@kahbi.demo` |
 
-Use `Demo123!` for all demo accounts. Each restaurant-owner account is scoped to its own restaurant; the admin account can manage all restaurants. The login API also enforces the selected portal, so a restaurant or admin account cannot sign in through the customer portal. Public signup is available for customers and restaurant onboarding; admin signup is disabled.
+Use `Demo123!` for all demo accounts. Each restaurant-owner account is scoped to its own restaurant; the admin account can manage all restaurants. The login API also enforces the selected portal, so a restaurant or admin account cannot sign in through the customer portal. Customer accounts are created after WhatsApp verification. Restaurant partners apply publicly and can create a login only after Admin approval; admin signup is disabled.
 
 ## Run without Docker
 
@@ -63,7 +63,7 @@ See [Google Cloud deployment setup](.github/DEPLOYMENT.md) for required GitHub v
 
 ## Free-delivery locations and OpenStreetMap
 
-The customer home page lets customers choose a delivery pin or use browser geolocation. KABHI then shows approved restaurants whose configured delivery radius covers that point, nearest first. Checkout requires the pin and the customer's full building/street address; the API checks coverage again before creating an order. Restaurant owners select their location and a 0.5–100 km free-delivery radius during signup. Admins can set or update both in restaurant management.
+The customer home page lets customers choose a delivery pin or use browser geolocation. KABHI then shows approved restaurants whose configured delivery radius covers that point, nearest first. Checkout requires the pin and the customer's full building/street address; the API checks coverage again before creating an order. Restaurant partners provide a location and a 0.5–100 km standard delivery radius in the public registration. Admins can set or update the restaurant's operational delivery area in restaurant management.
 
 The map uses OpenStreetMap tiles through Leaflet and reverse-geocodes selected pins with the OpenStreetMap Nominatim service. No API key or billing setup is required. The map displays the required OpenStreetMap attribution. An internet connection is needed to load map tiles and look up a nearby address; if lookup is unavailable, the selected coordinates still work and the address can be entered manually.
 
@@ -77,15 +77,33 @@ The public OpenStreetMap tile and Nominatim services have usage policies and are
 - Sign in as the restaurant owner to view only that restaurant's orders and advance valid order states through accept, prepare, ready, delivery, and completion. Menu availability can be changed from the restaurant view.
 - Sign in as admin to view live database metrics, manage restaurants from a searchable card directory with a separate profile/menu editor, approve/reject/suspend restaurants, and accept/reject or advance orders through their valid lifecycle. Billing snapshots and audit events are recorded for completed orders and administrative decisions.
 - Admins can manage customer account status, promotions and sponsored home banners. Served banner impressions are recorded; click/conversion analytics are not enabled.
-- Restaurant onboarding is available from the sign-in screen. New restaurants remain private until admin approval.
+- Restaurant partners can apply at `/partner/register`; submitted applications remain separate from the Restaurant Master until an Admin approves them. Approval creates a closed, pending-review restaurant record, and customer visibility still requires Admin restaurant approval, an approved menu item, and the restaurant being open.
+
+## Restaurant partner registration
+
+The public registration page captures restaurant, representative, Qatar address/map, operating, delivery, commercial, and declaration details. It previews the information before submission, validates fields in both the browser and API, and records the accepted partner-terms version (`2026-10-v1`) and timestamp. An application receives a `KBR-<year>-<id>` Registration ID and a private browser session access token; applicants can refresh their status from the same browser. Admins review applications in the Admin dashboard, can start review, approve, reject with a reason, request corrections, or suspend an approved registration. Corrections are only accepted after an Admin request.
+
+Approving an application creates the existing Restaurant Master record in `PENDING_REVIEW` and `CLOSED` states; it does not approve customer visibility or menu items. The Admin receives a seven-day, one-use activation link in the dashboard. The partner creates a password and login email with that link. Menu items submitted by an activated partner remain pending Admin review and are excluded from customer menus and order creation until approved. The Admin must then approve the Restaurant Master record (which requires an approved menu item) and separately open it when operations are ready. Registration actions, terms acceptance, menu review, logo updates, and Admin decisions use the existing audit log.
+
+The public KABHI logo is controlled by an Admin-managed image setting. Admins can upload a JPEG, PNG, or WebP logo (optimized to 256 KB); clearing it restores the KABHI text mark. Partner registration status is protected by a random per-application access token retained in the browser session; Admin-only endpoints protect review data and activation-link creation.
+
+Partner approval activation links use `CLIENT_ORIGIN` to build the frontend URL. Set it to the deployed HTTPS origin in production. WhatsApp/email partner notifications are not configured by this MVP: an approval is audit/message-logged and the Admin must deliver the one-time activation link through an approved secure channel. The legal information pages in this MVP summarize the stated onboarding flow and must be replaced or approved by KABHI's legal owner before production use.
+
+## Restaurant bulk menu upload
+
+Restaurant owners and managers can open **Bulk Upload Menu** in the dashboard, download the CSV template, and upload CSV or Excel `.xlsx` files containing up to 500 rows. The template columns are `Category`, `Item Name`, `Description`, `Price`, `Availability Start (HH:MM)`, `Availability End (HH:MM)`, and `Image URL (Optional)`. Restaurant identity is taken from the signed-in account rather than the file. Availability start/end are optional daily windows in Qatar time; leave both blank for all-day availability, and enter both for a scheduled item. Overnight windows are supported.
+
+The preview validates required fields, QAR prices, time ranges, image URLs, duplicate rows, and matches against the existing menu. Rows can be corrected in the preview before importing. Choose **Add New Items**, **Update Existing Items and add new**, or **Replace Entire Menu**. Replacement requires an explicit confirmation and all rows must be valid; unmatched existing items are deactivated rather than deleted. New/changed items for approved partners remain hidden from customers until Admin menu approval. Scheduled items are shown as unavailable outside their configured hours, and the API rechecks those hours when quoting and placing an order.
+
+Menu photos can still be uploaded individually or in a ZIP archive. ZIP image filenames should match the menu Item ID, generated menu item ID, or item name; supported JPEG, PNG, and WebP images are limited to 256 KB each and the archive to 10 MB. Upload results include row/file errors and can be downloaded as a CSV report. The API derives the target restaurant from the authenticated account and records each bulk import or image upload in the audit log.
 
 ## Integrations and operating assumptions
 
 - Currency is QAR and tax is 0 for the MVP. Fees, commission, SLA, cancellation window, service radius and currency are environment-configurable; historical order prices and commission are stored as snapshots.
 - Payment method is cash/direct payment to the restaurant. No order is marked paid without a payment provider confirmation.
-- Customer OTP messages are sent through WhatsApp Cloud API using an approved Authentication template; provider credentials and the OTP signing secret belong only in server environment variables. Other restaurant/order notifications remain demo/log-only and are not represented as sent or delivered.
+- Customer OTP messages are sent through WhatsApp Cloud API using an approved Authentication template; provider credentials and the OTP signing secret belong only in server environment variables. Restaurant/order and partner notifications remain demo/log-only and are not represented as sent or delivered.
 - Customer location is selected on OpenStreetMap (or with browser geolocation), and restaurant free-delivery radius is checked both when browsing and when placing an order.
-- This MVP does not yet include saved customer addresses, bulk menu upload, password reset, admin user/permission management, or an online payment gateway. Restaurant profile editing and configurable settings UI are also deferred; operational rates and rules are configured through server environment variables.
+- This MVP does not yet include saved customer addresses, password reset, granular Admin permission management, or an online payment gateway. Partner self-service profile editing is not enabled; operational rates and rules remain Admin-managed or server-configured.
 - Demo accounts are for local development only. Change the JWT secret and replace/remove demo accounts before deployment. Use HTTPS, a managed MongoDB, secret storage, backups, and an appropriate operational review before production use.
 
 ## Security and data boundaries

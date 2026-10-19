@@ -1,7 +1,8 @@
 <div class="app-shell">
   <header class="topbar">
     <a class="brand" href="/" (click)="$event.preventDefault(); navigateHome()">
-      <span class="brand-mark">K</span><span>KABHI</span>
+      <img *ngIf="brandLogoData; else textBrand" class="brand-logo" [src]="brandLogoData" alt="KABHI">
+      <ng-template #textBrand><span class="brand-mark">K</span><span>KABHI</span></ng-template>
     </a>
     <nav class="top-nav">
       <ng-container *ngIf="!user || isCustomer">
@@ -17,6 +18,7 @@
       <button class="nav-link" *ngIf="isAdminUser" (click)="loadAdmin()">Admin dashboard</button>
     </nav>
     <div class="nav-actions">
+      <button class="button button-accent button-small" *ngIf="!isRestaurantUser && !isAdminUser" (click)="openPartnerRegistration()">Become a partner</button>
       <button class="icon-button" *ngIf="(!user || isCustomer) && cartCount" (click)="openCart()">Cart <span class="cart-count">{{ cartCount }}</span></button>
       <span class="signed-user" *ngIf="user">{{ user.name }}</span>
       <button class="button button-dark button-small" *ngIf="!user" (click)="openLogin('CUSTOMER')">Customer sign in</button>
@@ -52,6 +54,150 @@
         <button class="feedback-banner-close" type="button" aria-label="Dismiss feedback banner" (click)="feedbackBannerDismissed = true">×</button>
       </div>
     </div>
+
+    <section class="partner-page" *ngIf="view === 'partnerRegistration'">
+      <div class="partner-hero">
+        <div class="partner-hero-copy">
+          <span class="eyebrow">QATAR'S LOCAL FOOD COMMUNITY</span>
+          <h1>Partner with KABHI</h1>
+          <p>Connect with more local customers. Manage your orders directly. Let your restaurant serve its customers.</p>
+          <div class="partner-hero-actions">
+            <button class="button button-accent" type="button" (click)="scrollToPartnerForm()">Register Your Restaurant <span>→</span></button>
+            <button class="button button-light" type="button" (click)="openLogin('RESTAURANT')">Already a Partner? Login</button>
+          </div>
+          <div class="partner-promise"><span>01</span> You manage your kitchen, preparation, delivery staff and fulfilment.</div>
+          <div class="partner-promise"><span>02</span> KABHI helps customers discover you, order locally and contact you on WhatsApp.</div>
+        </div>
+        <div class="partner-hero-mark" aria-hidden="true"><span>✦</span><strong>Local kitchens.<br>Closer together.</strong></div>
+      </div>
+
+      <div class="partner-registration-layout" id="partner-registration-form">
+        <section class="partner-form-card" *ngIf="!partnerRegistration || partnerRegistration.correctionAllowed">
+          <div class="partner-section-heading">
+            <div><span class="eyebrow">{{ partnerRegistration?.correctionAllowed ? 'REQUESTED UPDATES' : 'GET STARTED' }}</span><h2>{{ partnerReviewMode ? 'Review your application' : 'Tell us about your restaurant' }}</h2></div>
+            <span class="partner-step">{{ partnerReviewMode ? 'REVIEW' : 'APPLICATION' }}</span>
+          </div>
+          <div class="partner-correction-note" *ngIf="partnerRegistration?.correctionAllowed"><strong>Updates requested by KABHI Admin</strong><p>{{ partnerRegistration.reviewReason }}</p></div>
+
+          <div *ngIf="!partnerReviewMode" class="partner-form">
+            <fieldset class="partner-fieldset">
+              <legend>Restaurant information</legend>
+              <div class="partner-fields">
+                <label class="form-field"><span>Restaurant / Hotel Name <b>*</b></span><input [(ngModel)]="partnerApplication.restaurantName" maxlength="120" autocomplete="organization"><small class="field-error" *ngIf="partnerFormErrors['restaurantName']">{{ partnerFormErrors['restaurantName'] }}</small></label>
+                <label class="form-field"><span>Restaurant Type <b>*</b></span><select [(ngModel)]="partnerApplication.restaurantType"><option>Hotel Restaurant</option><option>Restaurant</option><option>Café</option><option>Cloud Kitchen</option><option>Other</option></select><small class="field-error" *ngIf="partnerFormErrors['restaurantType']">{{ partnerFormErrors['restaurantType'] }}</small></label>
+                <label class="form-field"><span>Primary Cuisine <b>*</b></span><input [(ngModel)]="partnerApplication.primaryCuisine" maxlength="80" placeholder="e.g. Qatari, Levantine"><small class="field-error" *ngIf="partnerFormErrors['primaryCuisine']">{{ partnerFormErrors['primaryCuisine'] }}</small></label>
+                <label class="form-field"><span>Additional Cuisines</span><select multiple [(ngModel)]="partnerApplication.additionalCuisines" aria-label="Additional cuisines"><option>Arabic</option><option>Qatari</option><option>Indian</option><option>Italian</option><option>Asian</option><option>American</option><option>Seafood</option><option>Bakery</option><option>Other</option></select><small>Use Ctrl / Command to select more than one.</small></label>
+                <label class="form-field partner-field-wide"><span>Restaurant Description</span><textarea [(ngModel)]="partnerApplication.description" rows="3" maxlength="1000" placeholder="Tell customers what makes your restaurant special."></textarea></label>
+                <div class="partner-upload"><span>Restaurant Logo <small>Optional · JPEG, PNG or WebP</small></span><label class="button button-quiet button-small image-file-button">Choose logo<input type="file" accept="image/jpeg,image/png,image/webp" (change)="choosePartnerImage('logoImageData', $event)"></label><img *ngIf="partnerApplication.logoImageData" class="partner-image-preview partner-logo-preview" [src]="partnerApplication.logoImageData" alt="Restaurant logo preview"><small class="field-error" *ngIf="partnerFormErrors['logoImageData']">{{ partnerFormErrors['logoImageData'] }}</small></div>
+                <div class="partner-upload"><span>Restaurant Cover Image <small>Optional · JPEG, PNG or WebP</small></span><label class="button button-quiet button-small image-file-button">Choose cover<input type="file" accept="image/jpeg,image/png,image/webp" (change)="choosePartnerImage('coverImageData', $event)"></label><img *ngIf="partnerApplication.coverImageData" class="partner-image-preview" [src]="partnerApplication.coverImageData" alt="Restaurant cover preview"><small class="field-error" *ngIf="partnerFormErrors['coverImageData']">{{ partnerFormErrors['coverImageData'] }}</small></div>
+              </div>
+            </fieldset>
+
+            <fieldset class="partner-fieldset">
+              <legend>Contact information</legend>
+              <div class="partner-fields">
+                <label class="form-field"><span>Owner / Authorized Representative Name <b>*</b></span><input [(ngModel)]="partnerApplication.ownerName" maxlength="100" autocomplete="name"><small class="field-error" *ngIf="partnerFormErrors['ownerName']">{{ partnerFormErrors['ownerName'] }}</small></label>
+                <label class="form-field"><span>Official Contact Number <b>*</b></span><input [(ngModel)]="partnerApplication.phone" type="tel" autocomplete="tel" placeholder="+974 5XXX XXXX"><small class="field-error" *ngIf="partnerFormErrors['phone']">{{ partnerFormErrors['phone'] }}</small></label>
+                <label class="form-field"><span>Registered WhatsApp Number <b>*</b></span><input [(ngModel)]="partnerApplication.whatsapp" type="tel" placeholder="+974 5XXX XXXX"><small class="field-error" *ngIf="partnerFormErrors['whatsapp']">{{ partnerFormErrors['whatsapp'] }}</small></label>
+                <label class="form-field"><span>Business Email</span><input [(ngModel)]="partnerApplication.email" type="email" autocomplete="email" placeholder="you@business.com"><small class="field-error" *ngIf="partnerFormErrors['email']">{{ partnerFormErrors['email'] }}</small></label>
+                <label class="form-field partner-field-wide"><span>Restaurant Address <b>*</b></span><input [(ngModel)]="partnerApplication.address" maxlength="300" autocomplete="street-address" placeholder="Building, street, area"><small class="field-error" *ngIf="partnerFormErrors['address']">{{ partnerFormErrors['address'] }}</small></label>
+                <label class="form-field"><span>Country</span><select [(ngModel)]="partnerApplication.country"><option>Qatar</option></select></label>
+                <label class="form-field"><span>City / Municipality <b>*</b></span><input [(ngModel)]="partnerApplication.city" maxlength="100" placeholder="Doha, Al Rayyan…"><small class="field-error" *ngIf="partnerFormErrors['city']">{{ partnerFormErrors['city'] }}</small></label>
+                <label class="form-field"><span>Zone Number</span><input [(ngModel)]="partnerApplication.zoneNumber" maxlength="30" placeholder="e.g. 61"></label>
+                <label class="form-field"><span>Street and Building Number</span><input [(ngModel)]="partnerApplication.streetBuilding" maxlength="120"></label>
+                <div class="partner-map-field partner-field-wide"><div class="location-picker-control"><div><strong>Map Location <b>*</b></strong><span>{{ partnerApplication.latitude !== null && partnerApplication.longitude !== null ? (partnerApplication.latitude | number:'1.4-4') + ', ' + (partnerApplication.longitude | number:'1.4-4') : 'Select or pin your restaurant location' }}</span></div><button type="button" class="button button-quiet button-small" (click)="openMapPicker('partnerRegistration')">{{ partnerApplication.latitude !== null ? 'Change pin' : 'Choose map location' }}</button></div><small class="field-error" *ngIf="partnerFormErrors['mapLocation']">{{ partnerFormErrors['mapLocation'] }}</small></div>
+              </div>
+            </fieldset>
+
+            <fieldset class="partner-fieldset">
+              <legend>Operating information</legend>
+              <div class="partner-fields">
+                <label class="form-field"><span>Opening Time</span><input [(ngModel)]="partnerApplication.openingTime" type="time"><small class="field-error" *ngIf="partnerFormErrors['openingTime']">{{ partnerFormErrors['openingTime'] }}</small></label>
+                <label class="form-field"><span>Closing Time</span><input [(ngModel)]="partnerApplication.closingTime" type="time"><small class="field-error" *ngIf="partnerFormErrors['closingTime']">{{ partnerFormErrors['closingTime'] }}</small></label>
+                <label class="form-field"><span>Preparation Time (minutes)</span><input [(ngModel)]="partnerApplication.preparationMinutes" type="number" min="1" max="360"><small class="field-error" *ngIf="partnerFormErrors['preparationMinutes']">{{ partnerFormErrors['preparationMinutes'] }}</small></label>
+                <label class="form-field"><span>Estimated Delivery Time (minutes)</span><input [(ngModel)]="partnerApplication.estimatedDeliveryMinutes" type="number" min="1" max="720"><small class="field-error" *ngIf="partnerFormErrors['estimatedDeliveryMinutes']">{{ partnerFormErrors['estimatedDeliveryMinutes'] }}</small></label>
+                <label class="form-field"><span>Standard Delivery Radius (km) <b>*</b></span><input [(ngModel)]="partnerApplication.serviceRadiusKm" type="number" min="0.5" max="100" step="0.5"><small class="field-error" *ngIf="partnerFormErrors['serviceRadiusKm']">{{ partnerFormErrors['serviceRadiusKm'] }}</small></label>
+                <label class="partner-toggle"><input [(ngModel)]="partnerApplication.extendedDeliveryAvailable" type="checkbox"><span>Extended Delivery Available</span></label>
+                <label class="form-field" *ngIf="partnerApplication.extendedDeliveryAvailable"><span>Extended Delivery Radius (km)</span><input [(ngModel)]="partnerApplication.extendedDeliveryRadiusKm" type="number" min="0.5" max="200" step="0.5"><small class="field-error" *ngIf="partnerFormErrors['extendedDeliveryRadiusKm']">{{ partnerFormErrors['extendedDeliveryRadiusKm'] }}</small></label>
+                <label class="form-field"><span>Minimum Order Value (QAR)</span><input [(ngModel)]="partnerApplication.minimumOrderValue" type="number" min="0" step="0.01"><small class="field-error" *ngIf="partnerFormErrors['minimumOrderValue']">{{ partnerFormErrors['minimumOrderValue'] }}</small></label>
+                <label class="form-field"><span>Maximum Order Value (QAR)</span><input [(ngModel)]="partnerApplication.maximumOrderValue" type="number" min="0" step="0.01"><small class="field-error" *ngIf="partnerFormErrors['maximumOrderValue']">{{ partnerFormErrors['maximumOrderValue'] }}</small></label>
+              </div>
+            </fieldset>
+
+            <fieldset class="partner-fieldset">
+              <legend>Delivery and commercial information</legend>
+              <div class="partner-fields">
+                <label class="form-field"><span>Delivery Managed by</span><select [(ngModel)]="partnerApplication.deliveryManagedBy"><option>Restaurant</option><option>Hotel</option></select></label>
+                <label class="form-field"><span>Delivery Fee Configuration (QAR)</span><input [(ngModel)]="partnerApplication.deliveryFee" type="number" min="0" step="0.01"><small>Subject to KABHI configuration and approval.</small><small class="field-error" *ngIf="partnerFormErrors['deliveryFee']">{{ partnerFormErrors['deliveryFee'] }}</small></label>
+                <label class="form-field"><span>Free Delivery Threshold (QAR)</span><input [(ngModel)]="partnerApplication.freeDeliveryThreshold" type="number" min="0" step="0.01"><small class="field-error" *ngIf="partnerFormErrors['freeDeliveryThreshold']">{{ partnerFormErrors['freeDeliveryThreshold'] }}</small></label>
+                <label class="form-field"><span>Currency</span><input value="QAR" readonly aria-readonly="true"></label>
+              </div>
+              <p class="partner-private-note">Delivery fee settings are not shown to customers until configured and approved. Customers see the applicable delivery fee and total before confirming an order.</p>
+            </fieldset>
+
+            <fieldset class="partner-fieldset partner-declarations">
+              <legend>Required declarations</legend>
+              <label><input [(ngModel)]="partnerApplication.declarations.authorized" type="checkbox"><span>I confirm that I am authorized to register this restaurant.</span></label><small class="field-error" *ngIf="partnerFormErrors['declaration_authorized']">{{ partnerFormErrors['declaration_authorized'] }}</small>
+              <label><input [(ngModel)]="partnerApplication.declarations.accurate" type="checkbox"><span>I confirm that the information submitted is accurate.</span></label><small class="field-error" *ngIf="partnerFormErrors['declaration_accurate']">{{ partnerFormErrors['declaration_accurate'] }}</small>
+              <label><input [(ngModel)]="partnerApplication.declarations.terms" type="checkbox"><span>I agree to the <a href="/terms/restaurant-partner" (click)="$event.preventDefault(); openLegalPage('/terms/restaurant-partner')">KABHI Restaurant Partner Terms and Conditions</a>.</span></label><small class="field-error" *ngIf="partnerFormErrors['declaration_terms']">{{ partnerFormErrors['declaration_terms'] }}</small>
+              <label><input [(ngModel)]="partnerApplication.declarations.approval" type="checkbox"><span>I acknowledge that registration does not guarantee approval or immediate visibility on KABHI.</span></label><small class="field-error" *ngIf="partnerFormErrors['declaration_approval']">{{ partnerFormErrors['declaration_approval'] }}</small>
+              <label><input [(ngModel)]="partnerApplication.declarations.adminReview" type="checkbox"><span>I understand that restaurant details and customer-facing menu changes may require KABHI Admin review and approval.</span></label><small class="field-error" *ngIf="partnerFormErrors['declaration_adminReview']">{{ partnerFormErrors['declaration_adminReview'] }}</small>
+              <div class="partner-legal-links"><a href="/privacy" (click)="$event.preventDefault(); openLegalPage('/privacy')">Privacy Policy</a><a href="/policies" (click)="$event.preventDefault(); openLegalPage('/policies')">Applicable platform policies</a></div>
+            </fieldset>
+            <div class="partner-form-actions"><span class="muted">Fields marked <b>*</b> are required.</span><button class="button button-dark" type="button" (click)="reviewPartnerApplication()">Review your information <span>→</span></button></div>
+          </div>
+
+          <div class="partner-review" *ngIf="partnerReviewMode">
+            <p class="partner-review-intro">Please check these details before sending your application to KABHI.</p>
+            <div class="partner-review-grid">
+              <div><span>Restaurant</span><strong>{{ partnerApplication.restaurantName }}</strong><small>{{ partnerApplication.restaurantType }} · {{ partnerApplication.primaryCuisine }}<span *ngIf="partnerApplication.additionalCuisines.length"> · {{ partnerApplication.additionalCuisines.join(', ') }}</span><span *ngIf="partnerApplication.description"> · {{ partnerApplication.description }}</span></small></div>
+              <div><span>Representative</span><strong>{{ partnerApplication.ownerName }}</strong><small>{{ partnerApplication.phone }} · WhatsApp {{ partnerApplication.whatsapp }}<span *ngIf="partnerApplication.email"> · {{ partnerApplication.email }}</span></small></div>
+              <div><span>Location</span><strong>{{ partnerApplication.address }}</strong><small>{{ partnerApplication.city }}, {{ partnerApplication.country }} · Zone {{ partnerApplication.zoneNumber || '—' }} · {{ partnerApplication.streetBuilding || 'Street / building not provided' }} · {{ partnerApplication.latitude | number:'1.5-5' }}, {{ partnerApplication.longitude | number:'1.5-5' }}</small></div>
+              <div><span>Operations</span><strong>{{ partnerApplication.openingTime || 'Hours not provided' }} – {{ partnerApplication.closingTime || 'Hours not provided' }}</strong><small>{{ partnerApplication.preparationMinutes }} min preparation · {{ partnerApplication.estimatedDeliveryMinutes }} min estimated delivery · {{ partnerApplication.serviceRadiusKm }} km standard radius</small></div>
+              <div><span>Delivery and order values</span><strong>{{ partnerApplication.deliveryManagedBy }} managed · {{ partnerApplication.currency }}</strong><small>{{ partnerApplication.extendedDeliveryAvailable ? 'Extended delivery: ' + partnerApplication.extendedDeliveryRadiusKm + ' km' : 'Standard delivery only' }} · Delivery fee request: {{ partnerApplication.deliveryFee === null ? 'Not provided' : money(partnerApplication.deliveryFee) }} · Free delivery threshold: {{ partnerApplication.freeDeliveryThreshold === null ? 'Not provided' : money(partnerApplication.freeDeliveryThreshold) }} · Minimum: {{ partnerApplication.minimumOrderValue === null ? 'Not provided' : money(partnerApplication.minimumOrderValue) }} · Maximum: {{ partnerApplication.maximumOrderValue === null ? 'Not provided' : money(partnerApplication.maximumOrderValue) }}</small></div>
+              <div><span>Declarations</span><strong>All required declarations accepted</strong><small>Terms version {{ partnerTermsVersion }} will be recorded with the submission timestamp.</small></div>
+            </div>
+            <div class="partner-form-actions"><button class="button button-quiet" type="button" (click)="editPartnerApplication()">← Back to edit</button><button class="button button-dark" type="button" [disabled]="loading" (click)="submitPartnerApplication()">{{ loading ? 'Submitting…' : 'Submit registration' }} <span>→</span></button></div>
+          </div>
+        </section>
+
+        <section class="partner-status-card" *ngIf="partnerRegistration">
+          <span class="eyebrow">REGISTRATION STATUS</span><h2>{{ partnerRegistration.correctionAllowed ? 'Action requested' : 'Application received' }}</h2>
+          <div class="partner-registration-id"><span>Registration ID</span><strong>{{ partnerRegistration.registrationId }}</strong></div>
+          <div class="partner-status-line"><span>Status</span><span class="order-status" [ngClass]="orderStatusClass(partnerRegistration.status)">{{ statusLabel(partnerRegistration.status) }}</span></div>
+          <p *ngIf="notice" class="partner-success-message">{{ notice }}</p>
+          <p *ngIf="partnerRegistration.status === 'REJECTED' && partnerRegistration.reviewReason" class="partner-correction-note"><strong>Review reason</strong><br>{{ partnerRegistration.reviewReason }}</p>
+          <p *ngIf="partnerRegistration.correctionAllowed" class="muted">Update the requested information and resubmit for verification.</p>
+          <p *ngIf="partnerRegistration.status === 'APPROVED'">KABHI has approved your registration. Use the secure account activation link sent by the KABHI Admin to create your restaurant account.</p>
+          <p *ngIf="partnerRegistration.status === 'SUSPENDED'">This restaurant registration is suspended. Contact KABHI for next steps.</p>
+          <button class="button button-quiet button-small" type="button" (click)="loadPartnerRegistrationStatus()">Refresh status ↻</button>
+        </section>
+      </div>
+    </section>
+
+    <section class="partner-page legal-page" *ngIf="view === 'legal'">
+      <div class="partner-form-card legal-card">
+        <button class="back-link" type="button" (click)="returnFromLegal()">← Back to registration</button>
+        <span class="eyebrow">KABHI PARTNER INFORMATION</span>
+        <ng-container [ngSwitch]="legalPage">
+          <div *ngSwitchCase="'terms'"><h1>Restaurant Partner Terms</h1><p>By submitting a registration, you confirm that you are authorized to represent the restaurant and that your submission is accurate. Submission is subject to verification and KABHI Admin approval; it does not guarantee acceptance or customer visibility.</p><p>Restaurants remain responsible for their kitchens, food preparation, delivery staff and fulfilment. KABHI provides restaurant discovery, location-based ordering, order management and WhatsApp communication. Restaurant and menu details may require Admin review. A restaurant becomes eligible for customer ordering only after required setup and menu approval, and when service status, menu availability and delivery coverage permit.</p><p>Any delivery fee and order total applicable to a customer must be displayed before order confirmation. Accepted version: {{ partnerTermsVersion }}.</p></div>
+          <div *ngSwitchCase="'privacy'"><h1>Privacy Policy</h1><p>KABHI collects the restaurant, representative, contact, address, map, operating and delivery details supplied in this registration to verify and administer partner applications. Terms acceptance and submission time are recorded for audit purposes.</p><p>Application information is available to authorized KABHI Admin users. Only approved and configured customer-facing restaurant information is made available to customers. Contact KABHI to request information about your application or its handling.</p></div>
+          <div *ngSwitchCase="'contact'"><h1>Contact KABHI</h1><p>For questions about a partner application, keep your Registration ID available. KABHI will contact the authorized representative using the WhatsApp number or email supplied in the registration when contact details are configured.</p><p>If your application requires correction, the Admin-provided reason and resubmission option will appear on your registration status page.</p></div>
+          <div *ngSwitchCase="'about'"><h1>About KABHI</h1><p>KABHI connects customers with local restaurants in Qatar through restaurant discovery, location-based ordering, order management and WhatsApp communication.</p><p>Restaurant partners continue to manage their own kitchens, food preparation, delivery staff and order fulfilment. KABHI keeps registration review, restaurant approval, menu approval and operating status separate.</p></div>
+          <div *ngSwitchDefault><h1>Platform Policies</h1><p>Partner applications, restaurant details and customer-facing menu changes are subject to KABHI Admin review. Approval of an application is separate from restaurant operating status. Restaurant registration alone never makes a restaurant customer-visible.</p><p>Restaurants manage food preparation, delivery staff and order fulfilment. Applicable delivery fees and final payable amounts must be visible to customers before they confirm orders.</p></div>
+        </ng-container>
+      </div>
+    </section>
+
+    <section class="content-section narrow-section activation-page" *ngIf="view === 'activateRestaurant'">
+      <div class="auth-card">
+        <span class="eyebrow">SECURE PARTNER ACTIVATION</span><h1>Create your restaurant account.</h1>
+        <p class="muted">This one-time link is valid for seven days. Set your login email and a password to continue your restaurant setup.</p>
+        <div class="form-field"><label>Account email</label><input [(ngModel)]="activationEmail" type="email" autocomplete="email"></div>
+        <div class="form-field"><label>Password</label><input [(ngModel)]="activationPassword" type="password" minlength="10" autocomplete="new-password" placeholder="At least 10 characters"></div>
+        <button class="button button-dark button-wide" [disabled]="loading || !activationToken" (click)="activateRestaurantAccount()">{{ loading ? 'Activating…' : 'Activate account' }} <span>→</span></button>
+      </div>
+    </section>
 
     <section class="hero" *ngIf="view === 'home'">
       <div class="hero-copy">
@@ -118,8 +264,8 @@
         <div><div class="section-heading compact"><div><span class="eyebrow">FROM THE KITCHEN</span><h2>Menu</h2></div></div>
           <div class="menu-list">
             <article class="menu-card" *ngFor="let item of menu">
-              <img *ngIf="item.imageData" class="menu-item-image" [src]="item.imageData" [alt]="item.name" loading="lazy">
-              <div class="menu-copy"><div class="menu-badges"><span *ngIf="item.bestSeller" class="dish-badge bestseller">BEST SELLER</span><span *ngIf="item.chefRecommended" class="dish-badge chef">CHEF'S PICK</span></div><h3>{{ item.name }}</h3><p>{{ item.description || item.category }}</p><strong>{{ money(item.price) }}</strong></div>
+              <img *ngIf="item.imageData || item.imageUrl" class="menu-item-image" [src]="item.imageData || item.imageUrl" [alt]="item.name" loading="lazy">
+              <div class="menu-copy"><div class="menu-badges"><span *ngIf="item.bestSeller" class="dish-badge bestseller">BEST SELLER</span><span *ngIf="item.chefRecommended" class="dish-badge chef">CHEF'S PICK</span></div><h3>{{ item.name }}</h3><p>{{ item.description || item.category }}</p><strong>{{ money(menuPrice(item)) }} <del *ngIf="item.discountPrice !== null && item.discountPrice !== undefined">{{ money(item.price) }}</del></strong><small *ngIf="item.foodType">{{ item.foodType === 'NON_VEGETARIAN' ? 'Non-Vegetarian' : (item.foodType | titlecase) }}</small><small *ngIf="item.customizationOptions">Options: {{ item.customizationOptions }}</small><small *ngIf="item.availabilityStart && item.availabilityEnd">Available {{ item.availabilityStart }}–{{ item.availabilityEnd }} Qatar time</small></div>
               <button class="add-button" [disabled]="item.availability !== 'AVAILABLE' || selectedRestaurant.availability !== 'OPEN'" (click)="addToCart(item)">{{ item.availability === 'AVAILABLE' ? '+ Add' : 'Unavailable' }}</button>
             </article>
           </div>
@@ -133,7 +279,7 @@
       <div class="checkout-grid">
         <div><span class="eyebrow">ALMOST THERE</span><h1>Your order.</h1><p class="muted">{{ selectedRestaurant?.name }} · Direct from the restaurant</p>
           <div class="cart-lines" *ngIf="cartItems.length; else emptyCart">
-            <div class="cart-line" *ngFor="let entry of cartItems"><div><strong>{{ entry.item.name }}</strong><span>{{ money(entry.item.price) }} each</span></div><div class="quantity-stepper"><button (click)="setQuantity(entry.item._id, entry.quantity - 1)">−</button><span>{{ entry.quantity }}</span><button (click)="setQuantity(entry.item._id, entry.quantity + 1)">+</button></div><strong>{{ money(entry.item.price * entry.quantity) }}</strong></div>
+            <div class="cart-line" *ngFor="let entry of cartItems"><div><strong>{{ entry.item.name }}</strong><span>{{ money(menuPrice(entry.item)) }} each</span></div><div class="quantity-stepper"><button (click)="setQuantity(entry.item._id, entry.quantity - 1)">−</button><span>{{ entry.quantity }}</span><button (click)="setQuantity(entry.item._id, entry.quantity + 1)">+</button></div><strong>{{ money(menuPrice(entry.item) * entry.quantity) }}</strong></div>
           </div>
           <ng-template #emptyCart><div class="empty-state"><h3>Your cart is empty</h3><button class="button button-dark" (click)="view = 'home'">Explore restaurants</button></div></ng-template>
         </div>
@@ -155,11 +301,19 @@
           <div class="checkout-location-card"><div><strong>Delivery pin</strong><span>{{ deliveryLocationLabel || 'Choose a delivery location first' }}</span></div><button class="button button-quiet button-small" (click)="openMapPicker('delivery')">{{ deliveryLatitude !== null ? 'Change pin' : 'Choose pin' }}</button></div>
           <div class="form-field"><label>Full delivery address</label><textarea [(ngModel)]="deliveryAddress" placeholder="Building, apartment, street, zone, and a nearby landmark" rows="3" required minlength="5"></textarea><small>We use your map pin to confirm free-delivery coverage. Add the exact building and unit details here.</small></div>
           <div class="delivery-coverage-warning" *ngIf="!isSelectedRestaurantInDeliveryRange && deliveryLatitude !== null">This restaurant's free-delivery area does not include your selected pin. Choose another restaurant or change your delivery location.</div>
-          <div class="form-field"><label>Promotion code <span class="optional">optional</span></label><input [(ngModel)]="promotionCode" placeholder="e.g. KABHI10"></div>
+          <div class="form-field"><label>Promotion code <span class="optional">optional</span></label><input [(ngModel)]="promotionCode" (ngModelChange)="invalidateOrderQuote()" placeholder="e.g. KABHI10"><button class="text-button" type="button" *ngIf="!orderQuote && !orderQuoteLoading" (click)="refreshOrderQuote()">Update order total</button></div>
           <div class="payment-note"><span>◉</span><div><strong>Pay restaurant directly</strong><small>Cash or direct payment on delivery</small></div></div>
-          <div class="summary-row"><span>Subtotal</span><strong>{{ money(subtotal) }}</strong></div><div class="summary-row free-delivery-total"><span>Delivery</span><strong>FREE</strong></div><div class="summary-row total-row"><span>Total</span><strong>{{ money(subtotal) }}</strong></div>
-          <button class="button button-accent button-wide" [disabled]="loading || !isCustomer || !cartItems.length || deliveryLatitude === null || deliveryLongitude === null || !isSelectedRestaurantInDeliveryRange" (click)="placeOrder()">{{ loading ? 'Working…' : isCustomer ? 'Place order' : 'Verify WhatsApp to continue' }} <span>→</span></button>
-          <p class="fine-print">Free delivery is available because your selected location is inside this restaurant's delivery radius. Tax is not charged by KABHI.</p>
+          <div class="quote-loading" *ngIf="orderQuoteLoading"><span class="global-loader-spinner"></span><span>Calculating your order total…</span></div>
+          <ng-container *ngIf="orderQuote as quote">
+            <div class="summary-row"><span>Subtotal</span><strong>{{ money(quote.subtotal, quote.currency) }}</strong></div>
+            <div class="summary-row" *ngIf="quote.discount"><span>Promotion discount</span><strong>−{{ money(quote.discount, quote.currency) }}</strong></div>
+            <div class="summary-row free-delivery-total"><span>Delivery</span><strong>{{ quote.deliveryFee ? money(quote.deliveryFee, quote.currency) : 'FREE' }}</strong></div>
+            <div class="summary-row" *ngIf="quote.serviceFee"><span>Service fee</span><strong>{{ money(quote.serviceFee, quote.currency) }}</strong></div>
+            <div class="summary-row total-row"><span>Final payable amount</span><strong>{{ money(quote.total, quote.currency) }}</strong></div>
+          </ng-container>
+          <p class="fine-print" *ngIf="!orderQuote && !orderQuoteLoading">Update the total to see the applicable delivery fee and final amount before confirming.</p>
+          <button class="button button-accent button-wide" [disabled]="loading || orderQuoteLoading || !orderQuote || !isCustomer || !cartItems.length || deliveryLatitude === null || deliveryLongitude === null || !isSelectedRestaurantInDeliveryRange" (click)="placeOrder()">{{ loading ? 'Working…' : isCustomer ? 'Place order' : 'Verify WhatsApp to continue' }} <span>→</span></button>
+          <p class="fine-print">The displayed total is calculated by KABHI using current menu prices and any valid promotion. Tax is not charged by KABHI.</p>
         </aside>
       </div>
     </section>
@@ -275,10 +429,62 @@
             <div class="pagination-controls" *ngIf="completedRestaurantOrdersTotalPages > 1"><button class="button button-quiet button-small" [disabled]="completedRestaurantOrdersPage <= 1 || completedRestaurantOrdersLoading" (click)="loadCompletedRestaurantOrders(completedRestaurantOrdersPage - 1)">Previous</button><span>Page {{ completedRestaurantOrdersPage }} of {{ completedRestaurantOrdersTotalPages }}</span><button class="button button-quiet button-small" [disabled]="completedRestaurantOrdersPage >= completedRestaurantOrdersTotalPages || completedRestaurantOrdersLoading" (click)="loadCompletedRestaurantOrders(completedRestaurantOrdersPage + 1)">Next</button></div>
           </ng-container>
         </div>
-        <div class="portal-panel"><div class="panel-heading"><div><span class="eyebrow">YOUR KITCHEN</span><h2>Menu availability</h2></div></div>
+        <div class="portal-panel"><div class="panel-heading"><div><span class="eyebrow">YOUR KITCHEN</span><h2>Menu availability</h2></div><button *ngIf="user?.role === 'RESTAURANT_OWNER' || user?.role === 'RESTAURANT_MANAGER'" class="button button-quiet button-small" (click)="bulkMenuOpen = !bulkMenuOpen">{{ bulkMenuOpen ? 'Close bulk upload' : 'Bulk Upload Menu' }}</button></div>
+          <section class="bulk-menu-panel" *ngIf="bulkMenuOpen">
+            <div class="bulk-menu-toolbar"><div><strong>Import a menu in one operation</strong><small>Upload up to 500 rows per CSV or Excel .xlsx file. Each item will follow KABHI's Admin menu-approval process.</small></div><button class="button button-quiet button-small" (click)="downloadMenuTemplate()">Download CSV template</button></div>
+            <div class="bulk-menu-file-controls">
+              <label class="button button-quiet button-small image-file-button">Choose CSV or Excel file<input type="file" accept=".csv,.xlsx,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" (change)="selectBulkMenuFile($event)"></label>
+              <span class="bulk-menu-filename">{{ bulkMenuFile?.name || 'No menu file selected' }}</span>
+              <button class="button button-accent button-small" [disabled]="!bulkMenuFile || bulkMenuPreviewLoading" (click)="previewBulkMenu()">{{ bulkMenuPreviewLoading ? 'Validating…' : 'Preview and validate' }}</button>
+            </div>
+            <p class="bulk-menu-help">Use the columns in the template. The restaurant is identified securely from your signed-in account. Availability windows use Qatar local time; leave both times blank for all-day availability. Use HTTPS image URLs or upload ZIP photos matched by item name.</p>
+            <div class="bulk-image-zip">
+              <strong>Upload multiple item photos</strong>
+              <label class="button button-quiet button-small image-file-button">Choose image ZIP<input type="file" accept=".zip,application/zip" (change)="selectBulkImageZip($event)"></label>
+              <span class="bulk-menu-filename">{{ bulkImageZipFile?.name || 'ZIP images up to 10 MB; each image up to 256 KB' }}</span>
+              <button class="button button-quiet button-small" [disabled]="!bulkImageZipFile || bulkImageUploading" (click)="uploadBulkImageZip()">{{ bulkImageUploading ? 'Uploading…' : 'Upload photos' }}</button>
+              <small *ngIf="bulkImageResult">{{ bulkImageResult }}</small>
+              <button class="button button-quiet button-small" *ngIf="bulkImageErrorReport" (click)="downloadBulkImageErrors()">Download image error report</button>
+            </div>
+            <div *ngIf="bulkMenuRows.length" class="bulk-menu-preview">
+              <div class="bulk-menu-counts"><strong>Preview · {{ bulkMenuRows.length }} rows</strong><span class="bulk-valid-count">{{ bulkMenuValidCount }} valid</span><span class="bulk-invalid-count">{{ bulkMenuInvalidCount }} invalid</span></div>
+              <div class="bulk-menu-strategy">
+                <label>Existing menu items
+                  <select [(ngModel)]="bulkMenuMode">
+                    <option value="ADD_NEW">Add New Items — skip existing matches</option>
+                    <option value="UPDATE_EXISTING">Update Existing Items and add new</option>
+                    <option value="REPLACE">Replace Entire Menu</option>
+                  </select>
+                </label>
+                <label class="bulk-replace-confirm" *ngIf="bulkMenuMode === 'REPLACE'"><input type="checkbox" [(ngModel)]="bulkMenuReplaceConfirmed"> I understand unmatched existing menu items will be deactivated.</label>
+                <button class="button button-accent button-small" [disabled]="bulkMenuImporting || !bulkMenuValidCount || (bulkMenuMode === 'REPLACE' && (bulkMenuInvalidCount > 0 || !bulkMenuReplaceConfirmed))" (click)="importBulkMenu()">{{ bulkMenuImporting ? 'Importing…' : 'Import valid items' }}</button>
+              </div>
+              <div class="bulk-menu-row" *ngFor="let row of bulkMenuRows; let rowIndex = index" [class.bulk-menu-row-invalid]="row.errors.length">
+                <div class="bulk-row-heading"><strong>Row {{ row.rowNumber }}</strong><span *ngIf="row.existingItemId">Matches existing item {{ row.existingItemName }} · {{ row.existingItemId }}</span><span *ngIf="!row.errors.length && !row.existingItemId">New item</span></div>
+                <div class="bulk-menu-fields">
+                  <label>Category<input [(ngModel)]="row.category" (ngModelChange)="validateBulkMenuRows()"></label>
+                  <label>Item Name<input [(ngModel)]="row.name" (ngModelChange)="validateBulkMenuRows()"></label>
+                  <label>Description<input [(ngModel)]="row.description" (ngModelChange)="validateBulkMenuRows()"></label>
+                  <label>Price (QAR)<input [(ngModel)]="row.price" (ngModelChange)="validateBulkMenuRows()" type="number" min="0" step="0.01"></label>
+                  <label>Availability Start (HH:MM)<input [(ngModel)]="row.availabilityStart" (ngModelChange)="validateBulkMenuRows()" placeholder="e.g. 09:00"></label>
+                  <label>Availability End (HH:MM)<input [(ngModel)]="row.availabilityEnd" (ngModelChange)="validateBulkMenuRows()" placeholder="e.g. 22:00"></label>
+                  <label>Image URL (Optional)<input [(ngModel)]="row.imageUrl" (ngModelChange)="validateBulkMenuRows()" type="url" placeholder="https://…"></label>
+                </div>
+                <ul class="bulk-row-errors" *ngIf="row.errors.length"><li *ngFor="let rowError of row.errors">{{ rowError }}</li></ul>
+              </div>
+            </div>
+            <div class="bulk-menu-result" *ngIf="bulkMenuSummary">
+              <strong>Upload complete</strong>
+              <span>Total rows processed: {{ bulkMenuSummary.totalRows }}</span>
+              <span>Successfully imported: {{ bulkMenuSummary.imported }}</span>
+              <span>Updated items: {{ bulkMenuSummary.updated }}</span>
+              <span>Failed rows: {{ bulkMenuSummary.failed }}</span>
+              <button class="button button-quiet button-small" *ngIf="bulkMenuErrorReport" (click)="downloadBulkMenuErrors()">Download error report</button>
+            </div>
+          </section>
           <div class="availability-row menu-management-row" *ngFor="let item of restaurantMenu">
-            <img *ngIf="item.imageData" class="menu-management-image" [src]="item.imageData" [alt]="item.name">
-            <div><strong>{{ item.name }}</strong><small>{{ money(item.price) }} · {{ item.category }}</small><label class="image-file-button">Choose photo<input type="file" accept="image/jpeg,image/png,image/webp" (change)="chooseMenuImage(item._id, $event)"></label><button class="text-button image-action" *ngIf="menuImageDrafts[item._id] !== undefined" (click)="saveMenuImage(item)">Save photo</button><button class="text-button image-action" *ngIf="item.imageData && menuImageDrafts[item._id] === undefined" (click)="removeMenuImage(item)">Remove photo</button></div>
+            <img *ngIf="item.imageData || item.imageUrl" class="menu-management-image" [src]="item.imageData || item.imageUrl" [alt]="item.name">
+            <div><strong>{{ item.name }}</strong><small>{{ money(menuPrice(item)) }}{{ item.discountPrice !== null && item.discountPrice !== undefined ? ' (regular ' + money(item.price) + ')' : '' }} · {{ item.category }}</small><small *ngIf="item.availabilityStart && item.availabilityEnd">Scheduled {{ item.availabilityStart }}–{{ item.availabilityEnd }} Qatar time</small><small *ngIf="item.foodType">{{ item.foodType === 'NON_VEGETARIAN' ? 'Non-Vegetarian' : (item.foodType | titlecase) }}</small><small class="menu-review-label" *ngIf="item.approvalStatus === 'PENDING_REVIEW'">Pending Admin approval — hidden from customers</small><small class="inactive-item-label" *ngIf="item.approvalStatus === 'REJECTED'">Rejected — hidden from customers</small><label class="image-file-button">Choose photo<input type="file" accept="image/jpeg,image/png,image/webp" (change)="chooseMenuImage(item._id, $event)"></label><button class="text-button image-action" *ngIf="menuImageDrafts[item._id] !== undefined" (click)="saveMenuImage(item)">Save photo</button><button class="text-button image-action" *ngIf="item.imageData && menuImageDrafts[item._id] === undefined" (click)="removeMenuImage(item)">Remove photo</button></div>
             <select [ngModel]="item.availability" (ngModelChange)="changeItemAvailability(item, $event)"><option value="AVAILABLE">Available</option><option value="UNAVAILABLE">Unavailable</option><option value="TEMPORARILY_UNAVAILABLE">Temporarily unavailable</option></select>
           </div>
           <div class="add-menu-form"><strong>Add an item</strong><input [(ngModel)]="newItemName" placeholder="Item name"><input [(ngModel)]="newItemCategory" placeholder="Category"><input [(ngModel)]="newItemPrice" type="number" min="0" placeholder="Price (QAR)"><input [(ngModel)]="newItemDescription" placeholder="Description"><label class="image-file-button">Choose item photo<input type="file" accept="image/jpeg,image/png,image/webp" (change)="chooseNewItemImage($event)"></label><img *ngIf="newItemImageData" class="menu-management-image new-item-image" [src]="newItemImageData" alt="New item photo preview"><button class="button button-accent" (click)="addMenuItem()">Add to menu</button></div>
@@ -290,6 +496,46 @@
     <section class="content-section portal admin-portal" *ngIf="view === 'adminPortal'">
       <div class="portal-heading"><div><span class="eyebrow">KABHI ADMIN · LIVE DATABASE</span><h1>Platform overview.</h1></div><button class="button button-dark button-small" (click)="loadAdmin()">Refresh ↻</button></div>
       <div class="metrics-grid"><div class="metric-card"><span>Customers</span><strong>{{ metrics['customers'] || 0 }}</strong></div><div class="metric-card"><span>Approved restaurants</span><strong>{{ metrics['approvedRestaurants'] || 0 }}</strong></div><div class="metric-card"><span>Pending review</span><strong>{{ metrics['pendingRestaurants'] || 0 }}</strong></div><div class="metric-card"><span>Orders today</span><strong>{{ metrics['ordersToday'] || 0 }}</strong></div><div class="metric-card"><span>Completed orders</span><strong>{{ metrics['completedOrders'] || 0 }}</strong></div><div class="metric-card"><span>Rejected / timed out</span><strong>{{ metrics['rejectedOrders'] || 0 }}</strong></div><div class="metric-card"><span>Gross order value</span><strong>{{ money(metrics['grossOrderValue'] || 0) }}</strong></div><div class="metric-card"><span>Recorded commission</span><strong>{{ money(metrics['commission'] || 0) }}</strong></div><div class="metric-card"><span>Active promotions</span><strong>{{ metrics['activePromotions'] || 0 }}</strong></div><div class="metric-card"><span>Active sponsored banners</span><strong>{{ metrics['activeAdvertisements'] || 0 }}</strong></div><div class="metric-card"><span>Recorded banner impressions</span><strong>{{ metrics['advertisementImpressions'] || 0 }}</strong></div></div>
+      <div class="portal-panel wide-panel partner-admin-settings">
+        <div class="panel-heading"><div><span class="eyebrow">BRAND IDENTITY</span><h2>KABHI logo</h2></div></div>
+        <p class="muted">The logo is used across the customer site, partner registration, sign-in and dashboards. Clear it to use the KABHI text fallback.</p>
+        <div class="partner-brand-controls">
+          <img *ngIf="brandLogoDraft ?? brandLogoData; else adminBrandFallback" class="brand-admin-preview" [src]="brandLogoDraft ?? brandLogoData" alt="KABHI logo preview">
+          <ng-template #adminBrandFallback><span class="brand-mark">K</span><strong>KABHI</strong></ng-template>
+          <label class="button button-quiet button-small image-file-button">Choose logo<input type="file" accept="image/jpeg,image/png,image/webp" (change)="chooseBrandLogo($event)"></label>
+          <button class="button button-accent button-small" *ngIf="brandLogoDraft !== null" (click)="saveBrandLogo()">Save logo</button>
+          <button class="button button-quiet button-small" *ngIf="brandLogoData" (click)="removeBrandLogo()">Restore text logo</button>
+        </div>
+      </div>
+      <div class="portal-panel wide-panel partner-registration-admin">
+        <div class="panel-heading"><div><span class="eyebrow">PARTNER ONBOARDING</span><h2>Restaurant registrations <span class="menu-count">{{ adminPartnerRegistrations.length }}</span></h2></div><button class="text-button" (click)="loadAdminPartnerRegistrations()">Refresh ↻</button></div>
+        <p class="partner-private-note">Delivery fee and free-delivery threshold values submitted here are requests only. They are not applied to customer orders until KABHI configures and approves them.</p>
+        <div class="activation-link-callout" *ngIf="adminActivationUrl"><strong>Secure account activation link · expires in 7 days</strong><a [href]="adminActivationUrl">{{ adminActivationUrl }}</a><small>Send this one-time link to the approved partner using your configured secure contact channel.</small></div>
+        <article class="partner-admin-card" *ngFor="let registration of adminPartnerRegistrations">
+          <div class="partner-admin-heading"><div><span class="eyebrow">{{ registration.registrationId }}</span><h3>{{ registration.details?.restaurantName }}</h3><p>{{ registration.details?.restaurantType }} · {{ registration.details?.primaryCuisine }} · Submitted {{ registration.createdAt | date:'medium' }}</p></div><span class="order-status" [ngClass]="orderStatusClass(registration.status)">{{ statusLabel(registration.status) }}</span></div>
+          <div class="partner-admin-details">
+            <span><strong>Representative</strong>{{ registration.details?.ownerName }} · {{ registration.details?.phone }}</span>
+            <span><strong>WhatsApp / Email</strong>{{ registration.details?.whatsapp }} · {{ registration.details?.email || 'No email supplied' }}</span>
+            <span><strong>Address</strong>{{ registration.details?.address }}, {{ registration.details?.city }} · Zone {{ registration.details?.zoneNumber || '—' }}</span>
+            <span><strong>Location</strong>{{ registration.details?.latitude | number:'1.5-5' }}, {{ registration.details?.longitude | number:'1.5-5' }} · {{ registration.details?.serviceRadiusKm }} km radius</span>
+            <span><strong>Operating setup</strong>{{ registration.details?.openingTime || '—' }}–{{ registration.details?.closingTime || '—' }} · {{ registration.details?.preparationMinutes }} min preparation · {{ registration.details?.estimatedDeliveryMinutes }} min delivery · {{ registration.details?.description || 'No description supplied' }}</span>
+            <span><strong>Commercial request</strong>Delivery managed by {{ registration.details?.deliveryManagedBy }} · Fee {{ registration.details?.deliveryFee === null ? 'not supplied' : money(registration.details?.deliveryFee || 0) }} · Free delivery threshold {{ registration.details?.freeDeliveryThreshold === null ? 'not supplied' : money(registration.details?.freeDeliveryThreshold || 0) }} · Min {{ registration.details?.minimumOrderValue === null ? 'not supplied' : money(registration.details?.minimumOrderValue || 0) }} · Max {{ registration.details?.maximumOrderValue === null ? 'not supplied' : money(registration.details?.maximumOrderValue || 0) }}</span>
+            <span><strong>Terms</strong>Version {{ registration.termsVersion }} accepted {{ registration.termsAcceptedAt | date:'medium' }}</span>
+          </div>
+          <div class="partner-admin-images"><img *ngIf="registration.details?.logoImageData" [src]="registration.details.logoImageData" alt="Submitted restaurant logo"><img *ngIf="registration.details?.coverImageData" [src]="registration.details.coverImageData" alt="Submitted restaurant cover"></div>
+          <div class="partner-review-reason" *ngIf="registration.reviewReason"><strong>Review reason / requested correction</strong><p>{{ registration.reviewReason }}</p></div>
+          <label class="form-field partner-review-reason-field" *ngIf="registration.status === 'UNDER_REVIEW' || registration.status === 'PENDING_VERIFICATION' || registration.status === 'REJECTED'"><span>{{ registration.status === 'REJECTED' ? 'Rejection / correction reason' : 'Reason (required for rejection or changes)' }}</span><textarea [(ngModel)]="partnerReviewReasons[registration.registrationId]" rows="2" maxlength="1000" placeholder="Explain what needs to be corrected or why the application is rejected."></textarea></label>
+          <div class="order-actions">
+            <button class="button button-quiet button-small" *ngIf="registration.status === 'PENDING_VERIFICATION' && !registration.correctionAllowed" (click)="reviewPartnerRegistration(registration, 'UNDER_REVIEW')">Start review</button>
+            <button class="button button-accent button-small" *ngIf="registration.status === 'UNDER_REVIEW'" (click)="reviewPartnerRegistration(registration, 'APPROVED')">Approve &amp; create activation link</button>
+            <button class="button button-outline-danger button-small" *ngIf="registration.status === 'UNDER_REVIEW' || (registration.status === 'PENDING_VERIFICATION' && !registration.correctionAllowed)" [disabled]="(partnerReviewReasons[registration.registrationId] || '').trim().length < 5" (click)="reviewPartnerRegistration(registration, 'REJECTED')">Reject</button>
+            <button class="button button-quiet button-small" *ngIf="registration.status === 'UNDER_REVIEW' || registration.status === 'REJECTED'" [disabled]="(partnerReviewReasons[registration.registrationId] || '').trim().length < 5" (click)="reviewPartnerRegistration(registration, 'REQUEST_CHANGES')">Request changes</button>
+            <button class="button button-outline-danger button-small" *ngIf="registration.status === 'APPROVED'" (click)="reviewPartnerRegistration(registration, 'SUSPENDED')">Suspend partner</button>
+            <span class="muted" *ngIf="registration.status === 'APPROVED'">Registration approval is separate from restaurant setup, menu approval and operating status.</span>
+          </div>
+        </article>
+        <p class="muted" *ngIf="!adminPartnerRegistrations.length">No partner registration requests have been submitted.</p>
+      </div>
       <div class="restaurant-management-entry">
         <div><span class="eyebrow">RESTAURANT MANAGEMENT</span><strong>Manage every restaurant and menu from one place.</strong></div>
         <button class="button button-accent" (click)="openAdminRestaurantList()">Open restaurant directory <span>→</span></button>
@@ -385,7 +631,7 @@
           <div class="admin-menu-editor">
             <article class="admin-menu-item" *ngFor="let item of adminMenu" [class.admin-menu-inactive]="item.active === false">
               <img *ngIf="adminMenuImageDrafts[item._id] || item.imageData; else adminMenuPlaceholder" class="menu-management-image" [src]="adminMenuImageDrafts[item._id] || item.imageData" [alt]="item.name"><ng-template #adminMenuPlaceholder><span class="menu-management-image menu-image-placeholder">Dish</span></ng-template>
-              <div class="admin-menu-item-fields"><strong *ngIf="item.active === false" class="inactive-item-label">Inactive — hidden from customers</strong><label>Item name<input [(ngModel)]="item.name" aria-label="Menu item name"></label><label>Category<input [(ngModel)]="item.category" aria-label="Menu item category"></label><label>Price (QAR)<input [(ngModel)]="item.price" type="number" min="0.01" step="0.01" aria-label="Menu item price"></label><label>Description<input [(ngModel)]="item.description" aria-label="Menu item description"></label><label>Availability<select [(ngModel)]="item.availability"><option value="AVAILABLE">Available</option><option value="UNAVAILABLE">Unavailable</option><option value="TEMPORARILY_UNAVAILABLE">Temporarily unavailable</option></select></label><label class="image-file-button button button-quiet button-small">Choose photo<input type="file" accept="image/jpeg,image/png,image/webp" (change)="chooseAdminMenuImage(item._id, $event)"></label><button class="button button-accent button-small" (click)="saveAdminMenuItem(item)">Save item</button><button class="text-button" *ngIf="item.imageData" (click)="removeAdminMenuImage(item)">Remove photo</button><button class="button button-quiet button-small" *ngIf="item.active === false" (click)="reactivateAdminMenuItem(item)">Restore item</button><button class="button button-outline-danger button-small" *ngIf="item.active !== false" (click)="removeAdminMenuItem(item)">Deactivate</button></div>
+              <div class="admin-menu-item-fields"><strong *ngIf="item.active === false" class="inactive-item-label">Inactive — hidden from customers</strong><strong *ngIf="item.approvalStatus === 'PENDING_REVIEW'" class="menu-review-label">Pending Admin approval</strong><strong *ngIf="item.approvalStatus === 'REJECTED'" class="inactive-item-label">Rejected — hidden from customers</strong><label>Item name<input [(ngModel)]="item.name" aria-label="Menu item name"></label><label>Category<input [(ngModel)]="item.category" aria-label="Menu item category"></label><label>Price (QAR)<input [(ngModel)]="item.price" type="number" min="0.01" step="0.01" aria-label="Menu item price"></label><label>Description<input [(ngModel)]="item.description" aria-label="Menu item description"></label><label>Availability<select [(ngModel)]="item.availability"><option value="AVAILABLE">Available</option><option value="UNAVAILABLE">Unavailable</option><option value="TEMPORARILY_UNAVAILABLE">Temporarily unavailable</option></select></label><label class="image-file-button button button-quiet button-small">Choose photo<input type="file" accept="image/jpeg,image/png,image/webp" (change)="chooseAdminMenuImage(item._id, $event)"></label><button class="button button-accent button-small" (click)="saveAdminMenuItem(item)">Save item</button><button class="button button-accent button-small" *ngIf="item.approvalStatus !== 'APPROVED'" (click)="reviewAdminMenuItem(item, 'APPROVED')">Approve menu item</button><button class="button button-quiet button-small" *ngIf="item.approvalStatus === 'PENDING_REVIEW'" (click)="reviewAdminMenuItem(item, 'REJECTED')">Reject item</button><button class="text-button" *ngIf="item.imageData" (click)="removeAdminMenuImage(item)">Remove photo</button><button class="button button-quiet button-small" *ngIf="item.active === false" (click)="reactivateAdminMenuItem(item)">Restore item</button><button class="button button-outline-danger button-small" *ngIf="item.active !== false" (click)="removeAdminMenuItem(item)">Deactivate</button></div>
             </article>
             <div class="menu-empty-state" *ngIf="!adminMenu.length"><strong>No menu items yet</strong><span>Add your restaurant's first item below.</span></div>
           </div>
@@ -456,5 +702,5 @@
       <div class="map-modal-actions"><button class="button button-quiet" (click)="closeMapPicker()">Cancel</button><button class="button button-dark" [disabled]="!mapSelection || mapLoading || !!mapError" (click)="confirmMapSelection()">Use this location</button></div>
     </section>
   </div>
-  <footer class="footer"><a class="brand" href="/" (click)="$event.preventDefault(); navigateHome()"><span class="brand-mark">K</span><span>KABHI</span></a><span>Good food, from Qatar's own kitchens.</span><span class="footer-currency">QATAR · QAR</span></footer>
+  <footer class="footer"><a class="brand" href="/" (click)="$event.preventDefault(); navigateHome()"><img *ngIf="brandLogoData; else footerTextBrand" class="brand-logo" [src]="brandLogoData" alt="KABHI"><ng-template #footerTextBrand><span class="brand-mark">K</span><span>KABHI</span></ng-template></a><span>Good food, from Qatar's own kitchens.</span><nav class="footer-links"><a href="/about" (click)="$event.preventDefault(); openLegalPage('/about')">About KABHI</a><a href="/contact" (click)="$event.preventDefault(); openLegalPage('/contact')">Contact Us</a><a href="/terms/restaurant-partner" (click)="$event.preventDefault(); openLegalPage('/terms/restaurant-partner')">Terms</a><a href="/privacy" (click)="$event.preventDefault(); openLegalPage('/privacy')">Privacy</a><a href="/policies" (click)="$event.preventDefault(); openLegalPage('/policies')">Platform policies</a></nav><span class="footer-currency">QATAR · QAR</span></footer>
 </div>
