@@ -248,6 +248,12 @@
             <div class="restaurant-title"><h3>{{ restaurant.name }}</h3><span class="rating" *ngIf="restaurant.ratingCount">★ {{ restaurant.ratingAverage | number:'1.1-1' }}</span></div>
             <p>{{ restaurant.cuisine.join(' · ') || restaurant.category }}</p>
             <div class="restaurant-meta"><span>◷ {{ restaurant.preparationMinutes }}–{{ restaurant.preparationMinutes + 10 }} min</span><span *ngIf="restaurant.distanceKm !== null && restaurant.distanceKm !== undefined">· {{ restaurant.distanceKm }} km away</span></div>
+            <div class="restaurant-phone-control">
+              <button class="restaurant-phone-button" type="button" [attr.aria-expanded]="expandedRestaurantPhoneId === restaurant._id" (click)="toggleRestaurantPhone($event, restaurant)">
+                <span aria-hidden="true">☎</span>{{ expandedRestaurantPhoneId === restaurant._id ? (restaurant.phone || 'Number unavailable') : 'Show phone number' }}
+              </button>
+              <button class="restaurant-phone-login" type="button" *ngIf="expandedRestaurantPhoneId === restaurant._id && !user" (click)="$event.stopPropagation(); openLogin('CUSTOMER')">Log in to see the complete number</button>
+            </div>
             <div class="restaurant-delivery-badge" *ngIf="deliveryLatitude !== null && restaurant.serviceRadiusKm">✓ Free delivery within {{ restaurant.serviceRadiusKm }} km</div>
             <div class="restaurant-location-prompt" *ngIf="deliveryLatitude === null">Choose a location to check free delivery</div>
           </div>
@@ -323,11 +329,21 @@
       </div>
     </section>
 
-    <section class="content-section narrow-section" *ngIf="view === 'track'">
-      <span class="eyebrow">YOUR FOOD, ON ITS WAY</span><h1>Track an order.</h1>
-      <div class="track-form"><div class="form-field"><label>Order reference</label><input [(ngModel)]="trackReference" placeholder="KAB-20261008-ABC123"></div><div class="form-field" *ngIf="!isCustomer"><label>Checkout phone number</label><input [(ngModel)]="trackPhone" placeholder="+974 5XXX XXXX"></div><div class="form-field signed-track-note" *ngIf="isCustomer"><label>Secure account lookup</label><span>We'll find orders linked to your signed-in account.</span></div><button class="button button-dark" (click)="trackOrder()">Find order</button></div>
+    <section class="content-section narrow-section" *ngIf="view === 'track' || view === 'confirmation'">
+      <ng-container *ngIf="view === 'confirmation'; else trackOrderHeading"><span class="eyebrow">ORDER CONFIRMATION</span><h1>Your order is placed.</h1><p class="muted">Your order is confirmed by KABHI and is awaiting the restaurant's response.</p></ng-container>
+      <ng-template #trackOrderHeading><span class="eyebrow">YOUR FOOD, ON ITS WAY</span><h1>Track an order.</h1></ng-template>
+      <div class="track-form" *ngIf="view === 'track'"><div class="form-field"><label>Order reference</label><input [(ngModel)]="trackReference" placeholder="KAB-20261008-ABC123"></div><div class="form-field" *ngIf="!isCustomer"><label>Checkout phone number</label><input [(ngModel)]="trackPhone" placeholder="+974 5XXX XXXX"></div><div class="form-field signed-track-note" *ngIf="isCustomer"><label>Secure account lookup</label><span>We'll find orders linked to your signed-in account.</span></div><button class="button button-dark" (click)="trackOrder()">Find order</button></div>
       <article class="order-track-card" *ngIf="trackedOrder">
-        <div class="track-top"><div><span class="eyebrow">{{ trackedOrder.reference }}</span><h2>{{ trackedOrder.restaurantName }}</h2><p>{{ trackedOrder.createdAt | date:'medium' }}</p></div><span class="order-status" [ngClass]="orderStatusClass(trackedOrder.status)">{{ statusLabel(trackedOrder.status) }}</span></div>
+        <div class="track-top"><div><span class="eyebrow">Order ID: #{{ trackedOrder.reference }}</span><h2>{{ trackedOrder.restaurantName }}</h2><p>{{ trackedOrder.createdAt | date:'medium' }}</p></div><span class="order-status" [ngClass]="orderStatusClass(trackedOrder.status)">{{ statusLabel(trackedOrder.status) }}</span></div>
+        <section class="restaurant-contact-card" *ngIf="trackedOrder.restaurant as orderRestaurant">
+          <span class="eyebrow">RESTAURANT CONTACT</span>
+          <div class="restaurant-contact-detail"><strong>Restaurant Address</strong><span>{{ orderRestaurant.address || 'Address unavailable' }}</span></div>
+          <div class="restaurant-contact-detail"><strong>Contact Number</strong><span>{{ orderRestaurant.phone || 'Number unavailable' }}</span></div>
+          <div class="restaurant-contact-actions">
+            <a class="button button-dark" *ngIf="orderRestaurant.phone" [href]="restaurantPhoneLink(orderRestaurant.phone)">📞 Call Restaurant</a>
+            <a class="button button-accent" [href]="restaurantDirectionsUrl(orderRestaurant)" target="_blank" rel="noopener noreferrer">📍 Get Directions</a>
+          </div>
+        </section>
         <div class="timeline"><div class="timeline-item" *ngFor="let step of trackedOrder.statusHistory"><span class="timeline-dot"></span><div><strong>{{ statusLabel(step.status) }}</strong><small>{{ step.createdAt | date:'short' }}</small></div></div></div>
         <div class="order-detail-row" *ngFor="let item of trackedOrder.items"><span>{{ item.quantity }} × {{ item.name }}</span><strong>{{ money(item.lineTotal, trackedOrder.currency) }}</strong></div>
         <div class="order-detail-row"><span>Subtotal</span><strong>{{ money(trackedOrder.subtotal, trackedOrder.currency) }}</strong></div>
@@ -336,7 +352,7 @@
         <div class="order-detail-row" *ngIf="trackedOrder.adminFee"><span>Platform fee</span><strong>{{ money(trackedOrder.adminFee, trackedOrder.currency) }}</strong></div>
         <div class="order-detail-row" *ngIf="trackedOrder.tax"><span>Tax</span><strong>{{ money(trackedOrder.tax, trackedOrder.currency) }}</strong></div>
         <div class="order-detail-row total-row"><span>Total · {{ trackedOrder.currency }}</span><strong>{{ money(trackedOrder.total, trackedOrder.currency) }}</strong></div>
-        <p class="delivery-note">Delivery is managed by the restaurant. Contact them directly if they have confirmed their contact details with you.</p>
+        <p class="delivery-note">The order status updates as the restaurant responds. Your restaurant contact details are available here whenever you need them.</p>
         <button class="button button-outline-danger cancel-button" *ngIf="trackedOrder.status === 'RESTAURANT_PENDING'" (click)="cancelTrackedOrder()">Cancel order</button>
       </article>
     </section>
