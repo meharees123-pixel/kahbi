@@ -96,11 +96,20 @@ interface OrderItem {
   lineTotal: number;
 }
 
+interface OrderRestaurant {
+  name: string;
+  address: string;
+  phone?: string;
+  latitude?: number | null;
+  longitude?: number | null;
+}
+
 interface Order {
   _id: string;
   reference: string;
   restaurantId: string;
   restaurantName: string;
+  restaurant?: OrderRestaurant | null;
   guest: { name: string; phone: string };
   items: OrderItem[];
   address: string;
@@ -303,6 +312,7 @@ export class AppComponent implements OnInit {
   loginPortal: LoginPortal = 'CUSTOMER';
   user: User | null = null;
   restaurants: Restaurant[] = [];
+  expandedRestaurantPhoneId = '';
   menu: MenuItem[] = [];
   selectedRestaurant: Restaurant | null = null;
   promotions: Promotion[] = [];
@@ -1115,7 +1125,7 @@ export class AppComponent implements OnInit {
       query.set('lat', String(this.deliveryLatitude));
       query.set('lng', String(this.deliveryLongitude));
     }
-    this.http.get<{ restaurants: Restaurant[]; promotions: Promotion[]; advertisements: Advertisement[] }>(`${this.api}/restaurants?${query.toString()}`).subscribe({
+    this.http.get<{ restaurants: Restaurant[]; promotions: Promotion[]; advertisements: Advertisement[] }>(`${this.api}/restaurants?${query.toString()}`, { headers: this.headers() }).subscribe({
       next: (data) => {
         this.restaurants = data.restaurants;
         this.promotions = data.promotions;
@@ -1510,7 +1520,7 @@ export class AppComponent implements OnInit {
         this.trackedOrder = order;
         this.trackReference = order.reference;
         this.trackPhone = this.isCustomer ? this.user?.phone || '' : this.guestPhone;
-        this.view = 'track';
+        this.view = 'confirmation';
         this.notice = `Order ${order.reference} placed successfully. Restaurant notifications are in demo mode.`;
       },
       error: (error: { status?: number; error?: { error?: string; termsVersion?: string } }) => {
@@ -1550,6 +1560,23 @@ export class AppComponent implements OnInit {
       },
       error: (error) => this.showError(error)
     });
+  }
+
+  toggleRestaurantPhone(event: MouseEvent, restaurant: Restaurant): void {
+    event.stopPropagation();
+    this.expandedRestaurantPhoneId = this.expandedRestaurantPhoneId === restaurant._id ? '' : restaurant._id;
+  }
+
+  restaurantDirectionsUrl(restaurant: OrderRestaurant): string {
+    const destination = restaurant.latitude !== null && restaurant.latitude !== undefined &&
+      restaurant.longitude !== null && restaurant.longitude !== undefined
+      ? `${restaurant.latitude},${restaurant.longitude}`
+      : restaurant.address;
+    return `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(destination)}`;
+  }
+
+  restaurantPhoneLink(phone: string): string {
+    return `tel:${phone.replace(/[^\d+]/g, '')}`;
   }
 
   cancelTrackedOrder(): void {

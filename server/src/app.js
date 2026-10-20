@@ -123,6 +123,53 @@ function publicUser(user) {
   };
 }
 
+function maskPhone(phone) {
+  const normalized = String(phone || "").trim();
+  const digits = normalized.replace(/\D/g, "");
+  if (!digits) return "";
+  const countryCode = normalized.startsWith("+") ? `+${digits.slice(0, Math.min(3, digits.length - 2))}` : "";
+  const nationalNumber = countryCode ? digits.slice(countryCode.length - 1) : digits;
+  return `${countryCode}${countryCode ? " " : ""}${"•".repeat(Math.max(4, nationalNumber.length - 2))}${nationalNumber.slice(-2)}`;
+}
+
+async function ordersWithRestaurantDetails(orders) {
+  if (!orders.length) return [];
+  const restaurantIds = [...new Set(orders.map((order) => String(order.restaurantId)))];
+  const [restaurants, registrations] = await Promise.all([
+    Restaurant.find({ _id: { $in: restaurantIds } }).select("name address phone latitude longitude").lean(),
+    RestaurantRegistration.find({ restaurantId: { $in: restaurantIds } }).select("restaurantId details").lean()
+  ]);
+  const restaurantById = new Map(restaurants.map((restaurant) => [String(restaurant._id), restaurant]));
+  const registrationByRestaurantId = new Map(registrations.map((registration) => [String(registration.restaurantId), registration]));
+  return orders.map((order) => {
+    const restaurant = restaurantById.get(String(order.restaurantId));
+    const registeredDetails = registrationByRestaurantId.get(String(order.restaurantId))?.details;
+    const addressParts = restaurant ? [
+      restaurant.address,
+      registeredDetails?.streetBuilding,
+      registeredDetails?.zoneNumber ? `Zone ${registeredDetails.zoneNumber}` : "",
+      registeredDetails?.city,
+      registeredDetails?.country
+    ].filter(Boolean) : [];
+    const completeAddress = [...new Map(addressParts.map((part) => [String(part).trim().toLowerCase(), String(part).trim()])).values()]
+      .join(", ");
+    return {
+      ...(typeof order.toObject === "function" ? order.toObject() : order),
+      restaurant: restaurant ? {
+        name: restaurant.name,
+        address: completeAddress,
+        phone: restaurant.phone,
+        latitude: restaurant.latitude,
+        longitude: restaurant.longitude
+      } : null
+    };
+  });
+}
+
+async function orderWithRestaurantDetails(order) {
+  return (await ordersWithRestaurantDetails([order]))[0];
+}
+
 function issueToken(user, authMethod = "password") {
   return jwt.sign({ sub: String(user._id), role: user.role, amr: authMethod }, secret, { expiresIn: "8h", issuer: "kahbi-api" });
 }
@@ -557,7 +604,7 @@ app.post("/api/auth/login", asyncRoute(async (req, res) => {
 
 app.get("/api/auth/me", auth(), (req, res) => res.json({ user: publicUser(req.user) }));
 
-app.get("/api/restaurants", asyncRoute(async (req, res) => {
+app.get("/api/restaurants", auth(false), asyncRoute(async (req, res) => {
   const query = { status: "APPROVED" };
   if (req.query.search) {
     const search = String(req.query.search).slice(0, 80);
@@ -578,7 +625,7 @@ app.get("/api/restaurants", asyncRoute(async (req, res) => {
   }
   if (req.query.open === "true") query.availability = "OPEN";
   const restaurants = await Restaurant.find(query)
-    .select("name imageData hotelName cuisine description address latitude longitude serviceRadiusKm preparationMinutes minOrder maxOrder status availability category ratingAverage ratingCount demo partnerRegistrationId")
+    .select("name imageData hotelName cuisine description address phone latitude longitude serviceRadiusKm preparationMinutes minOrder maxOrder status availability category ratingAverage ratingCount demo partnerRegistrationId")
     .sort({ demo: -1, name: 1 })
     .limit(50)
     .lean();
@@ -629,7 +676,14 @@ app.get("/api/restaurants", asyncRoute(async (req, res) => {
     }
     const ratingSummary = ratingSummaries.get(String(restaurant._id)) || { average: 0, count: 0 };
     const { partnerRegistrationId, ...publicRestaurant } = restaurant;
-    return { ...publicRestaurant, ratingAverage: ratingSummary.average, ratingCount: ratingSummary.count, distanceKm, eligible };
+    return {
+      ...publicRestaurant,
+      phone: req.user ? restaurant.phone : maskPhone(restaurant.phone),
+      ratingAverage: ratingSummary.average,
+      ratingCount: ratingSummary.count,
+      distanceKm,
+      eligible
+    };
   });
   const eligibleOnly = req.query.eligible === "true" || locationProvided;
   const now = new Date();
@@ -674,7 +728,8 @@ app.get("/api/orders/mine", auth(), roles("CUSTOMER"), asyncRoute(async (req, re
   const orders = await Order.find({ customerId: req.user._id }).sort({ createdAt: -1 }).limit(50).lean();
   const feedbackOrderIds = await Feedback.find({ customerId: req.user._id }, { orderId: 1 }).lean();
   const feedbackSet = new Set(feedbackOrderIds.map((entry) => String(entry.orderId)));
-  const responses = orders.map((order) => ({ ...order, feedbackSubmitted: feedbackSet.has(String(order._id)) }));
+  const responses = (await ordersWithRestaurantDetails(orders))
+    .map((order) => ({ ...order, feedbackSubmitted: feedbackSet.has(String(order._id)) }));
   res.json({ orders: responses });
 }));
 
@@ -684,7 +739,7 @@ app.post("/api/orders/track", asyncRoute(async (req, res) => {
   if (!reference || !phone) return res.status(400).json({ error: "Order reference and checkout phone are required." });
   const order = await Order.findOne({ reference, customerId: null, "guest.phone": { $in: [phone, String(req.body.phone || "").trim()] } }).lean();
   if (!order) return res.status(404).json({ error: "We couldn't find an order matching that reference and phone number." });
-  res.json({ order });
+  res.json({ order: await orderWithRestaurantDetails(order) });
 }));
 
 app.post("/api/orders/quote", orderQuoteRateLimit, auth(false), asyncRoute(async (req, res) => {
@@ -771,7 +826,7 @@ app.post("/api/orders", auth(false), asyncRoute(async (req, res) => {
   if (previous) {
     const signedOwner = req.user && previous.customerId && String(previous.customerId) === String(req.user._id);
     if (!signedOwner) return res.status(409).json({ error: "This order request key has already been used." });
-    return res.status(200).json({ order: previous, duplicate: true });
+    return res.status(200).json({ order: await orderWithRestaurantDetails(previous), duplicate: true });
   }
   const signedCustomer = req.user && req.user.role === "CUSTOMER" ? req.user : null;
   let customerTerms;
@@ -902,7 +957,7 @@ app.post("/api/orders", auth(false), asyncRoute(async (req, res) => {
   await writeAudit({ user: signedCustomer, action: "ORDER_CREATED", entity: "Order", entityId: order._id, details: { reference, restaurantId: restaurant._id, total } });
   await logNotification(order, "NEW_ORDER_RESTAURANT", restaurant.whatsapp || restaurant.phone);
   await logNotification(order, "ORDER_CREATED_CUSTOMER", signedCustomer.phone);
-  res.status(201).json({ order });
+  res.status(201).json({ order: await orderWithRestaurantDetails(order) });
 }));
 
 app.post("/api/orders/:id/cancel", auth(), roles("CUSTOMER"), asyncRoute(async (req, res) => {
@@ -913,7 +968,7 @@ app.post("/api/orders/:id/cancel", auth(), roles("CUSTOMER"), asyncRoute(async (
     return res.status(409).json({ error: "This order can no longer be cancelled in the app. Please contact support." });
   }
   const updated = await changeOrderStatus(order, "CANCELLED", req.user, String(req.body.reason || "Customer requested cancellation").slice(0, 250));
-  res.json({ order: updated });
+  res.json({ order: await orderWithRestaurantDetails(updated) });
 }));
 
 app.post("/api/orders/guest/cancel", asyncRoute(async (req, res) => {
@@ -927,7 +982,7 @@ app.post("/api/orders/guest/cancel", asyncRoute(async (req, res) => {
     return res.status(409).json({ error: "This order can no longer be cancelled in the app. Please contact support." });
   }
   const updated = await changeOrderStatus(order, "CANCELLED", null, String(req.body.reason || "Guest requested cancellation").slice(0, 250));
-  res.json({ order: updated });
+  res.json({ order: await orderWithRestaurantDetails(updated) });
 }));
 
 app.post("/api/orders/:id/rating", auth(), roles("CUSTOMER"), asyncRoute(async (req, res) => {
