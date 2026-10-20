@@ -1,6 +1,7 @@
 const { isValidCoordinate, isValidServiceRadius } = require("./rules");
 
 const RESTAURANT_TYPES = ["Hotel Restaurant", "Restaurant", "Café", "Cloud Kitchen", "Other"];
+const PAYMENT_METHODS = ["CASH_TO_RESTAURANT", "POS_MACHINE"];
 const CUISINE_LIMIT = 10;
 const PHONE_PATTERN = /^\+?[0-9 ()-]{8,20}$/;
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -50,6 +51,13 @@ function validatePartnerRegistration(input) {
   details.description = optionalText(source.description, 1000);
   details.logoImageData = typeof source.logoImageData === "string" ? source.logoImageData : "";
   details.coverImageData = typeof source.coverImageData === "string" ? source.coverImageData : "";
+  details.paymentMethods = Array.isArray(source.paymentMethods)
+    ? [...new Set(source.paymentMethods.filter((method) => PAYMENT_METHODS.includes(method)))]
+    : ["CASH_TO_RESTAURANT"];
+  if (!details.paymentMethods.length ||
+      (Array.isArray(source.paymentMethods) && details.paymentMethods.length !== new Set(source.paymentMethods).size)) {
+    errors.paymentMethods = "Select at least one supported payment method.";
+  }
 
   requiredText("ownerName", "Owner / Authorized Representative Name", 2, 100);
   details.phone = optionalText(source.phone, 30);
@@ -120,4 +128,4 @@ function validatePartnerRegistration(input) {
   return { details, errors };
 }
 
-module.exports = { validatePartnerRegistration, validPhone };
+module.exports = { PAYMENT_METHODS, validatePartnerRegistration, validPhone };

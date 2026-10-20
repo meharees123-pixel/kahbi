@@ -48,6 +48,21 @@ test("partner registration accepts complete Qatar applications and applies opera
   assert.equal(details.country, "Qatar");
   assert.equal(details.currency, "QAR");
   assert.equal(details.extendedDeliveryRadiusKm, null);
+  assert.deepEqual(details.paymentMethods, ["CASH_TO_RESTAURANT"]);
+});
+
+test("partner registration accepts cash or POS payment methods and requires at least one", () => {
+  const application = validApplication();
+  application.paymentMethods = ["CASH_TO_RESTAURANT", "POS_MACHINE"];
+  assert.deepEqual(validatePartnerRegistration(application).details.paymentMethods, application.paymentMethods);
+
+  application.paymentMethods = ["POS_MACHINE"];
+  assert.deepEqual(validatePartnerRegistration(application).details.paymentMethods, ["POS_MACHINE"]);
+
+  application.paymentMethods = [];
+  assert.ok(validatePartnerRegistration(application).errors.paymentMethods);
+  application.paymentMethods = ["UNSUPPORTED"];
+  assert.ok(validatePartnerRegistration(application).errors.paymentMethods);
 });
 
 test("partner registration requires location, valid contact numbers and all declarations", () => {
