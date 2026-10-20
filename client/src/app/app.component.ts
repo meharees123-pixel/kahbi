@@ -1,6 +1,6 @@
 import { CommonModule } from '@angular/common';
 import { HttpClient, HttpHeaders } from '@angular/common/http';
-import { ChangeDetectorRef, Component, OnInit } from '@angular/core';
+import { ChangeDetectorRef, Component, OnDestroy, OnInit } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import * as L from 'leaflet';
 import { finalize, firstValueFrom } from 'rxjs';
@@ -124,6 +124,7 @@ interface Order {
   paymentMethod?: string;
   status: string;
   statusHistory: { status: string; createdAt: string }[];
+  acceptanceDeadlineAt?: string | null;
   createdAt: string;
   updatedAt?: string;
   commissionAmount?: number;
@@ -294,7 +295,7 @@ type LoginPortal = 'CUSTOMER' | 'RESTAURANT' | 'ADMIN';
   imports: [CommonModule, FormsModule],
   templateUrl: './app.component.html'
 })
-export class AppComponent implements OnInit {
+export class AppComponent implements OnInit, OnDestroy {
   private readonly maxImageBytes = 256 * 1024;
   private readonly maxSourceImageBytes = 10 * 1024 * 1024;
   private readonly maxImagePixels = 40_000_000;
@@ -343,6 +344,9 @@ export class AppComponent implements OnInit {
   restaurantMenu: MenuItem[] = [];
   restaurantPaymentMethods: string[] = ['CASH_TO_RESTAURANT'];
   restaurantPaymentMethodsSaving = false;
+  countdownNow = Date.now();
+  private acceptanceCountdownTimer: number | null = null;
+  private nextExpiredOrderRefreshAt = 0;
   pendingRestaurants: Restaurant[] = [];
   adminRestaurants: Restaurant[] = [];
   adminRestaurant: Restaurant | null = null;
@@ -552,6 +556,20 @@ export class AppComponent implements OnInit {
   }
 
   ngOnInit(): void {
+    this.acceptanceCountdownTimer = window.setInterval(() => {
+      this.countdownNow = Date.now();
+      if (this.view === 'restaurantPortal') {
+        this.changeDetector.markForCheck();
+        const hasExpiredPendingOrder = this.restaurantOrders.some((order) =>
+          order.status === 'RESTAURANT_PENDING' && order.acceptanceDeadlineAt &&
+          Date.parse(order.acceptanceDeadlineAt) <= this.countdownNow
+        );
+        if (hasExpiredPendingOrder && this.countdownNow >= this.nextExpiredOrderRefreshAt) {
+          this.nextExpiredOrderRefreshAt = this.countdownNow + 15_000;
+          this.loadRestaurantOrders();
+        }
+      }
+    }, 1000);
     this.applyLocationRoute();
     this.loadBrandLogo();
     if (this.view === 'partnerRegistration') this.restorePartnerRegistration();
@@ -585,6 +603,11 @@ export class AppComponent implements OnInit {
     } else {
       this.loadRestaurants();
     }
+  }
+
+  ngOnDestroy(): void {
+    if (this.acceptanceCountdownTimer !== null) window.clearInterval(this.acceptanceCountdownTimer);
+    if (this.errorDismissTimer) window.clearTimeout(this.errorDismissTimer);
   }
 
   get cartItems(): { item: MenuItem; quantity: number }[] {
@@ -1770,10 +1793,7 @@ export class AppComponent implements OnInit {
         this.restaurantPaymentMethods = restaurant.paymentMethods?.length
           ? [...restaurant.paymentMethods]
           : ['CASH_TO_RESTAURANT'];
-        this.http.get<{ orders: Order[] }>(`${this.api}/restaurant/orders`, { headers: this.headers() }).subscribe({
-          next: ({ orders }) => (this.restaurantOrders = orders),
-          error: (error) => this.showError(error)
-        });
+        this.loadRestaurantOrders();
         if (this.restaurantOrderTab === 'completed') this.loadCompletedRestaurantOrders(this.completedRestaurantOrdersPage);
         this.http.get<{ items: MenuItem[] }>(`${this.api}/restaurant/menu`, { headers: this.headers() }).subscribe({
           next: ({ items }) => (this.restaurantMenu = items),
@@ -1786,6 +1806,31 @@ export class AppComponent implements OnInit {
       },
       error: (error) => this.showError(error)
     });
+  }
+
+  private loadRestaurantOrders(): void {
+    this.http.get<{ orders: Order[] }>(`${this.api}/restaurant/orders`, { headers: this.headers() }).subscribe({
+      next: ({ orders }) => {
+        this.restaurantOrders = orders;
+        this.changeDetector.markForCheck();
+      },
+      error: (error) => this.showError(error)
+    });
+  }
+
+  orderAcceptanceCountdown(order: Order): string {
+    if (!order.acceptanceDeadlineAt) return '—';
+    const remainingSeconds = Math.max(0, Math.ceil((Date.parse(order.acceptanceDeadlineAt) - this.countdownNow) / 1000));
+    const hours = Math.floor(remainingSeconds / 3600);
+    const minutes = Math.floor((remainingSeconds % 3600) / 60);
+    const seconds = remainingSeconds % 60;
+    return hours
+      ? `${hours}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`
+      : `${minutes}:${String(seconds).padStart(2, '0')}`;
+  }
+
+  orderAcceptanceExpired(order: Order): boolean {
+    return !!order.acceptanceDeadlineAt && Date.parse(order.acceptanceDeadlineAt) <= this.countdownNow;
   }
 
   selectRestaurantOrderTab(tab: 'active' | 'completed'): void {
