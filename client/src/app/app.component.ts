@@ -30,6 +30,7 @@ interface Restaurant {
   latitude?: number | null;
   longitude?: number | null;
   serviceRadiusKm?: number | null;
+  paymentMethods?: string[];
   category: string;
   preparationMinutes: number;
   minOrder: number;
@@ -120,6 +121,7 @@ interface Order {
   adminFee: number;
   tax: number;
   currency: string;
+  paymentMethod?: string;
   status: string;
   statusHistory: { status: string; createdAt: string }[];
   createdAt: string;
@@ -227,6 +229,7 @@ interface PartnerApplication {
   description: string;
   logoImageData: string;
   coverImageData: string;
+  paymentMethods: string[];
   ownerName: string;
   phone: string;
   whatsapp: string;
@@ -279,7 +282,7 @@ type PartnerFormErrorField =
   | 'restaurantName' | 'restaurantType' | 'primaryCuisine' | 'ownerName' | 'phone' | 'whatsapp' | 'email'
   | 'address' | 'country' | 'city' | 'mapLocation' | 'openingTime' | 'closingTime' | 'preparationMinutes'
   | 'estimatedDeliveryMinutes' | 'serviceRadiusKm' | 'extendedDeliveryRadiusKm' | 'minimumOrderValue'
-  | 'maximumOrderValue' | 'deliveryManagedBy' | 'deliveryFee' | 'freeDeliveryThreshold' | 'currency'
+  | 'maximumOrderValue' | 'deliveryManagedBy' | 'deliveryFee' | 'freeDeliveryThreshold' | 'currency' | 'paymentMethods'
   | 'declaration_authorized' | 'declaration_accurate' | 'declaration_terms' | 'declaration_approval'
   | 'declaration_adminReview' | 'logoImageData' | 'coverImageData' | 'termsVersion';
 
@@ -338,6 +341,8 @@ export class AppComponent implements OnInit {
   completedRestaurantOrdersTotalPages = 0;
   completedRestaurantOrdersLoading = false;
   restaurantMenu: MenuItem[] = [];
+  restaurantPaymentMethods: string[] = ['CASH_TO_RESTAURANT'];
+  restaurantPaymentMethodsSaving = false;
   pendingRestaurants: Restaurant[] = [];
   adminRestaurants: Restaurant[] = [];
   adminRestaurant: Restaurant | null = null;
@@ -396,6 +401,7 @@ export class AppComponent implements OnInit {
   mapError = '';
   mapNotice = '';
   promotionCode = '';
+  orderPaymentMethod = 'CASH_TO_RESTAURANT';
   trackReference = '';
   trackPhone = '';
   trackedOrder: Order | null = null;
@@ -440,6 +446,7 @@ export class AppComponent implements OnInit {
     description: '',
     logoImageData: '',
     coverImageData: '',
+    paymentMethods: ['CASH_TO_RESTAURANT'],
     ownerName: '',
     phone: '',
     whatsapp: '',
@@ -732,6 +739,7 @@ export class AppComponent implements OnInit {
     if (form.minimumOrderValue !== null && form.minimumOrderValue < 0) errors.minimumOrderValue = 'Minimum order cannot be negative.';
     if (form.maximumOrderValue !== null && form.maximumOrderValue < 0) errors.maximumOrderValue = 'Maximum order cannot be negative.';
     if (form.minimumOrderValue !== null && (form.maximumOrderValue ?? 1000) < form.minimumOrderValue) errors.maximumOrderValue = 'Maximum order must be at least the minimum (default QAR 1,000).';
+    if (!form.paymentMethods.length) errors.paymentMethods = 'Choose at least one payment method.';
     if (form.deliveryFee !== null && (!Number.isFinite(form.deliveryFee) || form.deliveryFee < 0 || form.deliveryFee > 100000)) errors.deliveryFee = 'Enter a non-negative fee up to QAR 100,000.';
     if (form.freeDeliveryThreshold !== null && (!Number.isFinite(form.freeDeliveryThreshold) || form.freeDeliveryThreshold < 0 || form.freeDeliveryThreshold > 100000)) errors.freeDeliveryThreshold = 'Enter a non-negative threshold up to QAR 100,000.';
     if (!form.declarations.authorized) errors.declaration_authorized = 'Confirm you are authorized to register this restaurant.';
@@ -751,6 +759,14 @@ export class AppComponent implements OnInit {
     }
     this.partnerReviewMode = true;
     window.scrollTo({ top: 0, behavior: 'smooth' });
+  }
+
+  togglePartnerPaymentMethod(method: string, event: Event): void {
+    const checked = (event.target as HTMLInputElement).checked;
+    const methods = this.partnerApplication.paymentMethods.filter((entry) => entry !== method);
+    if (checked) methods.push(method);
+    this.partnerApplication.paymentMethods = methods;
+    this.partnerFormErrors.paymentMethods = '';
   }
 
   editPartnerApplication(): void {
@@ -815,7 +831,14 @@ export class AppComponent implements OnInit {
     }).subscribe({
       next: ({ registration }) => {
         this.partnerRegistration = registration;
-        if (registration.details) this.partnerApplication = registration.details;
+        if (registration.details) {
+          this.partnerApplication = {
+            ...registration.details,
+            paymentMethods: registration.details.paymentMethods?.length
+              ? registration.details.paymentMethods
+              : ['CASH_TO_RESTAURANT']
+          };
+        }
         this.changeDetector.markForCheck();
       },
       error: (error) => this.showError(error)
@@ -1447,6 +1470,10 @@ export class AppComponent implements OnInit {
     }
     this.view = 'cart';
     this.error = '';
+    const methods = this.selectedRestaurant?.paymentMethods?.length
+      ? this.selectedRestaurant.paymentMethods
+      : ['CASH_TO_RESTAURANT'];
+    this.orderPaymentMethod = methods.includes('CASH_TO_RESTAURANT') ? 'CASH_TO_RESTAURANT' : methods[0];
     this.refreshOrderQuote();
     if (this.isCustomer) this.loadCustomerTerms();
   }
@@ -1492,6 +1519,7 @@ export class AppComponent implements OnInit {
       items: this.cartItems.map(({ item, quantity }) => ({ menuItemId: item._id, quantity })),
       address,
       promotionCode: this.promotionCode || undefined,
+      paymentMethod: this.orderPaymentMethod,
       customerTermsVersion: this.customerTerms.version,
       customerTermsAccepted: this.customerTerms.acceptanceRequired ? this.customerTermsAccepted : false,
       idempotencyKey
@@ -1739,6 +1767,9 @@ export class AppComponent implements OnInit {
     this.http.get<{ restaurant: Restaurant }>(`${this.api}/restaurant/me`, { headers: this.headers() }).subscribe({
       next: ({ restaurant }) => {
         this.selectedRestaurant = restaurant;
+        this.restaurantPaymentMethods = restaurant.paymentMethods?.length
+          ? [...restaurant.paymentMethods]
+          : ['CASH_TO_RESTAURANT'];
         this.http.get<{ orders: Order[] }>(`${this.api}/restaurant/orders`, { headers: this.headers() }).subscribe({
           next: ({ orders }) => (this.restaurantOrders = orders),
           error: (error) => this.showError(error)
@@ -1798,6 +1829,38 @@ export class AppComponent implements OnInit {
   changeAvailability(availability: string): void {
     this.http.patch(`${this.api}/restaurant/availability`, { availability }, { headers: this.headers() }).subscribe({
       next: () => this.loadRestaurantPortal(),
+      error: (error) => this.showError(error)
+    });
+  }
+
+  toggleRestaurantPaymentMethod(method: string, event: Event): void {
+    const checked = (event.target as HTMLInputElement).checked;
+    const methods = this.restaurantPaymentMethods.filter((entry) => entry !== method);
+    if (checked) methods.push(method);
+    this.restaurantPaymentMethods = methods;
+  }
+
+  saveRestaurantPaymentMethods(): void {
+    if (!this.restaurantPaymentMethods.length) {
+      this.error = 'Select at least one payment method before saving.';
+      return;
+    }
+    if (this.restaurantPaymentMethodsSaving) return;
+    this.restaurantPaymentMethodsSaving = true;
+    this.http.patch<{ restaurant: Restaurant }>(`${this.api}/restaurant/me`, {
+      paymentMethods: this.restaurantPaymentMethods
+    }, { headers: this.headers() }).pipe(finalize(() => {
+      this.restaurantPaymentMethodsSaving = false;
+      this.changeDetector.markForCheck();
+    })).subscribe({
+      next: ({ restaurant }) => {
+        this.selectedRestaurant = restaurant;
+        this.restaurantPaymentMethods = restaurant.paymentMethods?.length
+          ? [...restaurant.paymentMethods]
+          : ['CASH_TO_RESTAURANT'];
+        this.error = '';
+        this.notice = 'Accepted payment methods updated. This applies to new orders; existing orders are unchanged.';
+      },
       error: (error) => this.showError(error)
     });
   }

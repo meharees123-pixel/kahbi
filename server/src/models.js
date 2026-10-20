@@ -47,6 +47,7 @@ const RestaurantSchema = new Schema(
     preparationMinutes: { type: Number, default: 35, min: 1 },
     minOrder: { type: Number, default: 0, min: 0 },
     maxOrder: { type: Number, default: 1000, min: 1 },
+    paymentMethods: { type: [String], enum: ["CASH_TO_RESTAURANT", "POS_MACHINE"], default: ["CASH_TO_RESTAURANT"] },
     status: {
       type: String,
       enum: ["DRAFT", "PENDING_REVIEW", "APPROVED", "REJECTED", "SUSPENDED"],
@@ -123,7 +124,7 @@ const OrderSchema = new Schema(
     total: { type: Number, required: true },
     currency: { type: String, default: "QAR" },
     promotionCode: { type: String, default: "" },
-    paymentMethod: { type: String, default: "CASH_TO_RESTAURANT" },
+    paymentMethod: { type: String, enum: ["CASH_TO_RESTAURANT", "POS_MACHINE"], default: "CASH_TO_RESTAURANT" },
     paymentStatus: { type: String, enum: ["NOT_REQUIRED", "PENDING", "PAID", "FAILED", "REFUNDED", "PARTIALLY_REFUNDED"], default: "NOT_REQUIRED" },
     status: { type: String, default: "RESTAURANT_PENDING", index: true },
     estimatedPreparationMinutes: { type: Number, default: 35 },

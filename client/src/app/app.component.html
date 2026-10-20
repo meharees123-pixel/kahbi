@@ -121,6 +121,12 @@
                 <label class="form-field" *ngIf="partnerApplication.extendedDeliveryAvailable"><span>Extended Delivery Radius (km)</span><input [(ngModel)]="partnerApplication.extendedDeliveryRadiusKm" type="number" min="0.5" max="200" step="0.5"><small class="field-error" *ngIf="partnerFormErrors['extendedDeliveryRadiusKm']">{{ partnerFormErrors['extendedDeliveryRadiusKm'] }}</small></label>
                 <label class="form-field"><span>Minimum Order Value (QAR)</span><input [(ngModel)]="partnerApplication.minimumOrderValue" type="number" min="0" step="0.01"><small class="field-error" *ngIf="partnerFormErrors['minimumOrderValue']">{{ partnerFormErrors['minimumOrderValue'] }}</small></label>
                 <label class="form-field"><span>Maximum Order Value (QAR)</span><input [(ngModel)]="partnerApplication.maximumOrderValue" type="number" min="0" step="0.01"><small class="field-error" *ngIf="partnerFormErrors['maximumOrderValue']">{{ partnerFormErrors['maximumOrderValue'] }}</small></label>
+                <div class="form-field partner-field-wide">
+                  <span>Accepted Payment Methods <b>*</b></span>
+                  <label class="partner-toggle"><input type="checkbox" [checked]="partnerApplication.paymentMethods.includes('CASH_TO_RESTAURANT')" (change)="togglePartnerPaymentMethod('CASH_TO_RESTAURANT', $event)"><span>Cash</span></label>
+                  <label class="partner-toggle"><input type="checkbox" [checked]="partnerApplication.paymentMethods.includes('POS_MACHINE')" (change)="togglePartnerPaymentMethod('POS_MACHINE', $event)"><span>Request POS machine</span></label>
+                  <small class="field-error" *ngIf="partnerFormErrors['paymentMethods']">{{ partnerFormErrors['paymentMethods'] }}</small>
+                </div>
               </div>
             </fieldset>
 
@@ -154,6 +160,7 @@
               <div><span>Representative</span><strong>{{ partnerApplication.ownerName }}</strong><small>{{ partnerApplication.phone }} · WhatsApp {{ partnerApplication.whatsapp }}<span *ngIf="partnerApplication.email"> · {{ partnerApplication.email }}</span></small></div>
               <div><span>Location</span><strong>{{ partnerApplication.address }}</strong><small>{{ partnerApplication.city }}, {{ partnerApplication.country }} · Zone {{ partnerApplication.zoneNumber || '—' }} · {{ partnerApplication.streetBuilding || 'Street / building not provided' }} · {{ partnerApplication.latitude | number:'1.5-5' }}, {{ partnerApplication.longitude | number:'1.5-5' }}</small></div>
               <div><span>Operations</span><strong>{{ partnerApplication.openingTime || 'Hours not provided' }} – {{ partnerApplication.closingTime || 'Hours not provided' }}</strong><small>{{ partnerApplication.preparationMinutes }} min preparation · {{ partnerApplication.estimatedDeliveryMinutes }} min estimated delivery · {{ partnerApplication.serviceRadiusKm }} km standard radius</small></div>
+              <div><span>Accepted payment methods</span><strong>{{ partnerApplication.paymentMethods.includes('CASH_TO_RESTAURANT') ? 'Cash' : '' }}{{ partnerApplication.paymentMethods.length > 1 ? ' and ' : '' }}{{ partnerApplication.paymentMethods.includes('POS_MACHINE') ? 'POS machine' : '' }}</strong></div>
               <div><span>Delivery and order values</span><strong>{{ partnerApplication.deliveryManagedBy }} managed · {{ partnerApplication.currency }}</strong><small>{{ partnerApplication.extendedDeliveryAvailable ? 'Extended delivery: ' + partnerApplication.extendedDeliveryRadiusKm + ' km' : 'Standard delivery only' }} · Delivery fee request: {{ partnerApplication.deliveryFee === null ? 'Not provided' : money(partnerApplication.deliveryFee) }} · Free delivery threshold: {{ partnerApplication.freeDeliveryThreshold === null ? 'Not provided' : money(partnerApplication.freeDeliveryThreshold) }} · Minimum: {{ partnerApplication.minimumOrderValue === null ? 'Not provided' : money(partnerApplication.minimumOrderValue) }} · Maximum: {{ partnerApplication.maximumOrderValue === null ? 'Not provided' : money(partnerApplication.maximumOrderValue) }}</small></div>
               <div><span>Declarations</span><strong>All required declarations accepted</strong><small>Terms version {{ partnerTermsVersion }} will be recorded with the submission timestamp.</small></div>
             </div>
@@ -308,7 +315,12 @@
           <div class="form-field"><label>Full delivery address</label><textarea [(ngModel)]="deliveryAddress" placeholder="Building, apartment, street, zone, and a nearby landmark" rows="3" required minlength="5"></textarea><small>We use your map pin to confirm free-delivery coverage. Add the exact building and unit details here.</small></div>
           <div class="delivery-coverage-warning" *ngIf="!isSelectedRestaurantInDeliveryRange && deliveryLatitude !== null">This restaurant's free-delivery area does not include your selected pin. Choose another restaurant or change your delivery location.</div>
           <div class="form-field"><label>Promotion code <span class="optional">optional</span></label><input [(ngModel)]="promotionCode" (ngModelChange)="invalidateOrderQuote()" placeholder="e.g. KABHI10"><button class="text-button" type="button" *ngIf="!orderQuote && !orderQuoteLoading" (click)="refreshOrderQuote()">Update order total</button></div>
-          <div class="payment-note"><span>◉</span><div><strong>Pay restaurant directly</strong><small>Cash or direct payment on delivery</small></div></div>
+          <div class="form-field" *ngIf="selectedRestaurant?.paymentMethods?.length">
+            <label>Payment method</label>
+            <label class="partner-toggle" *ngIf="selectedRestaurant?.paymentMethods?.includes('CASH_TO_RESTAURANT')"><input type="radio" name="orderPaymentMethod" [(ngModel)]="orderPaymentMethod" value="CASH_TO_RESTAURANT"><span>Cash on delivery</span></label>
+            <label class="partner-toggle" *ngIf="selectedRestaurant?.paymentMethods?.includes('POS_MACHINE')"><input type="radio" name="orderPaymentMethod" [(ngModel)]="orderPaymentMethod" value="POS_MACHINE"><span>Request a POS machine</span></label>
+            <small>The restaurant accepts only the payment methods listed here.</small>
+          </div>
           <div class="quote-loading" *ngIf="orderQuoteLoading"><span class="global-loader-spinner"></span><span>Calculating your order total…</span></div>
           <ng-container *ngIf="orderQuote as quote">
             <div class="summary-row"><span>Subtotal</span><strong>{{ money(quote.subtotal, quote.currency) }}</strong></div>
@@ -352,6 +364,7 @@
         <div class="order-detail-row" *ngIf="trackedOrder.adminFee"><span>Platform fee</span><strong>{{ money(trackedOrder.adminFee, trackedOrder.currency) }}</strong></div>
         <div class="order-detail-row" *ngIf="trackedOrder.tax"><span>Tax</span><strong>{{ money(trackedOrder.tax, trackedOrder.currency) }}</strong></div>
         <div class="order-detail-row total-row"><span>Total · {{ trackedOrder.currency }}</span><strong>{{ money(trackedOrder.total, trackedOrder.currency) }}</strong></div>
+        <div class="order-detail-row" *ngIf="trackedOrder.paymentMethod"><span>Payment method</span><strong>{{ trackedOrder.paymentMethod === 'POS_MACHINE' ? 'POS machine requested' : 'Cash on delivery' }}</strong></div>
         <p class="delivery-note">The order status updates as the restaurant responds. Your restaurant contact details are available here whenever you need them.</p>
         <button class="button button-outline-danger cancel-button" *ngIf="trackedOrder.status === 'RESTAURANT_PENDING'" (click)="cancelTrackedOrder()">Cancel order</button>
       </article>
@@ -418,6 +431,14 @@
         <button class="button button-accent button-small" *ngIf="restaurantImageDraft !== null" (click)="saveRestaurantImage()">Save photo</button>
         <button class="text-button" *ngIf="selectedRestaurant?.imageData && restaurantImageDraft === null" (click)="removeRestaurantImage()">Remove photo</button>
       </div>
+      <section class="portal-panel payment-method-settings">
+        <div class="panel-heading"><div><span class="eyebrow">PAYMENT SETTINGS</span><h2>Accepted payment methods</h2></div></div>
+        <p class="muted">Choose at least one way for customers to pay. Changes apply to new orders only; payment choices on orders already placed will not change.</p>
+        <label class="partner-toggle"><input type="checkbox" [checked]="restaurantPaymentMethods.includes('CASH_TO_RESTAURANT')" [disabled]="user?.role === 'RESTAURANT_STAFF' || restaurantPaymentMethodsSaving" (change)="toggleRestaurantPaymentMethod('CASH_TO_RESTAURANT', $event)"><span>Cash on delivery</span></label>
+        <label class="partner-toggle"><input type="checkbox" [checked]="restaurantPaymentMethods.includes('POS_MACHINE')" [disabled]="user?.role === 'RESTAURANT_STAFF' || restaurantPaymentMethodsSaving" (change)="toggleRestaurantPaymentMethod('POS_MACHINE', $event)"><span>Request a POS machine</span></label>
+        <p class="field-error" *ngIf="!restaurantPaymentMethods.length">Select at least one payment method before saving.</p>
+        <button class="button button-accent button-small" *ngIf="user?.role === 'RESTAURANT_OWNER' || user?.role === 'RESTAURANT_MANAGER'" [disabled]="restaurantPaymentMethodsSaving || !restaurantPaymentMethods.length" (click)="saveRestaurantPaymentMethods()">{{ restaurantPaymentMethodsSaving ? 'Saving…' : 'Save payment methods' }}</button>
+      </section>
       <div class="portal-columns">
         <div class="portal-panel"><div class="panel-heading"><div><span class="eyebrow">LIVE SERVICE</span><h2>{{ restaurantOrderTab === 'active' ? 'Orders' : 'Completed Orders' }}</h2></div><button class="text-button" (click)="restaurantOrderTab === 'completed' ? loadCompletedRestaurantOrders(completedRestaurantOrdersPage) : loadRestaurantPortal()">Refresh ↻</button></div>
           <div class="portal-tabs" role="tablist" aria-label="Restaurant orders">
@@ -428,6 +449,7 @@
           <article class="portal-order" *ngFor="let order of activeRestaurantOrders">
             <div class="portal-order-top"><div><strong>{{ order.reference }}</strong><span>{{ order.createdAt | date:'short' }} · {{ order.guest.name || 'Customer' }} · {{ order.guest.phone }}</span></div><span class="order-status" [ngClass]="orderStatusClass(order.status)">{{ statusLabel(order.status) }}</span></div>
             <div class="order-detail-row" *ngFor="let item of order.items"><span>{{ item.quantity }} × {{ item.name }}</span><strong>{{ money(item.lineTotal) }}</strong></div>
+            <div class="order-detail-row" *ngIf="order.paymentMethod"><span>Payment method</span><strong>{{ order.paymentMethod === 'POS_MACHINE' ? 'POS machine requested' : 'Cash on delivery' }}</strong></div>
             <div class="order-detail-row"><span>{{ order.address }}</span><strong>{{ money(order.total) }}</strong></div>
             <div class="order-actions" *ngIf="order.status === 'RESTAURANT_PENDING'"><button class="button button-accent" (click)="restaurantAction(order, 'ACCEPTED')">Accept order</button><button class="button button-outline-danger" (click)="restaurantAction(order, 'REJECTED')">Reject</button></div>
             <div class="order-actions" *ngIf="order.status === 'ACCEPTED'"><button class="button button-dark" (click)="restaurantAction(order, 'PREPARING')">Start preparing</button></div>

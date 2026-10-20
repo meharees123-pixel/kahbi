@@ -21,7 +21,7 @@ const {
   validateOrderTermsAcknowledgement
 } = require("./customer-terms");
 const { writeAudit, logNotification, changeOrderStatus } = require("./services");
-const { validatePartnerRegistration } = require("./partner-registration");
+const { PAYMENT_METHODS, validatePartnerRegistration } = require("./partner-registration");
 const {
   MENU_HEADERS, parseMenuFile, parseImageArchive, validateMenuRows,
   isMenuItemWithinAvailability, rowsToCsv
@@ -455,6 +455,13 @@ app.post("/api/auth/activate-restaurant", asyncRoute(async (req, res) => {
   registration.activationTokenHash = "";
   registration.activationExpiresAt = null;
   await registration.save();
+  const restaurant = await Restaurant.findById(registration.restaurantId);
+  if (restaurant) {
+    restaurant.paymentMethods = Array.isArray(registration.details.paymentMethods) && registration.details.paymentMethods.length
+      ? registration.details.paymentMethods
+      : ["CASH_TO_RESTAURANT"];
+    await restaurant.save();
+  }
   await writeAudit({ user, action: "PARTNER_ACCOUNT_ACTIVATED", entity: "RestaurantRegistration", entityId: registration.registrationId });
   res.status(201).json({ token: issueToken(user), user: publicUser(user) });
 }));
@@ -625,7 +632,7 @@ app.get("/api/restaurants", auth(false), asyncRoute(async (req, res) => {
   }
   if (req.query.open === "true") query.availability = "OPEN";
   const restaurants = await Restaurant.find(query)
-    .select("name imageData hotelName cuisine description address phone latitude longitude serviceRadiusKm preparationMinutes minOrder maxOrder status availability category ratingAverage ratingCount demo partnerRegistrationId")
+    .select("name imageData hotelName cuisine description address phone latitude longitude serviceRadiusKm preparationMinutes minOrder maxOrder paymentMethods status availability category ratingAverage ratingCount demo partnerRegistrationId")
     .sort({ demo: -1, name: 1 })
     .limit(50)
     .lean();
@@ -643,13 +650,29 @@ app.get("/api/restaurants", auth(false), asyncRoute(async (req, res) => {
   const partnerRestaurantsWithMenus = new Set(partnerMenuItems
     .filter(isMenuItemWithinAvailability)
     .map((item) => String(item.restaurantId)));
-  const activatedPartnerRestaurantIds = partnerRestaurantIds.length
-    ? new Set((await RestaurantRegistration.distinct("restaurantId", {
+  const activatedPartnerRegistrations = partnerRestaurantIds.length
+    ? await RestaurantRegistration.find({
       restaurantId: { $in: partnerRestaurantIds },
       status: "APPROVED",
       activatedAt: { $ne: null }
-    })).map(String))
-    : new Set();
+    }).select("restaurantId details.paymentMethods").sort({ updatedAt: -1 }).lean()
+    : [];
+  const activatedPartnerRestaurantIds = new Set(activatedPartnerRegistrations.map((registration) => String(registration.restaurantId)));
+  const paymentMethodsByRestaurantId = new Map();
+  for (const restaurant of restaurants) {
+    const methods = restaurant.paymentMethods;
+    paymentMethodsByRestaurantId.set(String(restaurant._id), Array.isArray(methods) && methods.length
+      ? methods.filter((method) => PAYMENT_METHODS.includes(method))
+      : ["CASH_TO_RESTAURANT"]);
+  }
+  for (const registration of activatedPartnerRegistrations) {
+    const id = String(registration.restaurantId);
+    const methods = registration.details?.paymentMethods;
+    const registeredMethods = Array.isArray(methods)
+      ? methods.filter((method) => PAYMENT_METHODS.includes(method))
+      : [];
+    if (registeredMethods.length) paymentMethodsByRestaurantId.set(id, registeredMethods);
+  }
   const customerRestaurants = restaurants.filter((restaurant) =>
     !restaurant.partnerRegistrationId ||
     (restaurant.availability === "OPEN" &&
@@ -678,6 +701,7 @@ app.get("/api/restaurants", auth(false), asyncRoute(async (req, res) => {
     const { partnerRegistrationId, ...publicRestaurant } = restaurant;
     return {
       ...publicRestaurant,
+      paymentMethods: paymentMethodsByRestaurantId.get(String(restaurant._id)) || ["CASH_TO_RESTAURANT"],
       phone: req.user ? restaurant.phone : maskPhone(restaurant.phone),
       ratingAverage: ratingSummary.average,
       ratingCount: ratingSummary.count,
@@ -705,9 +729,19 @@ app.get("/api/restaurants", auth(false), asyncRoute(async (req, res) => {
 app.get("/api/restaurants/:id/menu", asyncRoute(async (req, res) => {
   if (!mongoose.isValidObjectId(req.params.id)) return res.status(404).json({ error: "Restaurant not found." });
   const restaurant = await Restaurant.findOne({ _id: req.params.id, status: "APPROVED" })
-    .select("name imageData hotelName cuisine description address latitude longitude serviceRadiusKm preparationMinutes minOrder maxOrder status availability category ratingAverage ratingCount demo")
+    .select("name imageData hotelName cuisine description address latitude longitude serviceRadiusKm preparationMinutes minOrder maxOrder paymentMethods status availability category ratingAverage ratingCount demo")
     .lean();
   if (!restaurant) return res.status(404).json({ error: "Restaurant not found." });
+  const registration = await RestaurantRegistration.findOne({
+    restaurantId: restaurant._id,
+    status: "APPROVED",
+    activatedAt: { $ne: null }
+  }).select("details.paymentMethods").sort({ updatedAt: -1 }).lean();
+  restaurant.paymentMethods = Array.isArray(registration?.details?.paymentMethods) && registration.details.paymentMethods.length
+    ? registration.details.paymentMethods.filter((method) => PAYMENT_METHODS.includes(method))
+    : Array.isArray(restaurant.paymentMethods) && restaurant.paymentMethods.length
+      ? restaurant.paymentMethods.filter((method) => PAYMENT_METHODS.includes(method))
+      : ["CASH_TO_RESTAURANT"];
   const items = await MenuItem.find({
     restaurantId: restaurant._id,
     active: true,
@@ -842,6 +876,20 @@ app.post("/api/orders", auth(false), asyncRoute(async (req, res) => {
   const restaurant = await Restaurant.findOne({ _id: restaurantId, status: "APPROVED" });
   if (!restaurant) return res.status(404).json({ error: "This restaurant is not available for ordering." });
   if (restaurant.availability !== "OPEN") return res.status(409).json({ error: "This restaurant is not accepting orders right now." });
+  const registration = await RestaurantRegistration.findOne({
+    restaurantId: restaurant._id,
+    status: "APPROVED",
+    activatedAt: { $ne: null }
+  }).select("details.paymentMethods").sort({ updatedAt: -1 }).lean();
+  const availablePaymentMethods = Array.isArray(registration?.details?.paymentMethods) && registration.details.paymentMethods.length
+    ? registration.details.paymentMethods.filter((method) => PAYMENT_METHODS.includes(method))
+    : Array.isArray(restaurant.paymentMethods) && restaurant.paymentMethods.length
+      ? restaurant.paymentMethods.filter((method) => PAYMENT_METHODS.includes(method))
+      : ["CASH_TO_RESTAURANT"];
+  const paymentMethod = req.body.paymentMethod === undefined ? "CASH_TO_RESTAURANT" : req.body.paymentMethod;
+  if (!PAYMENT_METHODS.includes(paymentMethod) || !availablePaymentMethods.includes(paymentMethod)) {
+    return res.status(400).json({ error: "Choose a payment method offered by this restaurant." });
+  }
   const hasLatitude = latitude !== undefined;
   const hasLongitude = longitude !== undefined;
   if (hasLatitude !== hasLongitude || !hasLatitude ||
@@ -937,6 +985,7 @@ app.post("/api/orders", auth(false), asyncRoute(async (req, res) => {
     total,
     currency,
     promotionCode: promotion ? promotion.code : "",
+    paymentMethod,
     estimatedPreparationMinutes: restaurant.preparationMinutes,
     customerTermsVersion: customerTerms.version,
     customerTermsAcceptedAt,
@@ -1034,7 +1083,15 @@ app.post("/api/orders/:id/feedback", auth(), roles("CUSTOMER"), asyncRoute(async
 const restaurantRoles = ["RESTAURANT_OWNER", "RESTAURANT_MANAGER", "RESTAURANT_STAFF"];
 app.get("/api/restaurant/me", auth(), roles(...restaurantRoles), asyncRoute(async (req, res) => {
   const restaurant = await restaurantForUser(req.user);
-  res.json({ restaurant });
+  const registration = await RestaurantRegistration.findOne({
+    restaurantId: restaurant._id,
+    status: "APPROVED",
+    activatedAt: { $ne: null }
+  }).select("details.paymentMethods").sort({ updatedAt: -1 }).lean();
+  const paymentMethods = Array.isArray(registration?.details?.paymentMethods) && registration.details.paymentMethods.length
+    ? registration.details.paymentMethods.filter((method) => PAYMENT_METHODS.includes(method))
+    : restaurant.paymentMethods?.filter((method) => PAYMENT_METHODS.includes(method)) || ["CASH_TO_RESTAURANT"];
+  res.json({ restaurant: { ...restaurant.toObject(), paymentMethods } });
 }));
 
 app.patch("/api/restaurant/me", auth(), roles("RESTAURANT_OWNER", "RESTAURANT_MANAGER"), asyncRoute(async (req, res) => {
@@ -1043,6 +1100,14 @@ app.patch("/api/restaurant/me", auth(), roles("RESTAURANT_OWNER", "RESTAURANT_MA
   const updates = {};
   for (const field of fields) {
     if (Object.hasOwn(req.body, field)) updates[field] = req.body[field];
+  }
+  if (Object.hasOwn(req.body, "paymentMethods")) {
+    if (!Array.isArray(req.body.paymentMethods) || !req.body.paymentMethods.length ||
+        req.body.paymentMethods.some((method) => !PAYMENT_METHODS.includes(method)) ||
+        new Set(req.body.paymentMethods).size !== req.body.paymentMethods.length) {
+      return res.status(400).json({ error: "Select at least one valid payment method." });
+    }
+    updates.paymentMethods = req.body.paymentMethods;
   }
   if (typeof updates.name !== "undefined" && (!String(updates.name).trim() || String(updates.name).length > 120)) {
     return res.status(400).json({ error: "Restaurant name is required and must be 120 characters or fewer." });
@@ -1081,8 +1146,29 @@ app.patch("/api/restaurant/me", auth(), roles("RESTAURANT_OWNER", "RESTAURANT_MA
   if (typeof updates.whatsapp !== "undefined" && updates.whatsapp && !validatePhone(String(updates.whatsapp))) return res.status(400).json({ error: "Enter a valid WhatsApp number." });
   if (typeof updates.email !== "undefined" && updates.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(updates.email))) return res.status(400).json({ error: "Enter a valid restaurant email." });
   Object.assign(restaurant, updates);
+  let registration;
+  if (Object.hasOwn(updates, "paymentMethods")) {
+    registration = await RestaurantRegistration.findOne({
+      restaurantId: restaurant._id,
+      status: "APPROVED",
+      activatedAt: { $ne: null }
+    }).sort({ updatedAt: -1 });
+    if (registration) {
+      registration.details = {
+        ...(registration.details || {}),
+        paymentMethods: updates.paymentMethods
+      };
+      await registration.save();
+    }
+  }
   await restaurant.save();
-  await writeAudit({ user: req.user, action: "RESTAURANT_PROFILE_UPDATED", entity: "Restaurant", entityId: restaurant._id });
+  await writeAudit({
+    user: req.user,
+    action: "RESTAURANT_PROFILE_UPDATED",
+    entity: "Restaurant",
+    entityId: restaurant._id,
+    details: Object.hasOwn(updates, "paymentMethods") ? { paymentMethods: updates.paymentMethods } : {}
+  });
   res.json({ restaurant });
 }));
 
