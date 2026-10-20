@@ -448,10 +448,15 @@
           <ng-container *ngIf="restaurantOrderTab === 'active'">
           <article class="portal-order" *ngFor="let order of activeRestaurantOrders">
             <div class="portal-order-top"><div><strong>{{ order.reference }}</strong><span>{{ order.createdAt | date:'short' }} · {{ order.guest.name || 'Customer' }} · {{ order.guest.phone }}</span></div><span class="order-status" [ngClass]="orderStatusClass(order.status)">{{ statusLabel(order.status) }}</span></div>
+            <div class="order-acceptance-countdown" *ngIf="order.status === 'RESTAURANT_PENDING'" [class.order-acceptance-expired]="orderAcceptanceExpired(order)">
+              <span>{{ orderAcceptanceExpired(order) ? 'Acceptance time expired' : 'Accept this order within' }}</span>
+              <strong>{{ orderAcceptanceCountdown(order) }}</strong>
+              <small *ngIf="orderAcceptanceExpired(order)">Automatic rejection is being processed.</small>
+            </div>
             <div class="order-detail-row" *ngFor="let item of order.items"><span>{{ item.quantity }} × {{ item.name }}</span><strong>{{ money(item.lineTotal) }}</strong></div>
             <div class="order-detail-row" *ngIf="order.paymentMethod"><span>Payment method</span><strong>{{ order.paymentMethod === 'POS_MACHINE' ? 'POS machine requested' : 'Cash on delivery' }}</strong></div>
             <div class="order-detail-row"><span>{{ order.address }}</span><strong>{{ money(order.total) }}</strong></div>
-            <div class="order-actions" *ngIf="order.status === 'RESTAURANT_PENDING'"><button class="button button-accent" (click)="restaurantAction(order, 'ACCEPTED')">Accept order</button><button class="button button-outline-danger" (click)="restaurantAction(order, 'REJECTED')">Reject</button></div>
+            <div class="order-actions" *ngIf="order.status === 'RESTAURANT_PENDING'"><button class="button button-accent" [disabled]="orderAcceptanceExpired(order)" (click)="restaurantAction(order, 'ACCEPTED')">{{ orderAcceptanceExpired(order) ? 'Acceptance expired' : 'Accept order' }}</button><button class="button button-outline-danger" (click)="restaurantAction(order, 'REJECTED')">Reject</button></div>
             <div class="order-actions" *ngIf="order.status === 'ACCEPTED'"><button class="button button-dark" (click)="restaurantAction(order, 'PREPARING')">Start preparing</button></div>
             <div class="order-actions" *ngIf="order.status === 'PREPARING'"><button class="button button-dark" (click)="restaurantAction(order, 'READY')">Mark ready</button></div>
             <div class="order-actions" *ngIf="order.status === 'READY'"><button class="button button-dark" (click)="restaurantAction(order, 'OUT_FOR_DELIVERY')">Out for delivery</button></div>

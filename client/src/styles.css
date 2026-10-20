@@ -374,6 +374,11 @@ h1 em, h2 em { color: #cde08e; font-weight: 500; }
 .portal-order-top > div, .admin-order-row > div, .availability-row > div, .review-row > div:first-child { display: flex; flex-direction: column; gap: 5px; }
 .portal-order-top strong, .admin-order-row strong, .review-row strong { font-size: 11px; }
 .portal-order-top span, .admin-order-row small, .review-row small, .availability-row small { color: var(--muted); font-size: 9px; }
+.order-acceptance-countdown { display: flex; align-items: center; flex-wrap: wrap; gap: 5px 9px; margin: 12px 0; padding: 10px 12px; border-radius: 8px; color: #795512; background: #fff4d7; font-size: 10px; }
+.order-acceptance-countdown strong { font-variant-numeric: tabular-nums; font-size: 15px; }
+.order-acceptance-countdown small { flex-basis: 100%; color: #8b5b1e; font-size: 9px; }
+.order-acceptance-expired { color: #a32f32; background: #fde5e4; }
+.order-acceptance-expired small { color: #a32f32; }
 .portal-order .order-detail-row { padding: 7px 0; font-size: 9px; }
 .portal-tabs { display: flex; gap: 5px; overflow-x: auto; margin: 0 0 6px; border-bottom: 1px solid var(--line); }
 .portal-tabs button { flex: 0 0 auto; padding: 10px 12px; border: 0; border-bottom: 2px solid transparent; color: var(--muted); background: transparent; font-size: 10px; font-weight: 600; white-space: nowrap; }

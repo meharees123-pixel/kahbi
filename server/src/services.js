@@ -21,6 +21,10 @@ async function logNotification(order, template, recipient) {
   });
 }
 
+function restaurantAcceptanceSlaMs() {
+  return Math.max(1, Number(process.env.RESTAURANT_ACCEPTANCE_SLA_MINUTES || 5)) * 60 * 1000;
+}
+
 async function changeOrderStatus(order, nextStatus, user, reason = "") {
   if (!canTransition(order.status, nextStatus)) {
     const error = new Error(`Order cannot transition from ${order.status} to ${nextStatus}.`);
@@ -86,8 +90,7 @@ async function changeOrderStatus(order, nextStatus, user, reason = "") {
 }
 
 async function expirePendingOrders() {
-  const slaMs = Math.max(1, Number(process.env.RESTAURANT_ACCEPTANCE_SLA_MINUTES || 5)) * 60 * 1000;
-  const cutoff = new Date(Date.now() - slaMs);
+  const cutoff = new Date(Date.now() - restaurantAcceptanceSlaMs());
   const expired = await Order.find({ status: "RESTAURANT_PENDING", createdAt: { $lt: cutoff } }).limit(100);
   for (const order of expired) {
     if (order.status !== "RESTAURANT_PENDING") continue;
@@ -96,4 +99,4 @@ async function expirePendingOrders() {
   return expired.length;
 }
 
-module.exports = { writeAudit, logNotification, changeOrderStatus, expirePendingOrders };
+module.exports = { writeAudit, logNotification, changeOrderStatus, expirePendingOrders, restaurantAcceptanceSlaMs };

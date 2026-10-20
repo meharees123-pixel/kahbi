@@ -20,7 +20,7 @@ const {
   customerNeedsTermsAcceptance,
   validateOrderTermsAcknowledgement
 } = require("./customer-terms");
-const { writeAudit, logNotification, changeOrderStatus } = require("./services");
+const { writeAudit, logNotification, changeOrderStatus, restaurantAcceptanceSlaMs } = require("./services");
 const { PAYMENT_METHODS, validatePartnerRegistration } = require("./partner-registration");
 const {
   MENU_HEADERS, parseMenuFile, parseImageArchive, validateMenuRows,
@@ -1175,7 +1175,15 @@ app.patch("/api/restaurant/me", auth(), roles("RESTAURANT_OWNER", "RESTAURANT_MA
 app.get("/api/restaurant/orders", auth(), roles(...restaurantRoles), asyncRoute(async (req, res) => {
   const restaurant = await restaurantForUser(req.user);
   const orders = await Order.find({ restaurantId: restaurant._id }).sort({ createdAt: -1 }).limit(100).lean();
-  res.json({ orders });
+  const acceptanceSlaMs = restaurantAcceptanceSlaMs();
+  res.json({
+    orders: orders.map((order) => ({
+      ...order,
+      acceptanceDeadlineAt: order.status === "RESTAURANT_PENDING"
+        ? new Date(new Date(order.createdAt).getTime() + acceptanceSlaMs).toISOString()
+        : null
+    }))
+  });
 }));
 
 app.get("/api/restaurant/completed-orders", auth(), roles(...restaurantRoles), asyncRoute(async (req, res) => {
@@ -1213,6 +1221,11 @@ app.patch("/api/restaurant/orders/:id/status", auth(), roles(...restaurantRoles)
   const order = await Order.findOne({ _id: req.params.id, restaurantId: restaurant._id });
   if (!order) return res.status(404).json({ error: "Order not found." });
   const nextStatus = String(req.body.status || "");
+  if (order.status === "RESTAURANT_PENDING" && nextStatus === "ACCEPTED" &&
+      Date.now() >= new Date(order.createdAt).getTime() + restaurantAcceptanceSlaMs()) {
+    await changeOrderStatus(order, "AUTO_REJECTED", null, "RESTAURANT_TIMEOUT");
+    return res.status(409).json({ error: "The time to accept this order has expired. It was automatically rejected." });
+  }
   if (!canTransition(order.status, nextStatus)) return res.status(409).json({ error: `This order cannot move from ${order.status} to ${nextStatus}.` });
   const updated = await changeOrderStatus(order, nextStatus, req.user, String(req.body.reason || "").slice(0, 250));
   res.json({ order: updated });
