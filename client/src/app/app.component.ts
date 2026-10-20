@@ -131,6 +131,12 @@ interface OrderQuote {
   promotionCode: string;
 }
 
+interface CustomerTerms {
+  version: string;
+  clauses: string[];
+  acceptanceRequired?: boolean;
+}
+
 interface FeedbackEntry {
   _id: string;
   orderId: string;
@@ -305,6 +311,14 @@ export class AppComponent implements OnInit {
   orderQuote: OrderQuote | null = null;
   orderQuoteLoading = false;
   private orderQuoteRequest = 0;
+  customerTerms: CustomerTerms | null = null;
+  customerTermsLoading = false;
+  customerTermsAccepted = false;
+  customerTermsModalOpen = false;
+  adminCustomerTerms: CustomerTerms | null = null;
+  adminCustomerTermsDraft = '';
+  adminCustomerTermsLoading = false;
+  adminCustomerTermsSaving = false;
   orders: Order[] = [];
   restaurantOrders: Order[] = [];
   completedRestaurantOrders: Order[] = [];
@@ -633,6 +647,28 @@ export class AppComponent implements OnInit {
     });
   }
 
+  loadCustomerTerms(): void {
+    this.customerTermsLoading = true;
+    this.http.get<CustomerTerms>(`${this.api}/customer-terms`, { headers: this.headers() }).pipe(finalize(() => {
+      this.customerTermsLoading = false;
+      this.changeDetector.markForCheck();
+    })).subscribe({
+      next: (terms) => {
+        if (terms.acceptanceRequired || this.customerTerms?.version !== terms.version) this.customerTermsAccepted = false;
+        this.customerTerms = terms;
+      },
+      error: (error) => this.showError(error)
+    });
+  }
+
+  openCustomerTerms(): void {
+    if (this.customerTerms) this.customerTermsModalOpen = true;
+  }
+
+  closeCustomerTerms(): void {
+    this.customerTermsModalOpen = false;
+  }
+
   private restorePartnerRegistration(): void {
     const registrationId = sessionStorage.getItem(`${this.partnerAccessPrefix}last-id`) || '';
     if (registrationId) {
@@ -824,6 +860,39 @@ export class AppComponent implements OnInit {
       next: ({ logoData }) => {
         this.brandLogoData = logoData || '';
         this.brandLogoDraft = null;
+      },
+      error: (error) => this.showError(error)
+    });
+  }
+
+  loadAdminCustomerTerms(): void {
+    this.adminCustomerTermsLoading = true;
+    this.http.get<CustomerTerms>(`${this.api}/admin/customer-terms`, { headers: this.headers() }).pipe(finalize(() => {
+      this.adminCustomerTermsLoading = false;
+      this.changeDetector.markForCheck();
+    })).subscribe({
+      next: (terms) => {
+        this.adminCustomerTerms = terms;
+        this.adminCustomerTermsDraft = terms.clauses.join('\n');
+      },
+      error: (error) => this.showError(error)
+    });
+  }
+
+  saveAdminCustomerTerms(): void {
+    const clauses = this.adminCustomerTermsDraft.split(/\r?\n/).map((clause) => clause.trim()).filter(Boolean);
+    this.adminCustomerTermsSaving = true;
+    this.http.put<CustomerTerms>(`${this.api}/admin/customer-terms`, { clauses }, { headers: this.headers() }).pipe(finalize(() => {
+      this.adminCustomerTermsSaving = false;
+      this.changeDetector.markForCheck();
+    })).subscribe({
+      next: (terms) => {
+        const changed = terms.version !== this.adminCustomerTerms?.version;
+        this.adminCustomerTerms = terms;
+        this.adminCustomerTermsDraft = terms.clauses.join('\n');
+        this.notice = changed
+          ? `Customer Terms and Conditions updated to version ${terms.version}. Customers will be asked to accept the new version at checkout.`
+          : 'Customer Terms and Conditions saved; the version is unchanged.';
       },
       error: (error) => this.showError(error)
     });
@@ -1369,12 +1438,22 @@ export class AppComponent implements OnInit {
     this.view = 'cart';
     this.error = '';
     this.refreshOrderQuote();
+    if (this.isCustomer) this.loadCustomerTerms();
   }
 
   placeOrder(): void {
     if (!this.selectedRestaurant || !this.cartItems.length) return;
     if (!this.isCustomer) {
       this.error = 'Verify your WhatsApp number before placing an order.';
+      return;
+    }
+    if (!this.customerTerms || this.customerTermsLoading) {
+      this.error = 'Load the current KABHI terms before placing your order.';
+      this.loadCustomerTerms();
+      return;
+    }
+    if (this.customerTerms.acceptanceRequired && !this.customerTermsAccepted) {
+      this.error = 'Please read and accept the current KABHI Terms and Conditions before placing your order.';
       return;
     }
     if (this.deliveryLatitude === null || this.deliveryLongitude === null) {
@@ -1403,6 +1482,8 @@ export class AppComponent implements OnInit {
       items: this.cartItems.map(({ item, quantity }) => ({ menuItemId: item._id, quantity })),
       address,
       promotionCode: this.promotionCode || undefined,
+      customerTermsVersion: this.customerTerms.version,
+      customerTermsAccepted: this.customerTerms.acceptanceRequired ? this.customerTermsAccepted : false,
       idempotencyKey
     };
     if (this.deliveryLatitude !== null && this.deliveryLongitude !== null) {
@@ -1423,6 +1504,8 @@ export class AppComponent implements OnInit {
         const { order } = response;
         this.cart = {};
         this.orderQuote = null;
+        this.customerTerms = { ...this.customerTerms!, acceptanceRequired: false };
+        this.customerTermsAccepted = false;
         sessionStorage.removeItem('kahbi.cartRestaurant');
         this.trackedOrder = order;
         this.trackReference = order.reference;
@@ -1430,7 +1513,15 @@ export class AppComponent implements OnInit {
         this.view = 'track';
         this.notice = `Order ${order.reference} placed successfully. Restaurant notifications are in demo mode.`;
       },
-      error: (error) => this.showError(error)
+      error: (error: { status?: number; error?: { error?: string; termsVersion?: string } }) => {
+        if (error.status === 409 && error.error?.termsVersion) {
+          this.customerTermsAccepted = false;
+          this.loadCustomerTerms();
+          this.error = 'KABHI Terms and Conditions were updated. Please review and accept the latest version before ordering.';
+          return;
+        }
+        this.showError(error);
+      }
     });
   }
 
@@ -1550,6 +1641,7 @@ export class AppComponent implements OnInit {
           this.notice = 'WhatsApp number verified. Your account is ready; you can now place your order.';
           this.view = 'cart';
           this.refreshOrderQuote();
+          this.loadCustomerTerms();
         } else {
           this.notice = 'Your WhatsApp number is verified. Welcome to KABHI.';
           this.loadRoleLanding();
@@ -2111,6 +2203,7 @@ export class AppComponent implements OnInit {
     this.loadAdminWhatsappConfig();
     this.loadAdminPartnerRegistrations();
     this.loadAdminBrandLogo();
+    this.loadAdminCustomerTerms();
     this.http.get<{
       metrics: { [key: string]: number };
       orders: Order[];

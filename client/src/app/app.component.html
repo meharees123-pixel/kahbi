@@ -312,7 +312,12 @@
             <div class="summary-row total-row"><span>Final payable amount</span><strong>{{ money(quote.total, quote.currency) }}</strong></div>
           </ng-container>
           <p class="fine-print" *ngIf="!orderQuote && !orderQuoteLoading">Update the total to see the applicable delivery fee and final amount before confirming.</p>
-          <button class="button button-accent button-wide" [disabled]="loading || orderQuoteLoading || !orderQuote || !isCustomer || !cartItems.length || deliveryLatitude === null || deliveryLongitude === null || !isSelectedRestaurantInDeliveryRange" (click)="placeOrder()">{{ loading ? 'Working…' : isCustomer ? 'Place order' : 'Verify WhatsApp to continue' }} <span>→</span></button>
+          <p class="customer-terms-loading" *ngIf="isCustomer && customerTermsLoading">Loading the current Terms and Conditions…</p>
+          <div class="customer-terms-acknowledgment" *ngIf="isCustomer && customerTerms?.acceptanceRequired">
+            <input id="customer-terms-accepted" [(ngModel)]="customerTermsAccepted" type="checkbox" [disabled]="customerTermsLoading || !customerTerms">
+            <span><label for="customer-terms-accepted">I have read and agree to KABHI</label> <a class="customer-terms-link" href="#customer-terms" (click)="$event.preventDefault(); openCustomerTerms()">Terms and Conditions</a>.</span>
+          </div>
+          <button class="button button-accent button-wide" [disabled]="loading || orderQuoteLoading || !orderQuote || !isCustomer || !customerTerms || customerTermsLoading || (customerTerms.acceptanceRequired && !customerTermsAccepted) || !cartItems.length || deliveryLatitude === null || deliveryLongitude === null || !isSelectedRestaurantInDeliveryRange" (click)="placeOrder()">{{ loading ? 'Working…' : isCustomer ? 'Place order' : 'Verify WhatsApp to continue' }} <span>→</span></button>
           <p class="fine-print">The displayed total is calculated by KABHI using current menu prices and any valid promotion. Tax is not charged by KABHI.</p>
         </aside>
       </div>
@@ -507,6 +512,14 @@
           <button class="button button-quiet button-small" *ngIf="brandLogoData" (click)="removeBrandLogo()">Restore text logo</button>
         </div>
       </div>
+      <div class="portal-panel wide-panel customer-terms-admin">
+        <div class="panel-heading"><div><span class="eyebrow">CUSTOMER CHECKOUT</span><h2>Terms and Conditions</h2></div><button class="text-button" type="button" [disabled]="adminCustomerTermsLoading || adminCustomerTermsSaving" (click)="loadAdminCustomerTerms()">Refresh ↻</button></div>
+        <p class="muted">Customers accept these terms before their first order and again after any version change. Add one clause per line.</p>
+        <p class="terms-version-label" *ngIf="adminCustomerTerms">Current version: {{ adminCustomerTerms.version }}</p>
+        <p class="muted" *ngIf="adminCustomerTermsLoading">Loading customer terms…</p>
+        <label class="form-field"><span>Customer terms</span><textarea [(ngModel)]="adminCustomerTermsDraft" rows="8" maxlength="12000" placeholder="Enter one term per line"></textarea></label>
+        <button class="button button-dark button-small" type="button" [disabled]="adminCustomerTermsLoading || adminCustomerTermsSaving || !adminCustomerTermsDraft.trim()" (click)="saveAdminCustomerTerms()">{{ adminCustomerTermsSaving ? 'Saving…' : 'Save customer terms' }}</button>
+      </div>
       <div class="portal-panel wide-panel partner-registration-admin">
         <div class="panel-heading"><div><span class="eyebrow">PARTNER ONBOARDING</span><h2>Restaurant registrations <span class="menu-count">{{ adminPartnerRegistrations.length }}</span></h2></div><button class="text-button" (click)="loadAdminPartnerRegistrations()">Refresh ↻</button></div>
         <p class="partner-private-note">Delivery fee and free-delivery threshold values submitted here are requests only. They are not applied to customer orders until KABHI configures and approves them.</p>
@@ -652,6 +665,13 @@
       </div>
     </section>
   </main>
+  <div class="terms-modal-backdrop" *ngIf="customerTermsModalOpen && customerTerms" (click)="closeCustomerTerms()">
+    <section class="terms-modal" role="dialog" aria-modal="true" aria-labelledby="customer-terms-title" (click)="$event.stopPropagation()">
+      <div class="terms-modal-heading"><div><span class="eyebrow">KABHI · VERSION {{ customerTerms.version }}</span><h2 id="customer-terms-title">Terms and Conditions</h2></div><button class="map-close" type="button" aria-label="Close Terms and Conditions" (click)="closeCustomerTerms()">×</button></div>
+      <ol class="customer-terms-list"><li *ngFor="let clause of customerTerms.clauses">{{ clause }}</li></ol>
+      <div class="terms-modal-actions"><button class="button button-quiet" type="button" (click)="closeCustomerTerms()">Close</button><button class="button button-dark" type="button" (click)="closeCustomerTerms()">OK</button></div>
+    </section>
+  </div>
   <div class="feedback-modal-backdrop" *ngIf="feedbackModalOpen && feedbackModalOrder" (click)="closeFeedbackModal()">
     <section class="feedback-modal" role="dialog" aria-modal="true" aria-labelledby="feedback-modal-title" (click)="$event.stopPropagation()">
       <div class="feedback-modal-header">

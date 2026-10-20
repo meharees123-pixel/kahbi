@@ -9,6 +9,8 @@ const UserSchema = new Schema(
     email: { type: String, required: true, unique: true, lowercase: true, trim: true },
     phone: { type: String, trim: true, default: "" },
     whatsappVerifiedAt: { type: Date, default: null },
+    customerTermsVersion: { type: String, default: "" },
+    customerTermsAcceptedAt: { type: Date, default: null },
     passwordHash: { type: String, required: true, select: false },
     role: {
       type: String,
@@ -137,6 +139,8 @@ const OrderSchema = new Schema(
       reason: { type: String, default: "" },
       createdAt: { type: Date, default: Date.now }
     }],
+    customerTermsVersion: { type: String, default: "" },
+    customerTermsAcceptedAt: { type: Date, default: null },
     completedAt: { type: Date, default: null }
   },
   { timestamps: true }
