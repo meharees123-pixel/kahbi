@@ -53,6 +53,7 @@ jobs:
       JWT_SECRET: ${{ vars.GCP_JWT_SECRET }}
       OTP_SIGNING_SECRET: ${{ vars.GCP_OTP_SIGNING_SECRET }}
       WHATSAPP_ENCRYPTION_SECRET: ${{ vars.GCP_WHATSAPP_ENCRYPTION_SECRET }}
+      CLIENT_ORIGIN: ${{ vars.GCP_CLIENT_ORIGIN }}
       API_SERVICE: ${{ vars.GCP_API_SERVICE || 'kahbi-api' }}
       WEB_SERVICE: ${{ vars.GCP_WEB_SERVICE || 'kahbi-web' }}
     steps:
@@ -62,13 +63,17 @@ jobs:
       - name: Validate deployment configuration
         shell: bash
         run: |
-          required=(GCP_PROJECT_ID GCP_REGION GAR_REPOSITORY RUNTIME_SERVICE_ACCOUNT MONGODB_SECRET JWT_SECRET OTP_SIGNING_SECRET WHATSAPP_ENCRYPTION_SECRET)
+          required=(GCP_PROJECT_ID GCP_REGION GAR_REPOSITORY RUNTIME_SERVICE_ACCOUNT MONGODB_SECRET JWT_SECRET OTP_SIGNING_SECRET WHATSAPP_ENCRYPTION_SECRET CLIENT_ORIGIN)
           missing=()
           for key in "${required[@]}"; do
             if [[ -z "${!key}" ]]; then missing+=("$key"); fi
           done
           if (( ${#missing[@]} )); then
             printf 'Missing GitHub Actions repository variables: %s\n' "${missing[*]}"
+            exit 1
+          fi
+          if [[ ! "$CLIENT_ORIGIN" =~ ^https://[A-Za-z0-9.-]+(:[0-9]+)?$ ]]; then
+            echo "GCP_CLIENT_ORIGIN must be a public HTTPS origin without a path."
             exit 1
           fi
 
@@ -108,6 +113,7 @@ jobs:
           env_vars: |-
             NODE_ENV=production
             CURRENCY=QAR
+            CLIENT_ORIGIN=${{ env.CLIENT_ORIGIN }}
           secrets: |-
             MONGODB_URI=${{ env.MONGODB_SECRET }}:latest
             JWT_SECRET=${{ env.JWT_SECRET }}:latest

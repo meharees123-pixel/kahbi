@@ -5,13 +5,27 @@ const rateLimit = require("express-rate-limit");
 const jwt = require("jsonwebtoken");
 const mongoose = require("mongoose");
 const crypto = require("crypto");
+const multer = require("multer");
 const {
-  User, Restaurant, MenuItem, Order, Promotion, Rating, AuditLog, MessageLog, BillingTransaction,
-  Advertisement, AdvertisementEvent, WhatsappOtp, WhatsappSettings, WhatsappOtpControl
+  User, Restaurant, MenuItem, Order, Promotion, Rating, Feedback, AuditLog, MessageLog, BillingTransaction,
+  Advertisement, AdvertisementEvent, WhatsappOtp, WhatsappSettings, WhatsappOtpControl, RestaurantRegistration, PlatformSetting
 } = require("./models");
 const { canTransition, haversineKm, isValidCoordinate, isValidServiceRadius, isWithinServiceArea } = require("./rules");
 const { validateImageDataUrl } = require("./images");
+const { validateFeedbackSubmission, buildFeedbackSummary, attachFeedbackToOrders } = require("./feedback");
+const { buildRestaurantRatingSummary } = require("./ratings");
+const {
+  readCustomerTerms,
+  updateCustomerTerms,
+  customerNeedsTermsAcceptance,
+  validateOrderTermsAcknowledgement
+} = require("./customer-terms");
 const { writeAudit, logNotification, changeOrderStatus } = require("./services");
+const { PAYMENT_METHODS, validatePartnerRegistration } = require("./partner-registration");
+const {
+  MENU_HEADERS, parseMenuFile, parseImageArchive, validateMenuRows,
+  isMenuItemWithinAvailability, rowsToCsv
+} = require("./bulk-menu");
 const {
   normalizeWhatsappPhone,
   customerPhoneQuery,
@@ -31,12 +45,18 @@ const secret = process.env.JWT_SECRET || "local-development-secret-change-before
 const resolvedOtpSigningSecret = resolveOtpSigningSecret(process.env);
 const currency = process.env.CURRENCY || "QAR";
 const apiOrigin = process.env.CLIENT_ORIGIN || "http://localhost:4200";
+const partnerTermsVersion = "2026-10-v1";
 
 app.use(helmet());
 app.use(cors({ origin: apiOrigin }));
-app.use(express.json({ limit: "512kb" }));
+app.use(express.json({ limit: "4mb" }));
 app.use("/api/auth", rateLimit({ windowMs: 15 * 60 * 1000, limit: 100, standardHeaders: true, legacyHeaders: false }));
 const customerOtpRateLimit = rateLimit({ windowMs: 15 * 60 * 1000, limit: 10, standardHeaders: true, legacyHeaders: false });
+const partnerRegistrationRateLimit = rateLimit({ windowMs: 60 * 60 * 1000, limit: 10, standardHeaders: true, legacyHeaders: false });
+const orderQuoteRateLimit = rateLimit({ windowMs: 15 * 60 * 1000, limit: 60, standardHeaders: true, legacyHeaders: false });
+const menuImportRateLimit = rateLimit({ windowMs: 60 * 60 * 1000, limit: 12, standardHeaders: true, legacyHeaders: false });
+const menuFileUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 2 * 1024 * 1024, files: 1 } });
+const menuImageArchiveUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024, files: 1 } });
 
 async function whatsappRuntimeEnvironment() {
   const saved = await WhatsappSettings.findOne({ key: "primary" }).lean();
@@ -44,6 +64,11 @@ async function whatsappRuntimeEnvironment() {
     ? decryptWhatsappConfiguration(saved.encryptedConfiguration, process.env.WHATSAPP_CONFIG_ENCRYPTION_KEY)
     : {};
   return { ...process.env, ...savedConfiguration };
+}
+
+async function currentCustomerTerms() {
+  const setting = await PlatformSetting.findOne({ key: "customerTerms" }).select("value").lean();
+  return readCustomerTerms(setting?.value || "");
 }
 
 function asyncRoute(handler) {
@@ -70,6 +95,12 @@ function auth(required = true) {
     }
     req.user = user;
     req.authMethod = decoded.amr || "password";
+    if (user.role.startsWith("RESTAURANT_") && user.restaurantId) {
+      const restaurant = await Restaurant.findById(user.restaurantId).select("status");
+      if (!restaurant || restaurant.status === "SUSPENDED") {
+        return res.status(403).json({ error: "This restaurant account is suspended or unavailable." });
+      }
+    }
     next();
   });
 }
@@ -92,6 +123,53 @@ function publicUser(user) {
   };
 }
 
+function maskPhone(phone) {
+  const normalized = String(phone || "").trim();
+  const digits = normalized.replace(/\D/g, "");
+  if (!digits) return "";
+  const countryCode = normalized.startsWith("+") ? `+${digits.slice(0, Math.min(3, digits.length - 2))}` : "";
+  const nationalNumber = countryCode ? digits.slice(countryCode.length - 1) : digits;
+  return `${countryCode}${countryCode ? " " : ""}${"•".repeat(Math.max(4, nationalNumber.length - 2))}${nationalNumber.slice(-2)}`;
+}
+
+async function ordersWithRestaurantDetails(orders) {
+  if (!orders.length) return [];
+  const restaurantIds = [...new Set(orders.map((order) => String(order.restaurantId)))];
+  const [restaurants, registrations] = await Promise.all([
+    Restaurant.find({ _id: { $in: restaurantIds } }).select("name address phone latitude longitude").lean(),
+    RestaurantRegistration.find({ restaurantId: { $in: restaurantIds } }).select("restaurantId details").lean()
+  ]);
+  const restaurantById = new Map(restaurants.map((restaurant) => [String(restaurant._id), restaurant]));
+  const registrationByRestaurantId = new Map(registrations.map((registration) => [String(registration.restaurantId), registration]));
+  return orders.map((order) => {
+    const restaurant = restaurantById.get(String(order.restaurantId));
+    const registeredDetails = registrationByRestaurantId.get(String(order.restaurantId))?.details;
+    const addressParts = restaurant ? [
+      restaurant.address,
+      registeredDetails?.streetBuilding,
+      registeredDetails?.zoneNumber ? `Zone ${registeredDetails.zoneNumber}` : "",
+      registeredDetails?.city,
+      registeredDetails?.country
+    ].filter(Boolean) : [];
+    const completeAddress = [...new Map(addressParts.map((part) => [String(part).trim().toLowerCase(), String(part).trim()])).values()]
+      .join(", ");
+    return {
+      ...(typeof order.toObject === "function" ? order.toObject() : order),
+      restaurant: restaurant ? {
+        name: restaurant.name,
+        address: completeAddress,
+        phone: restaurant.phone,
+        latitude: restaurant.latitude,
+        longitude: restaurant.longitude
+      } : null
+    };
+  });
+}
+
+async function orderWithRestaurantDetails(order) {
+  return (await ordersWithRestaurantDetails([order]))[0];
+}
+
 function issueToken(user, authMethod = "password") {
   return jwt.sign({ sub: String(user._id), role: user.role, amr: authMethod }, secret, { expiresIn: "8h", issuer: "kahbi-api" });
 }
@@ -100,8 +178,42 @@ function roundMoney(amount) {
   return Math.round((amount + Number.EPSILON) * 100) / 100;
 }
 
+function effectiveMenuPrice(item) {
+  return item.discountPrice !== null && item.discountPrice !== undefined
+    ? Number(item.discountPrice)
+    : Number(item.price);
+}
+
 function validatePhone(phone) {
   return typeof phone === "string" && /^\+?[0-9 ()-]{8,20}$/.test(phone.trim());
+}
+
+function hashSecret(value) {
+  return crypto.createHash("sha256").update(value).digest("hex");
+}
+
+function secureTokenMatch(token, hash) {
+  if (typeof token !== "string" || !hash) return false;
+  const candidate = Buffer.from(hashSecret(token), "hex");
+  const expected = Buffer.from(hash, "hex");
+  return candidate.length === expected.length && crypto.timingSafeEqual(candidate, expected);
+}
+
+function publicRegistration(registration, includeDetails = false) {
+  return {
+    registrationId: registration.registrationId,
+    status: registration.status,
+    details: includeDetails ? registration.details : undefined,
+    termsVersion: registration.termsVersion,
+    termsAcceptedAt: registration.termsAcceptedAt,
+    createdAt: registration.createdAt,
+    updatedAt: registration.updatedAt,
+    reviewedAt: registration.reviewedAt,
+    reviewReason: registration.reviewReason,
+    correctionAllowed: registration.correctionAllowed,
+    restaurantId: registration.restaurantId,
+    activatedAt: registration.activatedAt
+  };
 }
 
 async function restaurantForUser(user) {
@@ -119,40 +231,239 @@ async function restaurantForUser(user) {
   return restaurant;
 }
 
+async function ordersWithFeedback(orders, restaurantId) {
+  if (!orders.length) return attachFeedbackToOrders(orders, []);
+  const orderIds = orders.map((order) => order._id);
+  const [feedbackEntries, legacyRatings] = await Promise.all([
+    Feedback.find({ restaurantId, orderId: { $in: orderIds } })
+      .select("orderId restaurantId overallRating foodRating deliveryRating comment submittedAt").lean(),
+    Rating.find({ restaurantId, orderId: { $in: orderIds } })
+      .select("orderId restaurantId stars comment createdAt").lean()
+  ]);
+  const legacyFeedback = legacyRatings.map((rating) => ({
+    orderId: rating.orderId,
+    restaurantId: rating.restaurantId,
+    overallRating: rating.stars,
+    foodRating: null,
+    deliveryRating: null,
+    comment: rating.comment,
+    submittedAt: rating.createdAt
+  }));
+  return attachFeedbackToOrders(orders, [...feedbackEntries, ...legacyFeedback]);
+}
+
+async function refreshRestaurantRating(restaurantId) {
+  const summaries = await restaurantRatingSummaries([restaurantId]);
+  const summary = summaries.get(String(restaurantId)) || { average: 0, count: 0 };
+  await Restaurant.findByIdAndUpdate(restaurantId, {
+    ratingAverage: summary.average,
+    ratingCount: summary.count
+  });
+}
+
+async function restaurantRatingSummaries(restaurantIds) {
+  if (!restaurantIds.length) return new Map();
+  const validRating = { restaurantId: { $in: restaurantIds }, orderId: { $ne: null } };
+  const entries = await Feedback.aggregate([
+    { $match: { ...validRating, overallRating: { $type: "number", $gte: 1, $lte: 5 } } },
+    { $lookup: { from: Order.collection.name, localField: "orderId", foreignField: "_id", as: "order" } },
+    { $unwind: "$order" },
+    { $match: { $expr: { $eq: ["$restaurantId", "$order.restaurantId"] } } },
+    { $project: { restaurantId: 1, orderId: 1, rating: "$overallRating", source: { $literal: 1 } } },
+    {
+      $unionWith: {
+        coll: Rating.collection.name,
+        pipeline: [
+          { $match: { ...validRating, stars: { $type: "number", $gte: 1, $lte: 5 } } },
+          { $lookup: { from: Order.collection.name, localField: "orderId", foreignField: "_id", as: "order" } },
+          { $unwind: "$order" },
+          { $match: { $expr: { $eq: ["$restaurantId", "$order.restaurantId"] } } },
+          { $project: { restaurantId: 1, orderId: 1, rating: "$stars", source: { $literal: 0 } } }
+        ]
+      }
+    },
+    { $sort: { source: -1 } },
+    { $group: { _id: { restaurantId: "$restaurantId", orderId: "$orderId" }, rating: { $first: "$rating" } } },
+    { $project: { _id: 0, restaurantId: "$_id.restaurantId", orderId: "$_id.orderId", overallRating: "$rating" } }
+  ]);
+  const entriesByRestaurant = new Map();
+  for (const entry of entries) {
+    const key = String(entry.restaurantId);
+    const restaurantEntries = entriesByRestaurant.get(key) || [];
+    restaurantEntries.push(entry);
+    entriesByRestaurant.set(key, restaurantEntries);
+  }
+  return new Map(restaurantIds.map((restaurantId) => {
+    const key = String(restaurantId);
+    return [key, buildRestaurantRatingSummary([], entriesByRestaurant.get(key) || [])];
+  }));
+}
+
+function requestedPage(value) {
+  const page = Number.parseInt(String(value || "1"), 10);
+  return Number.isInteger(page) && page > 0 ? page : 1;
+}
+
 app.get("/api/health", (_req, res) => res.json({ status: "ok", service: "kahbi-api", currency }));
+
+app.get("/api/customer-terms", auth(false), asyncRoute(async (req, res) => {
+  const terms = await currentCustomerTerms();
+  res.json({
+    ...terms,
+    acceptanceRequired: req.user?.role === "CUSTOMER" && customerNeedsTermsAcceptance(req.user, terms)
+  });
+}));
+
+app.get("/api/brand", asyncRoute(async (_req, res) => {
+  const setting = await PlatformSetting.findOne({ key: "brandLogo" }).select("value").lean();
+  res.json({ logoData: setting?.value || "" });
+}));
 
 app.post("/api/auth/register", asyncRoute(async (req, res) => {
   res.status(410).json({ error: "Customer accounts are created after WhatsApp OTP verification. Request a code to continue." });
 }));
 
 app.post("/api/auth/register-restaurant", asyncRoute(async (req, res) => {
-  const { ownerName, email, password, phone, restaurantName, cuisine, address, latitude, longitude, serviceRadiusKm } = req.body;
-  if (!ownerName || !restaurantName || !address || !email || typeof password !== "string" || password.length < 10 || !validatePhone(phone || "")) {
-    return res.status(400).json({ error: "Complete all business and owner fields; use a valid mobile number and a password of at least 10 characters." });
+  res.status(410).json({ error: "Restaurant accounts are created after Admin approval. Submit a restaurant partner application instead." });
+}));
+
+app.post("/api/partner-registrations", partnerRegistrationRateLimit, asyncRoute(async (req, res) => {
+  const requestId = String(req.get("Idempotency-Key") || "").trim();
+  const accessToken = String(req.get("X-Registration-Token") || "");
+  if (!/^[0-9a-f-]{36}$/i.test(requestId) || accessToken.length < 32 || accessToken.length > 100) {
+    return res.status(400).json({ error: "A valid application request key is required." });
   }
-  const restaurantLatitude = Number(latitude);
-  const restaurantLongitude = Number(longitude);
-  const deliveryRadius = Number(serviceRadiusKm);
-  if (!isValidCoordinate(restaurantLatitude, -90, 90) || !isValidCoordinate(restaurantLongitude, -180, 180) || !isValidServiceRadius(deliveryRadius)) {
-    return res.status(400).json({ error: "Choose the restaurant location on the map and set a delivery radius between 0.5 and 100 km." });
+  const previous = await RestaurantRegistration.findOne({ requestId }).select("+accessTokenHash");
+  if (previous) {
+    if (!secureTokenMatch(accessToken, previous.accessTokenHash)) return res.status(409).json({ error: "This application request key has already been used." });
+    return res.status(200).json({ registration: publicRegistration(previous), duplicate: true });
   }
-  if (await User.exists({ email: String(email).toLowerCase() })) return res.status(409).json({ error: "An account already uses that email." });
-  const restaurant = await Restaurant.create({
-    name: restaurantName,
-    cuisine: Array.isArray(cuisine) ? cuisine : String(cuisine || "Other").split(",").map((entry) => entry.trim()).filter(Boolean),
-    address,
-    latitude: restaurantLatitude,
-    longitude: restaurantLongitude,
-    serviceRadiusKm: deliveryRadius,
-    phone,
-    status: "PENDING_REVIEW",
-    availability: "CLOSED"
+  const { details, errors } = validatePartnerRegistration(req.body);
+  if (req.body.termsVersion !== partnerTermsVersion) errors.termsVersion = "Please review and accept the current partner terms.";
+  for (const field of ["logoImageData", "coverImageData"]) {
+    const image = validateImageDataUrl(details[field]);
+    if (image?.error) errors[field] = image.error;
+    else details[field] = image?.imageData || "";
+  }
+  if (Object.keys(errors).length) return res.status(400).json({ error: "Please correct the highlighted fields.", fields: errors });
+  const year = new Date().getFullYear();
+  let registrationId = "";
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    registrationId = `KBR-${year}-${crypto.randomBytes(4).toString("hex").toUpperCase()}`;
+    if (!await RestaurantRegistration.exists({ registrationId })) break;
+    registrationId = "";
+  }
+  if (!registrationId) return res.status(503).json({ error: "Could not issue a registration ID. Please try again." });
+  let registration;
+  try {
+    registration = await RestaurantRegistration.create({
+      registrationId,
+      requestId,
+      details,
+      termsVersion: partnerTermsVersion,
+      termsAcceptedAt: new Date(),
+      accessTokenHash: hashSecret(accessToken),
+      status: "PENDING_VERIFICATION"
+    });
+  } catch (error) {
+    if (error.code !== 11000) throw error;
+    const duplicate = await RestaurantRegistration.findOne({ requestId }).select("+accessTokenHash");
+    if (!duplicate || !secureTokenMatch(accessToken, duplicate.accessTokenHash)) {
+      return res.status(409).json({ error: "This application request key has already been used." });
+    }
+    return res.status(200).json({ registration: publicRegistration(duplicate), duplicate: true });
+  }
+  await writeAudit({
+    action: "PARTNER_REGISTRATION_SUBMITTED",
+    entity: "RestaurantRegistration",
+    entityId: registration.registrationId,
+    details: { status: registration.status, termsVersion: registration.termsVersion, termsAcceptedAt: registration.termsAcceptedAt }
   });
-  const user = new User({ name: ownerName, email, phone, role: "RESTAURANT_OWNER", restaurantId: restaurant._id });
+  res.status(201).json({ registration: publicRegistration(registration) });
+}));
+
+app.get("/api/partner-registrations/:registrationId", asyncRoute(async (req, res) => {
+  const registration = await RestaurantRegistration.findOne({ registrationId: String(req.params.registrationId).toUpperCase() }).select("+accessTokenHash");
+  if (!registration || !secureTokenMatch(req.get("X-Registration-Token"), registration.accessTokenHash)) {
+    return res.status(404).json({ error: "Registration not found. Check the Registration ID and access link." });
+  }
+  res.json({ registration: publicRegistration(registration, true) });
+}));
+
+app.patch("/api/partner-registrations/:registrationId", asyncRoute(async (req, res) => {
+  const registration = await RestaurantRegistration.findOne({ registrationId: String(req.params.registrationId).toUpperCase() }).select("+accessTokenHash");
+  if (!registration || !secureTokenMatch(req.get("X-Registration-Token"), registration.accessTokenHash)) {
+    return res.status(404).json({ error: "Registration not found. Check the Registration ID and access link." });
+  }
+  if (registration.status !== "PENDING_VERIFICATION" || !registration.correctionAllowed) {
+    return res.status(409).json({ error: "This application is not currently authorized for corrections." });
+  }
+  const { details, errors } = validatePartnerRegistration(req.body);
+  if (req.body.termsVersion !== partnerTermsVersion) errors.termsVersion = "Please review and accept the current partner terms.";
+  for (const field of ["logoImageData", "coverImageData"]) {
+    const image = validateImageDataUrl(details[field]);
+    if (image?.error) errors[field] = image.error;
+    else details[field] = image?.imageData || "";
+  }
+  if (Object.keys(errors).length) return res.status(400).json({ error: "Please correct the highlighted fields.", fields: errors });
+  const changedFields = Object.keys(details).filter((field) =>
+    JSON.stringify(details[field]) !== JSON.stringify(registration.details?.[field])
+  );
+  registration.details = details;
+  registration.termsVersion = partnerTermsVersion;
+  registration.termsAcceptedAt = new Date();
+  registration.status = "PENDING_VERIFICATION";
+  registration.correctionAllowed = false;
+  registration.reviewReason = "";
+  await registration.save();
+  await writeAudit({
+    action: "PARTNER_REGISTRATION_RESUBMITTED",
+    entity: "RestaurantRegistration",
+    entityId: registration.registrationId,
+    details: { status: registration.status, termsVersion: registration.termsVersion, changedFields }
+  });
+  res.json({ registration: publicRegistration(registration) });
+}));
+
+app.post("/api/auth/activate-restaurant", asyncRoute(async (req, res) => {
+  const token = String(req.body.token || "");
+  const password = req.body.password;
+  const email = String(req.body.email || "").trim().toLowerCase();
+  if (token.length < 32 || typeof password !== "string" || password.length < 10 || password.length > 200 ||
+      !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return res.status(400).json({ error: "Enter a valid email address, activation link, and password of at least 10 characters." });
+  }
+  const registration = await RestaurantRegistration.findOne({
+    activationTokenHash: hashSecret(token),
+    activationExpiresAt: { $gt: new Date() },
+    activatedAt: null
+  }).select("+activationTokenHash");
+  if (!registration || registration.status !== "APPROVED" || !secureTokenMatch(token, registration.activationTokenHash)) {
+    return res.status(400).json({ error: "This activation link is invalid, expired, or already used." });
+  }
+  if (await User.exists({ email })) return res.status(409).json({ error: "An account already uses this email address. Contact KABHI support." });
+  const user = new User({
+    name: registration.details.ownerName,
+    email,
+    phone: registration.details.phone,
+    role: "RESTAURANT_OWNER",
+    restaurantId: registration.restaurantId
+  });
   await user.setPassword(password);
   await user.save();
-  await writeAudit({ user, action: "RESTAURANT_ONBOARDED", entity: "Restaurant", entityId: restaurant._id, details: { status: restaurant.status } });
-  res.status(201).json({ token: issueToken(user), user: publicUser(user), message: "Application submitted for admin review." });
+  registration.activatedAt = new Date();
+  registration.activationTokenHash = "";
+  registration.activationExpiresAt = null;
+  await registration.save();
+  const restaurant = await Restaurant.findById(registration.restaurantId);
+  if (restaurant) {
+    restaurant.paymentMethods = Array.isArray(registration.details.paymentMethods) && registration.details.paymentMethods.length
+      ? registration.details.paymentMethods
+      : ["CASH_TO_RESTAURANT"];
+    await restaurant.save();
+  }
+  await writeAudit({ user, action: "PARTNER_ACCOUNT_ACTIVATED", entity: "RestaurantRegistration", entityId: registration.registrationId });
+  res.status(201).json({ token: issueToken(user), user: publicUser(user) });
 }));
 
 app.post("/api/auth/customer-otp/request", customerOtpRateLimit, asyncRoute(async (req, res) => {
@@ -278,6 +589,12 @@ app.post("/api/auth/login", asyncRoute(async (req, res) => {
   if (user.role === "CUSTOMER") {
     return res.status(403).json({ error: "Customer accounts sign in with a WhatsApp verification code." });
   }
+  if (user.role.startsWith("RESTAURANT_")) {
+    const restaurant = user.restaurantId ? await Restaurant.findById(user.restaurantId).select("status") : null;
+    if (!restaurant || restaurant.status === "SUSPENDED") {
+      return res.status(403).json({ error: "This restaurant account is suspended or unavailable." });
+    }
+  }
   const portal = String(req.body.portal || "").toUpperCase();
   if (portal && !["CUSTOMER", "RESTAURANT", "ADMIN"].includes(portal)) {
     return res.status(400).json({ error: "Choose a valid sign-in portal." });
@@ -294,7 +611,7 @@ app.post("/api/auth/login", asyncRoute(async (req, res) => {
 
 app.get("/api/auth/me", auth(), (req, res) => res.json({ user: publicUser(req.user) }));
 
-app.get("/api/restaurants", asyncRoute(async (req, res) => {
+app.get("/api/restaurants", auth(false), asyncRoute(async (req, res) => {
   const query = { status: "APPROVED" };
   if (req.query.search) {
     const search = String(req.query.search).slice(0, 80);
@@ -305,23 +622,71 @@ app.get("/api/restaurants", asyncRoute(async (req, res) => {
     const matchingItems = await MenuItem.find({
       name: { $regex: search.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), $options: "i" },
       active: true,
-      availability: "AVAILABLE"
-    }).distinct("restaurantId");
-    if (matchingItems.length) query.$or.push({ _id: { $in: matchingItems } });
+      availability: "AVAILABLE",
+      $or: [{ approvalStatus: "APPROVED" }, { approvalStatus: { $exists: false } }]
+    }).select("restaurantId availabilityStart availabilityEnd").lean();
+    const matchingRestaurantIds = [...new Set(matchingItems
+      .filter(isMenuItemWithinAvailability)
+      .map((item) => String(item.restaurantId)))];
+    if (matchingRestaurantIds.length) query.$or.push({ _id: { $in: matchingRestaurantIds } });
   }
   if (req.query.open === "true") query.availability = "OPEN";
   const restaurants = await Restaurant.find(query)
-    .select("name imageData hotelName cuisine description address latitude longitude serviceRadiusKm preparationMinutes minOrder maxOrder status availability category ratingAverage ratingCount demo")
+    .select("name imageData hotelName cuisine description address phone latitude longitude serviceRadiusKm preparationMinutes minOrder maxOrder paymentMethods status availability category ratingAverage ratingCount demo partnerRegistrationId")
     .sort({ demo: -1, name: 1 })
     .limit(50)
     .lean();
+  const partnerRestaurantIds = restaurants
+    .filter((restaurant) => restaurant.partnerRegistrationId && restaurant.availability === "OPEN")
+    .map((restaurant) => restaurant._id);
+  const partnerMenuItems = partnerRestaurantIds.length
+    ? await MenuItem.find({
+      restaurantId: { $in: partnerRestaurantIds },
+      active: true,
+      availability: "AVAILABLE",
+      $or: [{ approvalStatus: "APPROVED" }, { approvalStatus: { $exists: false } }]
+    }).select("restaurantId availabilityStart availabilityEnd").lean()
+    : [];
+  const partnerRestaurantsWithMenus = new Set(partnerMenuItems
+    .filter(isMenuItemWithinAvailability)
+    .map((item) => String(item.restaurantId)));
+  const activatedPartnerRegistrations = partnerRestaurantIds.length
+    ? await RestaurantRegistration.find({
+      restaurantId: { $in: partnerRestaurantIds },
+      status: "APPROVED",
+      activatedAt: { $ne: null }
+    }).select("restaurantId details.paymentMethods").sort({ updatedAt: -1 }).lean()
+    : [];
+  const activatedPartnerRestaurantIds = new Set(activatedPartnerRegistrations.map((registration) => String(registration.restaurantId)));
+  const paymentMethodsByRestaurantId = new Map();
+  for (const restaurant of restaurants) {
+    const methods = restaurant.paymentMethods;
+    paymentMethodsByRestaurantId.set(String(restaurant._id), Array.isArray(methods) && methods.length
+      ? methods.filter((method) => PAYMENT_METHODS.includes(method))
+      : ["CASH_TO_RESTAURANT"]);
+  }
+  for (const registration of activatedPartnerRegistrations) {
+    const id = String(registration.restaurantId);
+    const methods = registration.details?.paymentMethods;
+    const registeredMethods = Array.isArray(methods)
+      ? methods.filter((method) => PAYMENT_METHODS.includes(method))
+      : [];
+    if (registeredMethods.length) paymentMethodsByRestaurantId.set(id, registeredMethods);
+  }
+  const customerRestaurants = restaurants.filter((restaurant) =>
+    !restaurant.partnerRegistrationId ||
+    (restaurant.availability === "OPEN" &&
+      partnerRestaurantsWithMenus.has(String(restaurant._id)) &&
+      activatedPartnerRestaurantIds.has(String(restaurant._id)))
+  );
+  const ratingSummaries = await restaurantRatingSummaries(customerRestaurants.map((restaurant) => restaurant._id));
   const lat = Number(req.query.lat);
   const lng = Number(req.query.lng);
   const locationProvided = req.query.lat !== undefined || req.query.lng !== undefined;
   if (locationProvided && (!isValidCoordinate(lat, -90, 90) || !isValidCoordinate(lng, -180, 180))) {
     return res.status(400).json({ error: "Provide valid latitude and longitude." });
   }
-  const result = restaurants.map((restaurant) => {
+  const result = customerRestaurants.map((restaurant) => {
     let distanceKm = null;
     let eligible = true;
     if (locationProvided && restaurant.latitude !== null && restaurant.latitude !== undefined &&
@@ -332,7 +697,17 @@ app.get("/api/restaurants", asyncRoute(async (req, res) => {
     } else if (locationProvided) {
       eligible = false;
     }
-    return { ...restaurant, distanceKm, eligible };
+    const ratingSummary = ratingSummaries.get(String(restaurant._id)) || { average: 0, count: 0 };
+    const { partnerRegistrationId, ...publicRestaurant } = restaurant;
+    return {
+      ...publicRestaurant,
+      paymentMethods: paymentMethodsByRestaurantId.get(String(restaurant._id)) || ["CASH_TO_RESTAURANT"],
+      phone: req.user ? restaurant.phone : maskPhone(restaurant.phone),
+      ratingAverage: ratingSummary.average,
+      ratingCount: ratingSummary.count,
+      distanceKm,
+      eligible
+    };
   });
   const eligibleOnly = req.query.eligible === "true" || locationProvided;
   const now = new Date();
@@ -354,17 +729,42 @@ app.get("/api/restaurants", asyncRoute(async (req, res) => {
 app.get("/api/restaurants/:id/menu", asyncRoute(async (req, res) => {
   if (!mongoose.isValidObjectId(req.params.id)) return res.status(404).json({ error: "Restaurant not found." });
   const restaurant = await Restaurant.findOne({ _id: req.params.id, status: "APPROVED" })
-    .select("name imageData hotelName cuisine description address latitude longitude serviceRadiusKm preparationMinutes minOrder maxOrder status availability category ratingAverage ratingCount demo")
+    .select("name imageData hotelName cuisine description address latitude longitude serviceRadiusKm preparationMinutes minOrder maxOrder paymentMethods status availability category ratingAverage ratingCount demo")
     .lean();
   if (!restaurant) return res.status(404).json({ error: "Restaurant not found." });
-  const items = await MenuItem.find({ restaurantId: restaurant._id, active: true }).sort({ category: 1, name: 1 }).lean();
+  const registration = await RestaurantRegistration.findOne({
+    restaurantId: restaurant._id,
+    status: "APPROVED",
+    activatedAt: { $ne: null }
+  }).select("details.paymentMethods").sort({ updatedAt: -1 }).lean();
+  restaurant.paymentMethods = Array.isArray(registration?.details?.paymentMethods) && registration.details.paymentMethods.length
+    ? registration.details.paymentMethods.filter((method) => PAYMENT_METHODS.includes(method))
+    : Array.isArray(restaurant.paymentMethods) && restaurant.paymentMethods.length
+      ? restaurant.paymentMethods.filter((method) => PAYMENT_METHODS.includes(method))
+      : ["CASH_TO_RESTAURANT"];
+  const items = await MenuItem.find({
+    restaurantId: restaurant._id,
+    active: true,
+    $or: [{ approvalStatus: "APPROVED" }, { approvalStatus: { $exists: false } }]
+  }).sort({ category: 1, name: 1 }).lean();
   const promotion = await Promotion.findOne({ active: true, restaurantId: restaurant._id, startsAt: { $lte: new Date() }, $or: [{ endsAt: null }, { endsAt: { $gte: new Date() } }] }).lean();
-  res.json({ restaurant, items, promotion });
+  res.json({
+    restaurant,
+    items: items.map((item) => ({
+      ...item,
+      availability: isMenuItemWithinAvailability(item) ? item.availability : "UNAVAILABLE"
+    })),
+    promotion
+  });
 }));
 
 app.get("/api/orders/mine", auth(), roles("CUSTOMER"), asyncRoute(async (req, res) => {
   const orders = await Order.find({ customerId: req.user._id }).sort({ createdAt: -1 }).limit(50).lean();
-  res.json({ orders });
+  const feedbackOrderIds = await Feedback.find({ customerId: req.user._id }, { orderId: 1 }).lean();
+  const feedbackSet = new Set(feedbackOrderIds.map((entry) => String(entry.orderId)));
+  const responses = (await ordersWithRestaurantDetails(orders))
+    .map((order) => ({ ...order, feedbackSubmitted: feedbackSet.has(String(order._id)) }));
+  res.json({ orders: responses });
 }));
 
 app.post("/api/orders/track", asyncRoute(async (req, res) => {
@@ -373,7 +773,81 @@ app.post("/api/orders/track", asyncRoute(async (req, res) => {
   if (!reference || !phone) return res.status(400).json({ error: "Order reference and checkout phone are required." });
   const order = await Order.findOne({ reference, customerId: null, "guest.phone": { $in: [phone, String(req.body.phone || "").trim()] } }).lean();
   if (!order) return res.status(404).json({ error: "We couldn't find an order matching that reference and phone number." });
-  res.json({ order });
+  res.json({ order: await orderWithRestaurantDetails(order) });
+}));
+
+app.post("/api/orders/quote", orderQuoteRateLimit, auth(false), asyncRoute(async (req, res) => {
+  if (req.user && req.user.role !== "CUSTOMER") return res.status(403).json({ error: "Only customers can request an order total." });
+  const { restaurantId, items, latitude, longitude } = req.body;
+  const promotionCode = String(req.body.promotionCode || "").trim().toUpperCase();
+  if (!mongoose.isValidObjectId(restaurantId)) return res.status(400).json({ error: "Choose a valid restaurant." });
+  if (!Array.isArray(items) || items.length < 1 || items.length > 50) {
+    return res.status(400).json({ error: "Add between 1 and 50 items to your order." });
+  }
+  const restaurant = await Restaurant.findOne({ _id: restaurantId, status: "APPROVED", availability: "OPEN" });
+  if (!restaurant) return res.status(409).json({ error: "This restaurant is not currently accepting orders." });
+  if (!isValidCoordinate(Number(latitude), -90, 90) || !isValidCoordinate(Number(longitude), -180, 180) ||
+      !isValidCoordinate(restaurant.latitude, -90, 90) || !isValidCoordinate(restaurant.longitude, -180, 180) ||
+      !isValidServiceRadius(restaurant.serviceRadiusKm)) {
+    return res.status(400).json({ error: "Choose a valid delivery location to see the order total." });
+  }
+  if (!isWithinServiceArea(Number(latitude), Number(longitude), restaurant.latitude, restaurant.longitude, restaurant.serviceRadiusKm)) {
+    return res.status(400).json({ error: "This delivery location is outside the restaurant's delivery area." });
+  }
+  const quantities = new Map();
+  for (const item of items) {
+    const id = String(item.menuItemId || "");
+    const quantity = Number(item.quantity);
+    if (!mongoose.isValidObjectId(id) || !Number.isInteger(quantity) || quantity < 1 || quantity > 20) {
+      return res.status(400).json({ error: "Each item must have a valid menu item and quantity from 1 to 20." });
+    }
+    const totalQuantity = (quantities.get(id) || 0) + quantity;
+    if (totalQuantity > 20) return res.status(400).json({ error: "The maximum quantity for one menu item is 20." });
+    quantities.set(id, totalQuantity);
+  }
+  const menuItems = await MenuItem.find({
+    _id: { $in: [...quantities.keys()] },
+    restaurantId,
+    active: true,
+    availability: "AVAILABLE",
+    $or: [{ approvalStatus: "APPROVED" }, { approvalStatus: { $exists: false } }]
+  });
+  if (menuItems.length !== quantities.size) return res.status(409).json({ error: "One or more items are unavailable. Refresh the menu and try again." });
+  if (menuItems.some((item) => !isMenuItemWithinAvailability(item))) {
+    return res.status(409).json({ error: "One or more items are outside their available hours. Refresh the menu and try again." });
+  }
+  const subtotal = roundMoney(menuItems.reduce((sum, item) => sum + effectiveMenuPrice(item) * quantities.get(String(item._id)), 0));
+  if (subtotal < restaurant.minOrder) return res.status(400).json({ error: `The minimum order for this restaurant is ${currency} ${restaurant.minOrder.toFixed(2)}.` });
+  if (subtotal > restaurant.maxOrder) return res.status(400).json({ error: "This order is above the restaurant's maximum order value." });
+  let discount = 0;
+  if (promotionCode) {
+    const promotion = await Promotion.findOne({
+      code: promotionCode,
+      active: true,
+      startsAt: { $lte: new Date() },
+      $or: [{ endsAt: null }, { endsAt: { $gte: new Date() } }],
+      $and: [{ $or: [{ restaurantId: null }, { restaurantId }] }]
+    });
+    if (!promotion || subtotal < promotion.minimumOrder || (promotion.usageLimit > 0 && promotion.usageCount >= promotion.usageLimit)) {
+      return res.status(400).json({ error: "That promotion is not valid for this order." });
+    }
+    discount = promotion.discountType === "PERCENTAGE"
+      ? roundMoney(Math.min(subtotal * promotion.discountValue / 100, promotion.maximumDiscount))
+      : roundMoney(Math.min(promotion.discountValue, subtotal));
+  }
+  const deliveryFee = 0;
+  const serviceFee = Math.max(0, Number(process.env.CUSTOMER_ADMIN_FEE || 0));
+  res.json({
+    quote: {
+      subtotal,
+      discount,
+      deliveryFee,
+      serviceFee,
+      total: roundMoney(Math.max(0, subtotal - discount) + deliveryFee + serviceFee),
+      currency,
+      promotionCode
+    }
+  });
 }));
 
 app.post("/api/orders", auth(false), asyncRoute(async (req, res) => {
@@ -386,8 +860,12 @@ app.post("/api/orders", auth(false), asyncRoute(async (req, res) => {
   if (previous) {
     const signedOwner = req.user && previous.customerId && String(previous.customerId) === String(req.user._id);
     if (!signedOwner) return res.status(409).json({ error: "This order request key has already been used." });
-    return res.status(200).json({ order: previous, duplicate: true });
+    return res.status(200).json({ order: await orderWithRestaurantDetails(previous), duplicate: true });
   }
+  const signedCustomer = req.user && req.user.role === "CUSTOMER" ? req.user : null;
+  let customerTerms;
+  let customerTermsAcceptanceRequired;
+  let customerTermsAcceptedAt;
   if (!mongoose.isValidObjectId(restaurantId)) return res.status(400).json({ error: "Choose a valid restaurant." });
   if (!Array.isArray(items) || items.length < 1 || items.length > 50) {
     return res.status(400).json({ error: "Add between 1 and 50 items to your order." });
@@ -395,10 +873,23 @@ app.post("/api/orders", auth(false), asyncRoute(async (req, res) => {
   if (typeof address !== "string" || address.trim().length < 5) {
     return res.status(400).json({ error: "Enter a delivery address with at least 5 characters." });
   }
-  const signedCustomer = req.user && req.user.role === "CUSTOMER" ? req.user : null;
   const restaurant = await Restaurant.findOne({ _id: restaurantId, status: "APPROVED" });
   if (!restaurant) return res.status(404).json({ error: "This restaurant is not available for ordering." });
   if (restaurant.availability !== "OPEN") return res.status(409).json({ error: "This restaurant is not accepting orders right now." });
+  const registration = await RestaurantRegistration.findOne({
+    restaurantId: restaurant._id,
+    status: "APPROVED",
+    activatedAt: { $ne: null }
+  }).select("details.paymentMethods").sort({ updatedAt: -1 }).lean();
+  const availablePaymentMethods = Array.isArray(registration?.details?.paymentMethods) && registration.details.paymentMethods.length
+    ? registration.details.paymentMethods.filter((method) => PAYMENT_METHODS.includes(method))
+    : Array.isArray(restaurant.paymentMethods) && restaurant.paymentMethods.length
+      ? restaurant.paymentMethods.filter((method) => PAYMENT_METHODS.includes(method))
+      : ["CASH_TO_RESTAURANT"];
+  const paymentMethod = req.body.paymentMethod === undefined ? "CASH_TO_RESTAURANT" : req.body.paymentMethod;
+  if (!PAYMENT_METHODS.includes(paymentMethod) || !availablePaymentMethods.includes(paymentMethod)) {
+    return res.status(400).json({ error: "Choose a payment method offered by this restaurant." });
+  }
   const hasLatitude = latitude !== undefined;
   const hasLongitude = longitude !== undefined;
   if (hasLatitude !== hasLongitude || !hasLatitude ||
@@ -424,14 +915,23 @@ app.post("/api/orders", auth(false), asyncRoute(async (req, res) => {
     if (totalQuantity > 20) return res.status(400).json({ error: "The maximum quantity for one menu item is 20." });
     quantities.set(id, totalQuantity);
   }
-  const menuItems = await MenuItem.find({ _id: { $in: [...quantities.keys()] }, restaurantId, active: true, availability: "AVAILABLE" });
+  const menuItems = await MenuItem.find({
+    _id: { $in: [...quantities.keys()] },
+    restaurantId,
+    active: true,
+    availability: "AVAILABLE",
+    $or: [{ approvalStatus: "APPROVED" }, { approvalStatus: { $exists: false } }]
+  });
   if (menuItems.length !== quantities.size) return res.status(409).json({ error: "One or more items are unavailable. Refresh the menu and try again." });
+  if (menuItems.some((item) => !isMenuItemWithinAvailability(item))) {
+    return res.status(409).json({ error: "One or more items are outside their available hours. Refresh the menu and try again." });
+  }
   const orderItems = menuItems.map((menuItem) => ({
     menuItemId: menuItem._id,
     name: menuItem.name,
-    unitPrice: menuItem.price,
+    unitPrice: effectiveMenuPrice(menuItem),
     quantity: quantities.get(String(menuItem._id)),
-    lineTotal: roundMoney(menuItem.price * quantities.get(String(menuItem._id))),
+    lineTotal: roundMoney(effectiveMenuPrice(menuItem) * quantities.get(String(menuItem._id))),
     instructions: String((items.find((entry) => String(entry.menuItemId) === String(menuItem._id)) || {}).instructions || "").slice(0, 250)
   }));
   const subtotal = roundMoney(orderItems.reduce((sum, item) => sum + item.lineTotal, 0));
@@ -457,6 +957,13 @@ app.post("/api/orders", auth(false), asyncRoute(async (req, res) => {
   const deliveryFee = 0;
   const adminFee = Math.max(0, Number(process.env.CUSTOMER_ADMIN_FEE || 0));
   const total = roundMoney(Math.max(0, subtotal - discount) + deliveryFee + adminFee);
+  customerTerms = await currentCustomerTerms();
+  customerTermsAcceptanceRequired = customerNeedsTermsAcceptance(signedCustomer, customerTerms);
+  try {
+    customerTermsAcceptedAt = validateOrderTermsAcknowledgement(signedCustomer, req.body, customerTerms);
+  } catch (error) {
+    return res.status(error.status || 409).json({ error: error.message, termsVersion: error.termsVersion || customerTerms.version });
+  }
   const today = new Date(Date.now() + 3 * 60 * 60 * 1000).toISOString().slice(0, 10).replaceAll("-", "");
   const reference = `KAB-${today}-${require("crypto").randomBytes(4).toString("hex").toUpperCase()}`;
   const order = await Order.create({
@@ -478,9 +985,20 @@ app.post("/api/orders", auth(false), asyncRoute(async (req, res) => {
     total,
     currency,
     promotionCode: promotion ? promotion.code : "",
+    paymentMethod,
     estimatedPreparationMinutes: restaurant.preparationMinutes,
+    customerTermsVersion: customerTerms.version,
+    customerTermsAcceptedAt,
     statusHistory: [{ previousStatus: "", status: "RESTAURANT_PENDING", changedBy: "SYSTEM", role: "SYSTEM" }]
   });
+  if (customerTermsAcceptanceRequired) {
+    await User.findByIdAndUpdate(signedCustomer._id, {
+      $set: {
+        customerTermsVersion: customerTerms.version,
+        customerTermsAcceptedAt
+      }
+    });
+  }
   if (promotion) {
     promotion.usageCount += 1;
     await promotion.save();
@@ -488,7 +1006,7 @@ app.post("/api/orders", auth(false), asyncRoute(async (req, res) => {
   await writeAudit({ user: signedCustomer, action: "ORDER_CREATED", entity: "Order", entityId: order._id, details: { reference, restaurantId: restaurant._id, total } });
   await logNotification(order, "NEW_ORDER_RESTAURANT", restaurant.whatsapp || restaurant.phone);
   await logNotification(order, "ORDER_CREATED_CUSTOMER", signedCustomer.phone);
-  res.status(201).json({ order });
+  res.status(201).json({ order: await orderWithRestaurantDetails(order) });
 }));
 
 app.post("/api/orders/:id/cancel", auth(), roles("CUSTOMER"), asyncRoute(async (req, res) => {
@@ -499,7 +1017,7 @@ app.post("/api/orders/:id/cancel", auth(), roles("CUSTOMER"), asyncRoute(async (
     return res.status(409).json({ error: "This order can no longer be cancelled in the app. Please contact support." });
   }
   const updated = await changeOrderStatus(order, "CANCELLED", req.user, String(req.body.reason || "Customer requested cancellation").slice(0, 250));
-  res.json({ order: updated });
+  res.json({ order: await orderWithRestaurantDetails(updated) });
 }));
 
 app.post("/api/orders/guest/cancel", asyncRoute(async (req, res) => {
@@ -513,7 +1031,7 @@ app.post("/api/orders/guest/cancel", asyncRoute(async (req, res) => {
     return res.status(409).json({ error: "This order can no longer be cancelled in the app. Please contact support." });
   }
   const updated = await changeOrderStatus(order, "CANCELLED", null, String(req.body.reason || "Guest requested cancellation").slice(0, 250));
-  res.json({ order: updated });
+  res.json({ order: await orderWithRestaurantDetails(updated) });
 }));
 
 app.post("/api/orders/:id/rating", auth(), roles("CUSTOMER"), asyncRoute(async (req, res) => {
@@ -522,15 +1040,58 @@ app.post("/api/orders/:id/rating", auth(), roles("CUSTOMER"), asyncRoute(async (
   const order = await Order.findOne({ _id: req.params.id, customerId: req.user._id, status: "CLOSED" });
   if (!order) return res.status(400).json({ error: "Only your completed orders can be rated." });
   const rating = await Rating.create({ orderId: order._id, customerId: req.user._id, restaurantId: order.restaurantId, stars, comment: String(req.body.comment || "").slice(0, 1000) });
-  const aggregate = await Rating.aggregate([{ $match: { restaurantId: order.restaurantId } }, { $group: { _id: "$restaurantId", average: { $avg: "$stars" }, count: { $sum: 1 } } }]);
-  if (aggregate[0]) await Restaurant.findByIdAndUpdate(order.restaurantId, { ratingAverage: roundMoney(aggregate[0].average), ratingCount: aggregate[0].count });
+  await refreshRestaurantRating(order.restaurantId);
   res.status(201).json({ rating });
+}));
+
+app.get("/api/orders/:id/feedback", auth(), roles("CUSTOMER"), asyncRoute(async (req, res) => {
+  const order = await Order.findOne({ _id: req.params.id, customerId: req.user._id, status: "CLOSED" }).lean();
+  if (!order) return res.status(404).json({ error: "That completed order was not found for this customer." });
+  const feedback = await Feedback.findOne({ orderId: order._id }).lean();
+  res.json({ feedbackExists: Boolean(feedback), feedback: feedback || null });
+}));
+
+app.post("/api/orders/:id/feedback", auth(), roles("CUSTOMER"), asyncRoute(async (req, res) => {
+  const order = await Order.findOne({ _id: req.params.id, customerId: req.user._id, status: "CLOSED" });
+  if (!order) return res.status(404).json({ error: "Only your completed orders may receive feedback." });
+  if (await Feedback.exists({ orderId: order._id })) {
+    return res.status(409).json({ error: "Feedback has already been submitted for this order. It cannot be edited after submission." });
+  }
+  const feedbackPayload = validateFeedbackSubmission(req.body);
+  const feedback = await Feedback.create({
+    orderId: order._id,
+    customerId: req.user._id,
+    customerContact: req.user.phone || "",
+    restaurantId: order.restaurantId,
+    overallRating: feedbackPayload.overallRating,
+    foodRating: feedbackPayload.foodRating,
+    deliveryRating: feedbackPayload.deliveryRating,
+    comment: feedbackPayload.comment,
+    submittedAt: new Date()
+  });
+  await refreshRestaurantRating(order.restaurantId);
+  await writeAudit({
+    user: req.user,
+    action: "ORDER_FEEDBACK_SUBMITTED",
+    entity: "Feedback",
+    entityId: feedback._id,
+    details: { orderId: order._id, restaurantId: order.restaurantId, overallRating: feedback.overallRating }
+  });
+  res.status(201).json({ feedback });
 }));
 
 const restaurantRoles = ["RESTAURANT_OWNER", "RESTAURANT_MANAGER", "RESTAURANT_STAFF"];
 app.get("/api/restaurant/me", auth(), roles(...restaurantRoles), asyncRoute(async (req, res) => {
   const restaurant = await restaurantForUser(req.user);
-  res.json({ restaurant });
+  const registration = await RestaurantRegistration.findOne({
+    restaurantId: restaurant._id,
+    status: "APPROVED",
+    activatedAt: { $ne: null }
+  }).select("details.paymentMethods").sort({ updatedAt: -1 }).lean();
+  const paymentMethods = Array.isArray(registration?.details?.paymentMethods) && registration.details.paymentMethods.length
+    ? registration.details.paymentMethods.filter((method) => PAYMENT_METHODS.includes(method))
+    : restaurant.paymentMethods?.filter((method) => PAYMENT_METHODS.includes(method)) || ["CASH_TO_RESTAURANT"];
+  res.json({ restaurant: { ...restaurant.toObject(), paymentMethods } });
 }));
 
 app.patch("/api/restaurant/me", auth(), roles("RESTAURANT_OWNER", "RESTAURANT_MANAGER"), asyncRoute(async (req, res) => {
@@ -539,6 +1100,14 @@ app.patch("/api/restaurant/me", auth(), roles("RESTAURANT_OWNER", "RESTAURANT_MA
   const updates = {};
   for (const field of fields) {
     if (Object.hasOwn(req.body, field)) updates[field] = req.body[field];
+  }
+  if (Object.hasOwn(req.body, "paymentMethods")) {
+    if (!Array.isArray(req.body.paymentMethods) || !req.body.paymentMethods.length ||
+        req.body.paymentMethods.some((method) => !PAYMENT_METHODS.includes(method)) ||
+        new Set(req.body.paymentMethods).size !== req.body.paymentMethods.length) {
+      return res.status(400).json({ error: "Select at least one valid payment method." });
+    }
+    updates.paymentMethods = req.body.paymentMethods;
   }
   if (typeof updates.name !== "undefined" && (!String(updates.name).trim() || String(updates.name).length > 120)) {
     return res.status(400).json({ error: "Restaurant name is required and must be 120 characters or fewer." });
@@ -577,8 +1146,29 @@ app.patch("/api/restaurant/me", auth(), roles("RESTAURANT_OWNER", "RESTAURANT_MA
   if (typeof updates.whatsapp !== "undefined" && updates.whatsapp && !validatePhone(String(updates.whatsapp))) return res.status(400).json({ error: "Enter a valid WhatsApp number." });
   if (typeof updates.email !== "undefined" && updates.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(updates.email))) return res.status(400).json({ error: "Enter a valid restaurant email." });
   Object.assign(restaurant, updates);
+  let registration;
+  if (Object.hasOwn(updates, "paymentMethods")) {
+    registration = await RestaurantRegistration.findOne({
+      restaurantId: restaurant._id,
+      status: "APPROVED",
+      activatedAt: { $ne: null }
+    }).sort({ updatedAt: -1 });
+    if (registration) {
+      registration.details = {
+        ...(registration.details || {}),
+        paymentMethods: updates.paymentMethods
+      };
+      await registration.save();
+    }
+  }
   await restaurant.save();
-  await writeAudit({ user: req.user, action: "RESTAURANT_PROFILE_UPDATED", entity: "Restaurant", entityId: restaurant._id });
+  await writeAudit({
+    user: req.user,
+    action: "RESTAURANT_PROFILE_UPDATED",
+    entity: "Restaurant",
+    entityId: restaurant._id,
+    details: Object.hasOwn(updates, "paymentMethods") ? { paymentMethods: updates.paymentMethods } : {}
+  });
   res.json({ restaurant });
 }));
 
@@ -586,6 +1176,24 @@ app.get("/api/restaurant/orders", auth(), roles(...restaurantRoles), asyncRoute(
   const restaurant = await restaurantForUser(req.user);
   const orders = await Order.find({ restaurantId: restaurant._id }).sort({ createdAt: -1 }).limit(100).lean();
   res.json({ orders });
+}));
+
+app.get("/api/restaurant/completed-orders", auth(), roles(...restaurantRoles), asyncRoute(async (req, res) => {
+  const restaurant = await restaurantForUser(req.user);
+  const page = requestedPage(req.query.page);
+  const pageSize = 25;
+  const filter = { restaurantId: restaurant._id, status: "CLOSED" };
+  const [total, orders] = await Promise.all([
+    Order.countDocuments(filter),
+    Order.find(filter).sort({ completedAt: -1, createdAt: -1 }).skip((page - 1) * pageSize).limit(pageSize).lean()
+  ]);
+  res.json({
+    orders: await ordersWithFeedback(orders, restaurant._id),
+    page,
+    pageSize,
+    total,
+    totalPages: Math.ceil(total / pageSize)
+  });
 }));
 
 app.get("/api/restaurant/menu", auth(), roles(...restaurantRoles), asyncRoute(async (req, res) => {
@@ -643,7 +1251,12 @@ app.patch("/api/restaurant/menu/:id", auth(), roles(...restaurantRoles), asyncRo
   const item = await MenuItem.findOne({ _id: req.params.id, restaurantId: restaurant._id });
   if (!item) return res.status(404).json({ error: "Menu item not found." });
   if (hasAvailability) item.availability = availability;
-  if (hasImage) item.imageData = image?.imageData || "";
+  if (hasImage) {
+    item.imageData = image?.imageData || "";
+    if (await RestaurantRegistration.exists({ restaurantId: restaurant._id, status: "APPROVED" })) {
+      item.approvalStatus = "PENDING_REVIEW";
+    }
+  }
   await item.save();
   await writeAudit({
     user: req.user,
@@ -661,10 +1274,252 @@ app.post("/api/restaurant/menu", auth(), roles("RESTAURANT_OWNER", "RESTAURANT_M
   if (!name || !category || !Number.isFinite(Number(price)) || Number(price) <= 0) return res.status(400).json({ error: "Item name, category and a positive price are required." });
   const image = Object.hasOwn(req.body, "imageData") ? validateImageDataUrl(req.body.imageData) : null;
   if (image?.error) return res.status(400).json({ error: image.error });
-  const item = await MenuItem.create({ restaurantId: restaurant._id, name: String(name).trim(), category: String(category).trim(), description: String(description || ""), price: roundMoney(Number(price)), currency, imageData: image?.imageData || "" });
+  const partnerRegistration = await RestaurantRegistration.exists({ restaurantId: restaurant._id, status: "APPROVED" });
+  const item = await MenuItem.create({
+    restaurantId: restaurant._id,
+    name: String(name).trim(),
+    category: String(category).trim(),
+    description: String(description || ""),
+    price: roundMoney(Number(price)),
+    currency,
+    imageData: image?.imageData || "",
+    approvalStatus: partnerRegistration ? "PENDING_REVIEW" : "APPROVED"
+  });
   await writeAudit({ user: req.user, action: "MENU_ITEM_CREATED", entity: "MenuItem", entityId: item._id, details: { name: item.name, price: item.price } });
   res.status(201).json({ item });
 }));
+
+function findBulkMenuMatch(items, row) {
+  if (row.itemId) {
+    const identifier = row.itemId.toLowerCase();
+    const identified = items.find((item) =>
+      String(item._id) === row.itemId || String(item.itemCode || "").toLowerCase() === identifier
+    );
+    if (identified) return identified;
+  }
+  const category = row.category.toLowerCase();
+  const name = row.name.toLowerCase();
+  return items.find((item) => item.category.trim().toLowerCase() === category && item.name.trim().toLowerCase() === name);
+}
+
+function bulkMenuItemCode(row, existingItem) {
+  if (row.itemId) return row.itemId;
+  if (existingItem?.itemCode) return existingItem.itemCode;
+  if (existingItem) return String(existingItem._id);
+  const digest = crypto.createHash("sha256").update(`${row.category.toLowerCase()}\0${row.name.toLowerCase()}`).digest("hex").slice(0, 32);
+  return `BULK-${digest}`;
+}
+
+app.get("/api/restaurant/menu/bulk/template", auth(), roles(...restaurantRoles), asyncRoute(async (req, res) => {
+  await restaurantForUser(req.user);
+  res.setHeader("Content-Type", "text/csv; charset=utf-8");
+  res.setHeader("Content-Disposition", 'attachment; filename="kahbi-menu-template.csv"');
+  res.send(`\uFEFF${rowsToCsv([], MENU_HEADERS)}`);
+}));
+
+app.post(
+  "/api/restaurant/menu/bulk/preview",
+  auth(),
+  roles("RESTAURANT_OWNER", "RESTAURANT_MANAGER"),
+  menuImportRateLimit,
+  menuFileUpload.single("file"),
+  asyncRoute(async (req, res) => {
+    const restaurant = await restaurantForUser(req.user);
+    if (!req.file) return res.status(400).json({ error: "Choose a CSV or .xlsx menu file." });
+    const parsed = await parseMenuFile(req.file);
+    if (parsed.error) return res.status(400).json({ error: parsed.error });
+    const checked = validateMenuRows(parsed.rows.map(({ rowNumber, values }) => ({ ...values, rowNumber })), restaurant._id);
+    if (checked.error) return res.status(400).json({ error: checked.error });
+    const existingItems = await MenuItem.find({ restaurantId: restaurant._id }).select("_id itemCode name category approvalStatus").lean();
+    const rows = checked.rows.map((row) => {
+      const match = row.errors.length ? null : findBulkMenuMatch(existingItems, row);
+      return { ...row, existingItemId: match ? String(match._id) : "", existingItemName: match?.name || "" };
+    });
+    res.json({
+      rows,
+      totalRows: rows.length,
+      validCount: rows.filter((row) => !row.errors.length).length,
+      invalidCount: rows.filter((row) => row.errors.length).length,
+      existingMatches: rows.filter((row) => row.existingItemId).length
+    });
+  })
+);
+
+app.post("/api/restaurant/menu/bulk/import", auth(), roles("RESTAURANT_OWNER", "RESTAURANT_MANAGER"), menuImportRateLimit, asyncRoute(async (req, res) => {
+  const restaurant = await restaurantForUser(req.user);
+  const mode = String(req.body.mode || "").toUpperCase();
+  if (!["ADD_NEW", "UPDATE_EXISTING", "REPLACE"].includes(mode)) {
+    return res.status(400).json({ error: "Choose Add New Items, Update Existing Items, or Replace Entire Menu." });
+  }
+  if (mode === "REPLACE" && req.body.confirmReplace !== true) {
+    return res.status(400).json({ error: "Confirm that you want to replace the entire menu." });
+  }
+  const checked = validateMenuRows(req.body.rows, restaurant._id);
+  if (checked.error) return res.status(400).json({ error: checked.error });
+  if (mode === "REPLACE" && checked.invalidCount) {
+    return res.status(400).json({
+      error: "Correct every invalid row before replacing the entire menu. No menu items were changed.",
+      rows: checked.rows,
+      totalRows: checked.rows.length,
+      validCount: checked.validCount,
+      invalidCount: checked.invalidCount
+    });
+  }
+
+  const existingItems = await MenuItem.find({ restaurantId: restaurant._id }).select("_id itemCode name category approvalStatus").lean();
+  const rows = checked.rows.map((row) => ({ ...row, existingItemId: "" }));
+  let imported = 0;
+  let updated = 0;
+  let failed = 0;
+  const importedIds = [];
+  const partnerRegistration = await RestaurantRegistration.exists({ restaurantId: restaurant._id, status: "APPROVED" });
+
+  for (const row of rows) {
+    if (row.errors.length) {
+      failed += 1;
+      continue;
+    }
+    const match = findBulkMenuMatch(existingItems, row);
+    if (match && mode === "ADD_NEW") {
+      row.errors.push(`This item already exists (menu item ${match.itemCode || match._id}). Choose Update Existing Items to update it.`);
+      row.existingItemId = String(match._id);
+      failed += 1;
+      continue;
+    }
+    const itemCode = bulkMenuItemCode(row, match);
+    const values = {
+      restaurantId: restaurant._id,
+      itemCode,
+      category: row.category,
+      name: row.name,
+      description: row.description,
+      price: roundMoney(row.price),
+      discountPrice: row.discountPrice === null ? null : roundMoney(row.discountPrice),
+      foodType: row.foodType,
+      preparationMinutes: row.preparationMinutes || 15,
+      availability: row.availability,
+      availabilityStart: row.availabilityStart,
+      availabilityEnd: row.availabilityEnd,
+      imageUrl: row.imageUrl,
+      customizationOptions: row.customizationOptions,
+      currency: "QAR",
+      approvalStatus: partnerRegistration ? "PENDING_REVIEW" : (match?.approvalStatus || "APPROVED"),
+      active: true
+    };
+    const item = match
+      ? await MenuItem.findOneAndUpdate(
+        { _id: match._id, restaurantId: restaurant._id },
+        { $set: values },
+        { new: true, runValidators: true }
+      )
+      : await MenuItem.create(values);
+    if (!item) {
+      row.errors.push("The matching menu item could not be found. Refresh the menu and try again.");
+      failed += 1;
+      continue;
+    }
+    importedIds.push(item._id);
+    if (match) updated += 1;
+    else imported += 1;
+    row.existingItemId = String(item._id);
+  }
+
+  if (mode === "REPLACE" && importedIds.length) {
+    await MenuItem.updateMany(
+      { restaurantId: restaurant._id, active: true, _id: { $nin: importedIds } },
+      { $set: { active: false } }
+    );
+  }
+
+  const totalRows = rows.length;
+  const errorRows = rows.filter((row) => row.errors.length);
+  const summary = { totalRows, imported, updated, failed, mode };
+  await writeAudit({
+    user: req.user,
+    action: "MENU_BULK_IMPORT",
+    entity: "Restaurant",
+    entityId: restaurant._id,
+    details: summary
+  });
+  res.json({
+    summary,
+    rows,
+    errorReportCsv: errorRows.length
+      ? rowsToCsv(errorRows.map((row) => [
+        row.rowNumber, row.itemId, row.category, row.name, row.price, row.errors.join("; ")
+      ]), ["Row", "Item ID", "Category", "Item Name", "Price (QAR)", "Errors"])
+      : ""
+  });
+}));
+
+app.post(
+  "/api/restaurant/menu/bulk/images",
+  auth(),
+  roles("RESTAURANT_OWNER", "RESTAURANT_MANAGER"),
+  menuImportRateLimit,
+  menuImageArchiveUpload.single("file"),
+  asyncRoute(async (req, res) => {
+    const restaurant = await restaurantForUser(req.user);
+    if (!req.file) return res.status(400).json({ error: "Choose a ZIP file containing menu item photos." });
+    if (!/\.zip$/i.test(req.file.originalname)) return res.status(400).json({ error: "Choose a ZIP archive." });
+    const archive = await parseImageArchive(req.file.buffer);
+    if (archive.error) return res.status(400).json({ error: archive.error });
+    if (!archive.images.length) return res.status(400).json({ error: "The ZIP does not contain supported JPEG, PNG, or WebP images." });
+    const items = await MenuItem.find({ restaurantId: restaurant._id, active: true }).select("_id itemCode name category imageData approvalStatus").lean();
+    const partnerRegistration = await RestaurantRegistration.exists({ restaurantId: restaurant._id, status: "APPROVED" });
+    const keyFor = (value) => String(value || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+    const lookup = new Map();
+    for (const item of items) {
+      for (const key of new Set([item.itemCode, item._id, item.name].map((value) => keyFor(value)))) {
+        if (key) {
+          const candidates = lookup.get(key) || [];
+          candidates.push(item);
+          lookup.set(key, candidates);
+        }
+      }
+    }
+    const failedFiles = [];
+    const uploadedItemIds = new Set();
+    let uploaded = 0;
+    for (const image of archive.images) {
+      const filenameKey = keyFor(image.fileName.replace(/\.[^.]+$/, ""));
+      const matches = lookup.get(filenameKey) || [];
+      if (matches.length !== 1) {
+        failedFiles.push({ fileName: image.fileName, error: matches.length ? "Filename matches more than one menu item." : "No menu item matches this filename." });
+        continue;
+      }
+      const matchedItemId = String(matches[0]._id);
+      if (uploadedItemIds.has(matchedItemId)) {
+        failedFiles.push({ fileName: image.fileName, error: "More than one ZIP image matches this menu item." });
+        continue;
+      }
+      const imageData = `data:${image.mimeType};base64,${image.buffer.toString("base64")}`;
+      const validation = validateImageDataUrl(imageData);
+      if (validation?.error) {
+        failedFiles.push({ fileName: image.fileName, error: validation.error });
+        continue;
+      }
+      const updated = await MenuItem.updateOne(
+        { _id: matches[0]._id, restaurantId: restaurant._id, active: true },
+        { $set: { imageData: validation.imageData, imageUrl: "", ...(partnerRegistration ? { approvalStatus: "PENDING_REVIEW" } : {}) } }
+      );
+      if (!updated.matchedCount) {
+        failedFiles.push({ fileName: image.fileName, error: "The matching menu item is no longer available. Refresh and try again." });
+        continue;
+      }
+      uploadedItemIds.add(matchedItemId);
+      uploaded += 1;
+    }
+    await writeAudit({
+      user: req.user,
+      action: "MENU_BULK_IMAGES_UPLOADED",
+      entity: "Restaurant",
+      entityId: restaurant._id,
+      details: { uploaded, failed: failedFiles.length }
+    });
+    res.json({ uploaded, failed: failedFiles.length, failedFiles });
+  })
+);
 
 app.get("/api/admin/summary", auth(), roles("ADMIN", "SUPER_ADMIN"), asyncRoute(async (_req, res) => {
   const today = new Date();
@@ -812,6 +1667,26 @@ app.get("/api/admin/restaurants", auth(), roles("ADMIN", "SUPER_ADMIN"), asyncRo
   const query = req.query.status ? { status: String(req.query.status) } : {};
   const restaurants = await Restaurant.find(query).sort({ createdAt: -1 }).limit(100).lean();
   res.json({ restaurants });
+}));
+
+app.get("/api/admin/restaurants/:id/orders-feedback", auth(), roles("ADMIN", "SUPER_ADMIN"), asyncRoute(async (req, res) => {
+  if (!mongoose.isValidObjectId(req.params.id)) return res.status(404).json({ error: "Restaurant not found." });
+  const restaurant = await Restaurant.findById(req.params.id).select("_id").lean();
+  if (!restaurant) return res.status(404).json({ error: "Restaurant not found." });
+  const page = requestedPage(req.query.page);
+  const pageSize = 25;
+  const filter = { restaurantId: restaurant._id };
+  const [total, orders] = await Promise.all([
+    Order.countDocuments(filter),
+    Order.find(filter).sort({ createdAt: -1 }).skip((page - 1) * pageSize).limit(pageSize).lean()
+  ]);
+  res.json({
+    orders: await ordersWithFeedback(orders, restaurant._id),
+    page,
+    pageSize,
+    total,
+    totalPages: Math.ceil(total / pageSize)
+  });
 }));
 
 app.post("/api/admin/restaurants", auth(), roles("ADMIN", "SUPER_ADMIN"), asyncRoute(async (req, res) => {
@@ -974,6 +1849,12 @@ app.patch("/api/admin/menu/:id", auth(), roles("ADMIN", "SUPER_ADMIN"), asyncRou
     if (typeof req.body.active !== "boolean") return res.status(400).json({ error: "An active true/false value is required." });
     updates.active = req.body.active;
   }
+  if (Object.hasOwn(req.body, "approvalStatus")) {
+    if (!["APPROVED", "REJECTED"].includes(req.body.approvalStatus)) {
+      return res.status(400).json({ error: "Choose APPROVED or REJECTED for menu review." });
+    }
+    updates.approvalStatus = req.body.approvalStatus;
+  }
   if (Object.hasOwn(req.body, "imageData")) {
     const image = validateImageDataUrl(req.body.imageData);
     if (image?.error) return res.status(400).json({ error: image.error });
@@ -1016,6 +1897,15 @@ app.patch("/api/admin/restaurants/:id/status", auth(), roles("ADMIN", "SUPER_ADM
   if (!["APPROVED", "REJECTED", "SUSPENDED"].includes(status)) return res.status(400).json({ error: "Choose APPROVED, REJECTED or SUSPENDED." });
   const restaurant = await Restaurant.findById(req.params.id);
   if (!restaurant) return res.status(404).json({ error: "Restaurant not found." });
+  const partnerRegistration = await RestaurantRegistration.findOne({ restaurantId: restaurant._id, status: "APPROVED" });
+  if (req.body.status === "APPROVED" && partnerRegistration) {
+    const approvedMenuItems = await MenuItem.countDocuments({
+      restaurantId: restaurant._id,
+      active: true,
+      approvalStatus: "APPROVED"
+    });
+    if (!approvedMenuItems) return res.status(409).json({ error: "Approve at least one menu item before making this partner restaurant customer-visible." });
+  }
   const previousStatus = restaurant.status;
   restaurant.status = status;
   if (status !== "APPROVED") restaurant.availability = "CLOSED";
@@ -1056,9 +1946,174 @@ app.patch("/api/admin/orders/:id/status", auth(), roles("ADMIN", "SUPER_ADMIN"),
   res.json({ order: updated });
 }));
 
+app.get("/api/admin/customer-terms", auth(), roles("ADMIN", "SUPER_ADMIN"), asyncRoute(async (_req, res) => {
+  res.json(await currentCustomerTerms());
+}));
+
+app.put("/api/admin/customer-terms", auth(), roles("ADMIN", "SUPER_ADMIN"), asyncRoute(async (req, res) => {
+  let updatedTerms;
+  try {
+    updatedTerms = updateCustomerTerms(await currentCustomerTerms(), req.body.clauses);
+  } catch (error) {
+    return res.status(400).json({ error: error.message });
+  }
+  const setting = await PlatformSetting.findOneAndUpdate(
+    { key: "customerTerms" },
+    {
+      $set: {
+        value: JSON.stringify({ version: updatedTerms.version, clauses: updatedTerms.clauses }),
+        updatedBy: req.user._id
+      }
+    },
+    { new: true, upsert: true, runValidators: true, setDefaultsOnInsert: true }
+  );
+  if (updatedTerms.changed) {
+    await writeAudit({
+      user: req.user,
+      action: "CUSTOMER_TERMS_UPDATED",
+      entity: "PlatformSetting",
+      entityId: setting._id,
+      details: { version: updatedTerms.version, clauseCount: updatedTerms.clauses.length }
+    });
+  }
+  res.json({ version: updatedTerms.version, clauses: updatedTerms.clauses });
+}));
+
 app.get("/api/admin/audit", auth(), roles("ADMIN", "SUPER_ADMIN"), asyncRoute(async (_req, res) => {
   const logs = await AuditLog.find().sort({ createdAt: -1 }).limit(100).lean();
   res.json({ logs });
+}));
+
+app.get("/api/admin/brand", auth(), roles("ADMIN", "SUPER_ADMIN"), asyncRoute(async (_req, res) => {
+  const setting = await PlatformSetting.findOne({ key: "brandLogo" }).select("value").lean();
+  res.json({ logoData: setting?.value || "" });
+}));
+
+app.put("/api/admin/brand", auth(), roles("ADMIN", "SUPER_ADMIN"), asyncRoute(async (req, res) => {
+  if (typeof req.body.logoData !== "string") return res.status(400).json({ error: "Provide a valid logo image or an empty value to restore the text logo." });
+  const image = validateImageDataUrl(req.body.logoData);
+  if (image?.error) return res.status(400).json({ error: image.error });
+  const setting = await PlatformSetting.findOneAndUpdate(
+    { key: "brandLogo" },
+    { $set: { value: image?.imageData || "", updatedBy: req.user._id } },
+    { new: true, upsert: true, runValidators: true, setDefaultsOnInsert: true }
+  );
+  await writeAudit({ user: req.user, action: "BRAND_LOGO_UPDATED", entity: "PlatformSetting", entityId: setting._id });
+  res.json({ logoData: setting.value });
+}));
+
+app.get("/api/admin/partner-registrations", auth(), roles("ADMIN", "SUPER_ADMIN"), asyncRoute(async (_req, res) => {
+  const registrations = await RestaurantRegistration.find().sort({ createdAt: -1 }).limit(200);
+  res.json({ registrations: registrations.map((registration) => publicRegistration(registration, true)) });
+}));
+
+app.patch("/api/admin/partner-registrations/:registrationId", auth(), roles("ADMIN", "SUPER_ADMIN"), asyncRoute(async (req, res) => {
+  const registration = await RestaurantRegistration.findOne({ registrationId: String(req.params.registrationId).toUpperCase() });
+  if (!registration) return res.status(404).json({ error: "Restaurant registration not found." });
+  const action = String(req.body.action || "");
+  const reason = String(req.body.reason || "").trim().slice(0, 1000);
+  let activationUrl = "";
+  let actionName = "";
+
+  if (action === "UNDER_REVIEW" && registration.status === "PENDING_VERIFICATION") {
+    registration.status = "UNDER_REVIEW";
+    registration.correctionAllowed = false;
+    registration.adminReviewerId = req.user._id;
+    registration.reviewedAt = new Date();
+    actionName = "PARTNER_REGISTRATION_REVIEW_STARTED";
+  } else if (action === "REQUEST_CHANGES" && ["UNDER_REVIEW", "REJECTED"].includes(registration.status)) {
+    if (reason.length < 5) return res.status(400).json({ error: "Provide a correction request with at least 5 characters." });
+    registration.status = "PENDING_VERIFICATION";
+    registration.correctionAllowed = true;
+    registration.reviewReason = reason;
+    registration.adminReviewerId = req.user._id;
+    registration.reviewedAt = new Date();
+    actionName = "PARTNER_REGISTRATION_CHANGES_REQUESTED";
+  } else if (action === "REJECTED" && ["PENDING_VERIFICATION", "UNDER_REVIEW"].includes(registration.status)) {
+    if (reason.length < 5) return res.status(400).json({ error: "Provide a rejection reason with at least 5 characters." });
+    registration.status = "REJECTED";
+    registration.correctionAllowed = false;
+    registration.reviewReason = reason;
+    registration.adminReviewerId = req.user._id;
+    registration.reviewedAt = new Date();
+    actionName = "PARTNER_REGISTRATION_REJECTED";
+  } else if (action === "APPROVED" && registration.status === "UNDER_REVIEW") {
+    const details = registration.details;
+    let restaurant = registration.restaurantId
+      ? await Restaurant.findById(registration.restaurantId)
+      : await Restaurant.findOne({ partnerRegistrationId: registration.registrationId });
+    if (!restaurant) {
+      const restaurantDetails = {
+        partnerRegistrationId: registration.registrationId,
+        name: details.restaurantName,
+        imageData: details.coverImageData || details.logoImageData || "",
+        hotelName: details.restaurantType === "Hotel Restaurant" ? details.restaurantName : "",
+        cuisine: [details.primaryCuisine, ...details.additionalCuisines],
+        description: details.description,
+        address: details.address,
+        latitude: details.latitude,
+        longitude: details.longitude,
+        serviceRadiusKm: details.serviceRadiusKm,
+        phone: details.phone,
+        whatsapp: details.whatsapp,
+        email: details.email,
+        preparationMinutes: details.preparationMinutes,
+        minOrder: details.minimumOrderValue ?? 0,
+        maxOrder: details.maximumOrderValue ?? 1000,
+        category: details.restaurantType,
+        status: "PENDING_REVIEW",
+        availability: "CLOSED"
+      };
+      try {
+        restaurant = await Restaurant.findOneAndUpdate(
+          { partnerRegistrationId: registration.registrationId },
+          { $setOnInsert: restaurantDetails },
+          { new: true, upsert: true, runValidators: true, setDefaultsOnInsert: true }
+        );
+      } catch (error) {
+        if (error.code !== 11000) throw error;
+        restaurant = await Restaurant.findOne({ partnerRegistrationId: registration.registrationId });
+        if (!restaurant) throw error;
+      }
+    }
+    registration.restaurantId = restaurant._id;
+    registration.status = "APPROVED";
+    registration.correctionAllowed = false;
+    registration.adminReviewerId = req.user._id;
+    registration.reviewedAt = new Date();
+    registration.reviewReason = "";
+    const activationToken = crypto.randomBytes(32).toString("base64url");
+    registration.activationTokenHash = hashSecret(activationToken);
+    registration.activationExpiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000);
+    activationUrl = new URL(`/activate-restaurant?token=${encodeURIComponent(activationToken)}`, apiOrigin).toString();
+    actionName = "PARTNER_REGISTRATION_APPROVED";
+  } else if (action === "SUSPENDED" && registration.status === "APPROVED") {
+    registration.status = "SUSPENDED";
+    registration.adminReviewerId = req.user._id;
+    registration.reviewedAt = new Date();
+    registration.reviewReason = reason;
+    registration.correctionAllowed = false;
+    if (registration.restaurantId) {
+      await Restaurant.findByIdAndUpdate(registration.restaurantId, { status: "SUSPENDED", availability: "CLOSED" });
+    }
+    actionName = "PARTNER_REGISTRATION_SUSPENDED";
+  } else {
+    return res.status(409).json({ error: `Cannot apply ${action || "that action"} to a ${registration.status} registration.` });
+  }
+
+  await registration.save();
+  await writeAudit({
+    user: req.user,
+    action: actionName,
+    entity: "RestaurantRegistration",
+    entityId: registration.registrationId,
+    details: { status: registration.status, restaurantId: registration.restaurantId, reason }
+  });
+  if (action === "APPROVED") {
+    const recipient = registration.details.whatsapp || registration.details.email || registration.details.phone;
+    await logNotification(null, "PARTNER_REGISTRATION_APPROVED_ACTIVATION_LINK", recipient);
+  }
+  res.json({ registration: publicRegistration(registration, true), activationUrl });
 }));
 
 app.get("/api/admin/messages", auth(), roles("ADMIN", "SUPER_ADMIN"), asyncRoute(async (_req, res) => {
@@ -1069,6 +2124,12 @@ app.get("/api/admin/messages", auth(), roles("ADMIN", "SUPER_ADMIN"), asyncRoute
 app.get("/api/admin/billing", auth(), roles("ADMIN", "SUPER_ADMIN"), asyncRoute(async (_req, res) => {
   const transactions = await BillingTransaction.find().sort({ createdAt: -1 }).limit(100).lean();
   res.json({ transactions });
+}));
+
+app.get("/api/admin/feedback", auth(), roles("ADMIN", "SUPER_ADMIN"), asyncRoute(async (_req, res) => {
+  const feedbackEntries = await Feedback.find().sort({ submittedAt: -1 }).limit(100).lean();
+  const summary = buildFeedbackSummary(feedbackEntries);
+  res.json({ feedback: feedbackEntries, summary });
 }));
 
 app.get("/api/admin/marketing", auth(), roles("ADMIN", "SUPER_ADMIN"), asyncRoute(async (_req, res) => {
@@ -1139,6 +2200,13 @@ app.patch("/api/admin/advertisements/:id", auth(), roles("ADMIN", "SUPER_ADMIN")
 
 app.use((_req, res) => res.status(404).json({ error: "The requested resource was not found." }));
 app.use((error, _req, res, _next) => {
+  if (error instanceof multer.MulterError) {
+    const message = error.code === "LIMIT_FILE_SIZE"
+      ? "The uploaded file exceeds the allowed size limit."
+      : "Upload one valid file at a time.";
+    return res.status(400).json({ error: message });
+  }
+  if (error.type === "entity.too.large") return res.status(413).json({ error: "The uploaded data exceeds the allowed size limit." });
   if (error.code === 11000) return res.status(409).json({ error: "This request was already processed." });
   if (error.name === "ValidationError") return res.status(400).json({ error: "Some submitted information is invalid." });
   const status = Number(error.status) || 500;

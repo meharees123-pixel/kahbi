@@ -9,6 +9,8 @@ const UserSchema = new Schema(
     email: { type: String, required: true, unique: true, lowercase: true, trim: true },
     phone: { type: String, trim: true, default: "" },
     whatsappVerifiedAt: { type: Date, default: null },
+    customerTermsVersion: { type: String, default: "" },
+    customerTermsAcceptedAt: { type: Date, default: null },
     passwordHash: { type: String, required: true, select: false },
     role: {
       type: String,
@@ -45,6 +47,7 @@ const RestaurantSchema = new Schema(
     preparationMinutes: { type: Number, default: 35, min: 1 },
     minOrder: { type: Number, default: 0, min: 0 },
     maxOrder: { type: Number, default: 1000, min: 1 },
+    paymentMethods: { type: [String], enum: ["CASH_TO_RESTAURANT", "POS_MACHINE"], default: ["CASH_TO_RESTAURANT"] },
     status: {
       type: String,
       enum: ["DRAFT", "PENDING_REVIEW", "APPROVED", "REJECTED", "SUSPENDED"],
@@ -53,6 +56,7 @@ const RestaurantSchema = new Schema(
     availability: { type: String, enum: ["OPEN", "CLOSED", "TEMPORARILY_UNAVAILABLE", "PAUSED"], default: "OPEN" },
     demo: { type: Boolean, default: false },
     category: { type: String, default: "Restaurant" },
+    partnerRegistrationId: { type: String, default: undefined, unique: true, sparse: true },
     ratingAverage: { type: Number, default: 0 },
     ratingCount: { type: Number, default: 0 }
   },
@@ -65,10 +69,18 @@ const MenuItemSchema = new Schema(
     category: { type: String, required: true, trim: true },
     name: { type: String, required: true, trim: true },
     imageData: { type: String, default: "", maxlength: 350100 },
+    imageUrl: { type: String, default: "", maxlength: 2048 },
+    itemCode: { type: String, default: undefined, trim: true, maxlength: 100 },
+    availabilityStart: { type: String, default: "" },
+    availabilityEnd: { type: String, default: "" },
     description: { type: String, default: "" },
     price: { type: Number, required: true, min: 0 },
+    discountPrice: { type: Number, default: null, min: 0 },
+    foodType: { type: String, enum: ["VEGETARIAN", "NON_VEGETARIAN", "VEGAN", null], default: null },
+    customizationOptions: { type: String, default: "", maxlength: 1000 },
     currency: { type: String, default: "QAR" },
     availability: { type: String, enum: ["AVAILABLE", "UNAVAILABLE", "TEMPORARILY_UNAVAILABLE"], default: "AVAILABLE" },
+    approvalStatus: { type: String, enum: ["PENDING_REVIEW", "APPROVED", "REJECTED"], default: "APPROVED", index: true },
     active: { type: Boolean, default: true },
     bestSeller: { type: Boolean, default: false },
     chefRecommended: { type: Boolean, default: false },
@@ -77,6 +89,10 @@ const MenuItemSchema = new Schema(
   },
   { timestamps: true }
 );
+MenuItemSchema.index({ restaurantId: 1, itemCode: 1 }, {
+  unique: true,
+  partialFilterExpression: { itemCode: { $type: "string" } }
+});
 
 const OrderSchema = new Schema(
   {
@@ -108,7 +124,7 @@ const OrderSchema = new Schema(
     total: { type: Number, required: true },
     currency: { type: String, default: "QAR" },
     promotionCode: { type: String, default: "" },
-    paymentMethod: { type: String, default: "CASH_TO_RESTAURANT" },
+    paymentMethod: { type: String, enum: ["CASH_TO_RESTAURANT", "POS_MACHINE"], default: "CASH_TO_RESTAURANT" },
     paymentStatus: { type: String, enum: ["NOT_REQUIRED", "PENDING", "PAID", "FAILED", "REFUNDED", "PARTIALLY_REFUNDED"], default: "NOT_REQUIRED" },
     status: { type: String, default: "RESTAURANT_PENDING", index: true },
     estimatedPreparationMinutes: { type: Number, default: 35 },
@@ -124,6 +140,8 @@ const OrderSchema = new Schema(
       reason: { type: String, default: "" },
       createdAt: { type: Date, default: Date.now }
     }],
+    customerTermsVersion: { type: String, default: "" },
+    customerTermsAcceptedAt: { type: Date, default: null },
     completedAt: { type: Date, default: null }
   },
   { timestamps: true }
@@ -190,6 +208,18 @@ const RatingSchema = new Schema({
   comment: { type: String, default: "", maxlength: 1000 }
 }, { timestamps: true });
 
+const FeedbackSchema = new Schema({
+  orderId: { type: Schema.Types.ObjectId, ref: "Order", required: true, unique: true, index: true },
+  customerId: { type: Schema.Types.ObjectId, ref: "User", default: null, index: true },
+  customerContact: { type: String, default: "", trim: true },
+  restaurantId: { type: Schema.Types.ObjectId, ref: "Restaurant", required: true, index: true },
+  overallRating: { type: Number, required: true, min: 1, max: 5 },
+  foodRating: { type: Number, default: null, min: 1, max: 5 },
+  deliveryRating: { type: Number, default: null, min: 1, max: 5 },
+  comment: { type: String, default: "", maxlength: 500 },
+  submittedAt: { type: Date, default: Date.now }
+}, { timestamps: true });
+
 const AuditSchema = new Schema({
   userId: { type: Schema.Types.ObjectId, ref: "User", default: null },
   role: { type: String, default: "SYSTEM" },
@@ -237,6 +267,36 @@ const WhatsappOtpControlSchema = new Schema({
   updatedBy: { type: Schema.Types.ObjectId, ref: "User", default: null }
 }, { timestamps: true });
 
+const RestaurantRegistrationSchema = new Schema({
+  registrationId: { type: String, required: true, unique: true },
+  requestId: { type: String, required: true, unique: true },
+  details: { type: Schema.Types.Mixed, required: true },
+  termsVersion: { type: String, required: true },
+  termsAcceptedAt: { type: Date, required: true },
+  status: {
+    type: String,
+    enum: ["PENDING_VERIFICATION", "UNDER_REVIEW", "APPROVED", "REJECTED", "SUSPENDED"],
+    default: "PENDING_VERIFICATION",
+    index: true
+  },
+  accessTokenHash: { type: String, required: true, select: false },
+  activationTokenHash: { type: String, default: "", select: false },
+  activationExpiresAt: { type: Date, default: null },
+  activatedAt: { type: Date, default: null },
+  restaurantId: { type: Schema.Types.ObjectId, ref: "Restaurant", default: null },
+  adminReviewerId: { type: Schema.Types.ObjectId, ref: "User", default: null },
+  reviewedAt: { type: Date, default: null },
+  reviewReason: { type: String, default: "" },
+  correctionAllowed: { type: Boolean, default: false }
+}, { timestamps: true });
+RestaurantRegistrationSchema.index({ status: 1, createdAt: -1 });
+
+const PlatformSettingSchema = new Schema({
+  key: { type: String, required: true, unique: true },
+  value: { type: String, default: "" },
+  updatedBy: { type: Schema.Types.ObjectId, ref: "User", default: null }
+}, { timestamps: true });
+
 module.exports = {
   User: mongoose.model("User", UserSchema),
   Restaurant: mongoose.model("Restaurant", RestaurantSchema),
@@ -247,9 +307,12 @@ module.exports = {
   Advertisement: mongoose.model("Advertisement", AdvertisementSchema),
   AdvertisementEvent: mongoose.model("AdvertisementEvent", AdvertisementEventSchema),
   Rating: mongoose.model("Rating", RatingSchema),
+  Feedback: mongoose.model("Feedback", FeedbackSchema),
   AuditLog: mongoose.model("AuditLog", AuditSchema),
   MessageLog: mongoose.model("MessageLog", MessageLogSchema),
   WhatsappOtp: mongoose.model("WhatsappOtp", WhatsappOtpSchema),
   WhatsappSettings: mongoose.model("WhatsappSettings", WhatsappSettingsSchema),
-  WhatsappOtpControl: mongoose.model("WhatsappOtpControl", WhatsappOtpControlSchema)
+  WhatsappOtpControl: mongoose.model("WhatsappOtpControl", WhatsappOtpControlSchema),
+  RestaurantRegistration: mongoose.model("RestaurantRegistration", RestaurantRegistrationSchema),
+  PlatformSetting: mongoose.model("PlatformSetting", PlatformSettingSchema)
 };
