@@ -14,6 +14,12 @@ const { canTransition, haversineKm, isValidCoordinate, isValidServiceRadius, isW
 const { validateImageDataUrl } = require("./images");
 const { validateFeedbackSubmission, buildFeedbackSummary, attachFeedbackToOrders } = require("./feedback");
 const { buildRestaurantRatingSummary } = require("./ratings");
+const {
+  readCustomerTerms,
+  updateCustomerTerms,
+  customerNeedsTermsAcceptance,
+  validateOrderTermsAcknowledgement
+} = require("./customer-terms");
 const { writeAudit, logNotification, changeOrderStatus } = require("./services");
 const { validatePartnerRegistration } = require("./partner-registration");
 const {
@@ -58,6 +64,11 @@ async function whatsappRuntimeEnvironment() {
     ? decryptWhatsappConfiguration(saved.encryptedConfiguration, process.env.WHATSAPP_CONFIG_ENCRYPTION_KEY)
     : {};
   return { ...process.env, ...savedConfiguration };
+}
+
+async function currentCustomerTerms() {
+  const setting = await PlatformSetting.findOne({ key: "customerTerms" }).select("value").lean();
+  return readCustomerTerms(setting?.value || "");
 }
 
 function asyncRoute(handler) {
@@ -247,6 +258,14 @@ function requestedPage(value) {
 }
 
 app.get("/api/health", (_req, res) => res.json({ status: "ok", service: "kahbi-api", currency }));
+
+app.get("/api/customer-terms", auth(false), asyncRoute(async (req, res) => {
+  const terms = await currentCustomerTerms();
+  res.json({
+    ...terms,
+    acceptanceRequired: req.user?.role === "CUSTOMER" && customerNeedsTermsAcceptance(req.user, terms)
+  });
+}));
 
 app.get("/api/brand", asyncRoute(async (_req, res) => {
   const setting = await PlatformSetting.findOne({ key: "brandLogo" }).select("value").lean();
@@ -754,6 +773,10 @@ app.post("/api/orders", auth(false), asyncRoute(async (req, res) => {
     if (!signedOwner) return res.status(409).json({ error: "This order request key has already been used." });
     return res.status(200).json({ order: previous, duplicate: true });
   }
+  const signedCustomer = req.user && req.user.role === "CUSTOMER" ? req.user : null;
+  let customerTerms;
+  let customerTermsAcceptanceRequired;
+  let customerTermsAcceptedAt;
   if (!mongoose.isValidObjectId(restaurantId)) return res.status(400).json({ error: "Choose a valid restaurant." });
   if (!Array.isArray(items) || items.length < 1 || items.length > 50) {
     return res.status(400).json({ error: "Add between 1 and 50 items to your order." });
@@ -761,7 +784,6 @@ app.post("/api/orders", auth(false), asyncRoute(async (req, res) => {
   if (typeof address !== "string" || address.trim().length < 5) {
     return res.status(400).json({ error: "Enter a delivery address with at least 5 characters." });
   }
-  const signedCustomer = req.user && req.user.role === "CUSTOMER" ? req.user : null;
   const restaurant = await Restaurant.findOne({ _id: restaurantId, status: "APPROVED" });
   if (!restaurant) return res.status(404).json({ error: "This restaurant is not available for ordering." });
   if (restaurant.availability !== "OPEN") return res.status(409).json({ error: "This restaurant is not accepting orders right now." });
@@ -832,6 +854,13 @@ app.post("/api/orders", auth(false), asyncRoute(async (req, res) => {
   const deliveryFee = 0;
   const adminFee = Math.max(0, Number(process.env.CUSTOMER_ADMIN_FEE || 0));
   const total = roundMoney(Math.max(0, subtotal - discount) + deliveryFee + adminFee);
+  customerTerms = await currentCustomerTerms();
+  customerTermsAcceptanceRequired = customerNeedsTermsAcceptance(signedCustomer, customerTerms);
+  try {
+    customerTermsAcceptedAt = validateOrderTermsAcknowledgement(signedCustomer, req.body, customerTerms);
+  } catch (error) {
+    return res.status(error.status || 409).json({ error: error.message, termsVersion: error.termsVersion || customerTerms.version });
+  }
   const today = new Date(Date.now() + 3 * 60 * 60 * 1000).toISOString().slice(0, 10).replaceAll("-", "");
   const reference = `KAB-${today}-${require("crypto").randomBytes(4).toString("hex").toUpperCase()}`;
   const order = await Order.create({
@@ -854,8 +883,18 @@ app.post("/api/orders", auth(false), asyncRoute(async (req, res) => {
     currency,
     promotionCode: promotion ? promotion.code : "",
     estimatedPreparationMinutes: restaurant.preparationMinutes,
+    customerTermsVersion: customerTerms.version,
+    customerTermsAcceptedAt,
     statusHistory: [{ previousStatus: "", status: "RESTAURANT_PENDING", changedBy: "SYSTEM", role: "SYSTEM" }]
   });
+  if (customerTermsAcceptanceRequired) {
+    await User.findByIdAndUpdate(signedCustomer._id, {
+      $set: {
+        customerTermsVersion: customerTerms.version,
+        customerTermsAcceptedAt
+      }
+    });
+  }
   if (promotion) {
     promotion.usageCount += 1;
     await promotion.save();
@@ -1764,6 +1803,39 @@ app.patch("/api/admin/orders/:id/status", auth(), roles("ADMIN", "SUPER_ADMIN"),
   if (!canTransition(order.status, nextStatus)) return res.status(409).json({ error: `This order cannot move from ${order.status} to ${nextStatus}.` });
   const updated = await changeOrderStatus(order, nextStatus, req.user, String(req.body.reason || "").slice(0, 250));
   res.json({ order: updated });
+}));
+
+app.get("/api/admin/customer-terms", auth(), roles("ADMIN", "SUPER_ADMIN"), asyncRoute(async (_req, res) => {
+  res.json(await currentCustomerTerms());
+}));
+
+app.put("/api/admin/customer-terms", auth(), roles("ADMIN", "SUPER_ADMIN"), asyncRoute(async (req, res) => {
+  let updatedTerms;
+  try {
+    updatedTerms = updateCustomerTerms(await currentCustomerTerms(), req.body.clauses);
+  } catch (error) {
+    return res.status(400).json({ error: error.message });
+  }
+  const setting = await PlatformSetting.findOneAndUpdate(
+    { key: "customerTerms" },
+    {
+      $set: {
+        value: JSON.stringify({ version: updatedTerms.version, clauses: updatedTerms.clauses }),
+        updatedBy: req.user._id
+      }
+    },
+    { new: true, upsert: true, runValidators: true, setDefaultsOnInsert: true }
+  );
+  if (updatedTerms.changed) {
+    await writeAudit({
+      user: req.user,
+      action: "CUSTOMER_TERMS_UPDATED",
+      entity: "PlatformSetting",
+      entityId: setting._id,
+      details: { version: updatedTerms.version, clauseCount: updatedTerms.clauses.length }
+    });
+  }
+  res.json({ version: updatedTerms.version, clauses: updatedTerms.clauses });
 }));
 
 app.get("/api/admin/audit", auth(), roles("ADMIN", "SUPER_ADMIN"), asyncRoute(async (_req, res) => {
