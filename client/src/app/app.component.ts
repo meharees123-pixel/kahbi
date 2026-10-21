@@ -309,7 +309,7 @@ export class AppComponent implements OnInit, OnDestroy {
     label: 'kahbi.delivery.label'
   };
   private mapPicker: L.Map | null = null;
-  private mapMarker: L.CircleMarker | null = null;
+  private mapMarker: L.Marker | null = null;
   private mapGeocodeTimer: ReturnType<typeof setTimeout> | null = null;
   private mapSelectionRequest = 0;
   view = 'home';
@@ -1382,13 +1382,17 @@ export class AppComponent implements OnInit, OnDestroy {
       this.mapMarker.setLatLng([point.lat, point.lng]);
       return;
     }
-    this.mapMarker = L.circleMarker([point.lat, point.lng], {
-      radius: 9,
-      color: '#ffffff',
-      weight: 3,
-      fillColor: '#0e4037',
-      fillOpacity: 1
+  this.mapMarker = L.marker([point.lat, point.lng], {
+      icon: L.divIcon({
+        className: 'map-selection-pin',
+        html: '<svg viewBox="0 0 32 42" width="32" height="42" aria-hidden="true"><path d="M16 1C7.72 1 1 7.72 1 16c0 10.5 15 25 15 25s15-14.5 15-25C31 7.72 24.28 1 16 1Z" fill="#0e4037" stroke="#fff" stroke-width="2"/><circle cx="16" cy="16" r="5" fill="#fff"/></svg>',
+        iconSize: [32, 42],
+        iconAnchor: [16, 42]
+      }),
+      title: 'Selected location'
     }).addTo(this.mapPicker);
+    
+
   }
 
   private async reverseGeocodeSelection(point: MapPoint, requestId: number): Promise<void> {

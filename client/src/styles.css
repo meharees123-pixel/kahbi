@@ -79,6 +79,7 @@ button:disabled { opacity: .55; cursor: not-allowed; }
 .location-picker-map .leaflet-container { width: 100%; height: 100%; border-radius: inherit; z-index: 0; font-family: 'DM Sans', sans-serif; }
 .location-picker-map .leaflet-control-attribution { font-size: 9px; }
 .location-picker-map .leaflet-control-zoom a { color: var(--green); }
+.location-picker-map .map-selection-pin { border: 0; background: transparent; }
 .map-loading { height: min(52vh, 430px); min-height: 220px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; color: var(--muted); font-size: 12px; }
 .map-error, .map-notice { margin-top: 15px; padding: 11px 12px; border-radius: 9px; color: #8b4033; background: #fff2ec; font-size: 11px; line-height: 1.5; }
 .map-notice { color: #586a45; background: #f0f5e8; }
