@@ -112,6 +112,15 @@ MenuItemSchema.index({ restaurantId: 1, itemCode: 1 }, {
   partialFilterExpression: { itemCode: { $type: "string" } }
 });
 
+const CustomerCartSchema = new Schema({
+  customerId: { type: Schema.Types.ObjectId, ref: "User", required: true, unique: true },
+  restaurantId: { type: Schema.Types.ObjectId, ref: "Restaurant", required: true },
+  items: [{
+    menuItemId: { type: Schema.Types.ObjectId, ref: "MenuItem", required: true },
+    quantity: { type: Number, required: true, min: 1, max: 20 }
+  }]
+}, { timestamps: true });
+
 const OrderSchema = new Schema(
   {
     reference: { type: String, required: true, unique: true },
@@ -320,6 +329,7 @@ module.exports = {
   User: mongoose.model("User", UserSchema),
   Restaurant: mongoose.model("Restaurant", RestaurantSchema),
   MenuItem: mongoose.model("MenuItem", MenuItemSchema),
+  CustomerCart: mongoose.model("CustomerCart", CustomerCartSchema),
   Order: mongoose.model("Order", OrderSchema),
   BillingTransaction: mongoose.model("BillingTransaction", BillingTransactionSchema),
   Promotion: mongoose.model("Promotion", PromotionSchema),

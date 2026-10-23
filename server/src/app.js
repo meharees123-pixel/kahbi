@@ -7,7 +7,7 @@ const mongoose = require("mongoose");
 const crypto = require("crypto");
 const multer = require("multer");
 const {
-  User, Restaurant, MenuItem, Order, Promotion, Rating, Feedback, AuditLog, MessageLog, BillingTransaction,
+  User, Restaurant, MenuItem, CustomerCart, Order, Promotion, Rating, Feedback, AuditLog, MessageLog, BillingTransaction,
   Advertisement, AdvertisementEvent, WhatsappOtp, WhatsappSettings, WhatsappOtpControl, RestaurantRegistration, PlatformSetting
 } = require("./models");
 const { canTransition, haversineKm, isValidCoordinate, isValidServiceRadius, isWithinServiceArea } = require("./rules");
@@ -115,7 +115,7 @@ function roles(...allowed) {
 function publicUser(user) {
   return {
     id: user._id,
-    name: user.name,
+    name: user.role === "CUSTOMER" && user.name === "WhatsApp customer" ? user.phone : user.name,
     email: String(user.email || "").endsWith("@customer.kahbi.invalid") ? "" : user.email,
     phone: user.phone,
     role: user.role,
@@ -636,7 +636,7 @@ app.post("/api/auth/customer-otp/verify", asyncRoute(async (req, res) => {
   if (!user) {
     const phoneDigits = phone.slice(1);
     user = new User({
-      name: "WhatsApp customer",
+      name: phone,
       email: `whatsapp.${phoneDigits}@customer.kahbi.invalid`,
       phone,
       whatsappVerifiedAt: new Date(),
@@ -652,6 +652,7 @@ app.post("/api/auth/customer-otp/verify", asyncRoute(async (req, res) => {
     }
     await writeAudit({ user, action: "CUSTOMER_REGISTERED_WITH_WHATSAPP", entity: "User", entityId: user._id });
   } else {
+    if (user.name === "WhatsApp customer") user.name = phone;
     user.phone = phone;
     user.whatsappVerifiedAt = new Date();
     await user.save();
@@ -836,6 +837,100 @@ app.get("/api/restaurants/:id/menu", asyncRoute(async (req, res) => {
     })),
     promotion
   });
+}));
+
+app.get("/api/customer/cart", auth(), roles("CUSTOMER"), asyncRoute(async (req, res) => {
+  const cart = await CustomerCart.findOne({ customerId: req.user._id }).lean();
+  if (!cart) return res.json({ cart: null });
+
+  const restaurant = await Restaurant.findOne({ _id: cart.restaurantId, status: "APPROVED" })
+    .select("name imageData hotelName cuisine description address latitude longitude serviceRadiusKm preparationMinutes minOrder maxOrder paymentMethods status availability category ratingAverage ratingCount demo")
+    .lean();
+  if (!restaurant) {
+    await CustomerCart.deleteOne({ _id: cart._id });
+    return res.json({ cart: null, removedItems: true });
+  }
+  const registration = await RestaurantRegistration.findOne({
+    restaurantId: restaurant._id,
+    status: "APPROVED",
+    activatedAt: { $ne: null }
+  }).select("details.paymentMethods").sort({ updatedAt: -1 }).lean();
+  restaurant.paymentMethods = Array.isArray(registration?.details?.paymentMethods) && registration.details.paymentMethods.length
+    ? registration.details.paymentMethods.filter((method) => PAYMENT_METHODS.includes(method))
+    : Array.isArray(restaurant.paymentMethods) && restaurant.paymentMethods.length
+      ? restaurant.paymentMethods.filter((method) => PAYMENT_METHODS.includes(method))
+      : ["CASH_TO_RESTAURANT"];
+
+  const availableItems = await MenuItem.find({
+    _id: { $in: cart.items.map((entry) => entry.menuItemId) },
+    restaurantId: restaurant._id,
+    active: true,
+    availability: "AVAILABLE",
+    $or: [{ approvalStatus: "APPROVED" }, { approvalStatus: { $exists: false } }]
+  }).lean();
+  const availableById = new Map(
+    availableItems.filter(isMenuItemWithinAvailability).map((item) => [String(item._id), item])
+  );
+  const items = cart.items
+    .filter((entry) => availableById.has(String(entry.menuItemId)))
+    .map((entry) => ({ ...availableById.get(String(entry.menuItemId)), quantity: entry.quantity }));
+  if (items.length !== cart.items.length) {
+    if (items.length) {
+      await CustomerCart.updateOne(
+        { _id: cart._id },
+        { $set: { items: items.map(({ _id, quantity }) => ({ menuItemId: _id, quantity })) } }
+      );
+    } else {
+      await CustomerCart.deleteOne({ _id: cart._id });
+    }
+  }
+  res.json({ cart: items.length ? { restaurant, items } : null, removedItems: items.length !== cart.items.length });
+}));
+
+app.put("/api/customer/cart", auth(), roles("CUSTOMER"), asyncRoute(async (req, res) => {
+  const items = req.body.items;
+  if (!Array.isArray(items) || items.length > 50) {
+    return res.status(400).json({ error: "A cart must contain no more than 50 menu items." });
+  }
+  if (!items.length) {
+    await CustomerCart.deleteOne({ customerId: req.user._id });
+    return res.json({ cart: null });
+  }
+  const restaurantId = String(req.body.restaurantId || "");
+  if (!mongoose.isValidObjectId(restaurantId)) return res.status(400).json({ error: "Choose a valid restaurant for your cart." });
+  const quantities = new Map();
+  for (const entry of items) {
+    const menuItemId = String(entry.menuItemId || "");
+    const quantity = Number(entry.quantity);
+    if (!mongoose.isValidObjectId(menuItemId) || !Number.isInteger(quantity) || quantity < 1 || quantity > 20) {
+      return res.status(400).json({ error: "Each cart item must have a valid menu item and quantity from 1 to 20." });
+    }
+    if (quantities.has(menuItemId)) return res.status(400).json({ error: "Each menu item may appear only once in the cart." });
+    quantities.set(menuItemId, quantity);
+  }
+  const restaurant = await Restaurant.findOne({ _id: restaurantId, status: "APPROVED" }).select("_id").lean();
+  if (!restaurant) return res.status(409).json({ error: "This restaurant is no longer available." });
+  const menuItems = await MenuItem.find({
+    _id: { $in: [...quantities.keys()] },
+    restaurantId,
+    active: true,
+    availability: "AVAILABLE",
+    $or: [{ approvalStatus: "APPROVED" }, { approvalStatus: { $exists: false } }]
+  }).lean();
+  if (menuItems.length !== quantities.size || menuItems.some((item) => !isMenuItemWithinAvailability(item))) {
+    return res.status(409).json({ error: "One or more items are no longer available. Refresh the menu and try again." });
+  }
+  await CustomerCart.findOneAndUpdate(
+    { customerId: req.user._id },
+    {
+      $set: {
+        restaurantId: restaurant._id,
+        items: [...quantities].map(([menuItemId, quantity]) => ({ menuItemId, quantity }))
+      }
+    },
+    { upsert: true, new: true, runValidators: true }
+  );
+  res.json({ success: true });
 }));
 
 app.get("/api/orders/mine", auth(), roles("CUSTOMER"), asyncRoute(async (req, res) => {
@@ -1211,6 +1306,7 @@ app.post("/api/orders", auth(false), asyncRoute(async (req, res) => {
     customerTermsAcceptedAt,
     statusHistory: [{ previousStatus: "", status: "RESTAURANT_PENDING", changedBy: "SYSTEM", role: "SYSTEM" }]
   });
+  await CustomerCart.deleteOne({ customerId: signedCustomer._id });
   if (customerTermsAcceptanceRequired) {
     await User.findByIdAndUpdate(signedCustomer._id, {
       $set: {

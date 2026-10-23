@@ -46,6 +46,7 @@ button:disabled { opacity: .55; cursor: not-allowed; }
 .nav-actions { display: flex; align-items: center; gap: 16px; }
 .signed-user { color: var(--muted); font-size: 12px; }
 .icon-button { padding: 9px 13px; border: 1px solid var(--line); border-radius: 10px; font-size: 12px; }
+.cart-icon { width: 16px; height: 16px; margin-right: 4px; vertical-align: -3px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.8; }
 .cart-count { display: inline-flex; justify-content: center; align-items: center; margin-left: 5px; width: 18px; height: 18px; border-radius: 50%; background: var(--green); color: white; }
 .button { border: 0; border-radius: 10px; padding: 12px 17px; display: inline-flex; align-items: center; justify-content: center; gap: 16px; font-weight: 600; font-size: 13px; transition: transform .16s ease, background .16s ease; }
 .button:hover:not(:disabled) { transform: translateY(-1px); }
@@ -277,7 +278,10 @@ h1 em, h2 em { color: #cde08e; font-weight: 500; }
 .cart-line > strong { font-size: 11px; }
 .quantity-stepper { display: flex; align-items: center; gap: 12px; }
 .quantity-stepper button { width: 25px; height: 25px; border: 1px solid var(--line); border-radius: 7px; color: var(--green); background: white; }
+.quantity-stepper button:disabled { cursor: not-allowed; opacity: .45; }
 .quantity-stepper span { min-width: 10px; text-align: center; font-size: 11px; }
+.menu-quantity-stepper { flex: 0 0 auto; gap: 8px; padding: 4px; border: 1px solid #b9cdb6; border-radius: 9px; background: #f8fbf5; }
+.menu-quantity-stepper button { border-color: transparent; color: var(--green); background: transparent; font-size: 15px; }
 .checkout-card h2 { margin: 8px 0 21px; font-size: 27px; }
 .form-field { display: flex; flex-direction: column; gap: 7px; margin-bottom: 14px; }
 .form-field label { color: #5e6d63; font-size: 10px; font-weight: 600; }
@@ -335,6 +339,11 @@ h1 em, h2 em { color: #cde08e; font-weight: 500; }
 .rating-actions { display: flex; align-items: center; gap: 5px; margin-top: 13px; padding-top: 11px; border-top: 1px solid var(--line); color: var(--muted); font-size: 10px; }
 .rating-actions span { margin-right: 7px; }
 .rating-actions button { padding: 2px; border: 0; color: #bd8c43; background: transparent; font-size: 17px; }
+.auth-modal-backdrop { position: fixed; inset: 0; z-index: 1100; display: grid; place-items: center; padding: 24px; background: #10251f99; }
+.auth-modal { position: relative; width: min(900px, 100%); max-height: calc(100vh - 48px); overflow: auto; border-radius: 20px; box-shadow: 0 20px 70px #001a1240; }
+.auth-modal .auth-wrap { width: 100%; margin: 0; }
+.auth-modal-close { position: absolute; top: 14px; right: 14px; z-index: 2; display: grid; width: 36px; height: 36px; place-items: center; border: 1px solid #e7e9e1; border-radius: 50%; color: var(--green); background: #fffefa; font-size: 24px; line-height: 1; }
+.auth-modal-close:hover { background: #f1f5ec; }
 .auth-wrap { display: grid; grid-template-columns: .9fr 1.1fr; max-width: 900px; min-height: 620px; margin: 48px auto; border-radius: 20px; overflow: hidden; background: var(--paper); box-shadow: 0 15px 55px #193b2b0c; }
 .auth-aside { display: flex; flex-direction: column; align-items: flex-start; justify-content: center; padding: 48px; color: white; background: var(--green); }
 .auth-aside .brand-mark { color: var(--green); background: var(--lime); margin-bottom: 47px; }
@@ -615,6 +624,8 @@ h1 em, h2 em { color: #cde08e; font-weight: 500; }
   .cart-summary { position: static; }
   .checkout-grid { grid-template-columns: 1fr 1fr; gap: 20px; }
   .auth-wrap { margin: 30px auto; }
+  .auth-modal-backdrop { padding: 18px; }
+  .auth-modal { max-height: calc(100vh - 36px); }
   .auth-aside { padding: 30px; }
   .auth-card { padding: 30px; }
   .metrics-grid { grid-template-columns: repeat(2, 1fr); }
@@ -674,6 +685,8 @@ h1 em, h2 em { color: #cde08e; font-weight: 500; }
   .restaurant-contact-actions { flex-direction: column; }
   .restaurant-contact-actions .button { width: 100%; }
   .auth-wrap { grid-template-columns: 1fr; margin: 20px 0; }
+  .auth-modal-backdrop { padding: 10px; }
+  .auth-modal { max-height: calc(100vh - 20px); border-radius: 14px; }
   .auth-aside { min-height: 180px; padding: 23px; }
   .auth-aside .brand-mark { margin-bottom: 17px; }
   .auth-aside h2 { font-size: 29px; }
