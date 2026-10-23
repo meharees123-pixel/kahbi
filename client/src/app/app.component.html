@@ -9,6 +9,7 @@
         <button class="nav-link" (click)="navigateHome()">Discover</button>
         <button class="nav-link" (click)="view = 'track'; trackedOrder = null">Track order</button>
         <button class="nav-link" *ngIf="isCustomer" (click)="loadMyOrders()">My orders</button>
+        <button class="nav-link" *ngIf="isCustomer" (click)="openCustomerAddressManager()">My addresses</button>
       </ng-container>
       <ng-container *ngIf="!user">
         <button class="nav-link" (click)="openLogin('RESTAURANT')">Restaurant sign in</button>
@@ -206,6 +207,89 @@
       </div>
     </section>
 
+    <section class="content-section narrow-section" *ngIf="view === 'customerAddresses'">
+      <div class="auth-card">
+        <span class="eyebrow">MY ADDRESSES</span>
+        <h1>Manage your delivery addresses</h1>
+        <p class="muted">Save the places you use most often and choose a primary home or work address for faster checkout.</p>
+        <button class="button button-dark button-small" type="button" *ngIf="!customerAddressFormOpen" (click)="startCustomerAddressEdit()">Add new address</button>
+
+        <div *ngIf="customerAddressFormOpen" class="checkout-card" style="margin-top: 20px;">
+          <div class="address-form-grid">
+            <div class="form-field">
+              <label>Address type</label>
+              <select [(ngModel)]="customerAddressDraft.labelType">
+                <option value="HOME">Home</option>
+                <option value="OFFICE">Office</option>
+                <option value="OTHER">Other</option>
+              </select>
+            </div>
+            <div class="form-field" *ngIf="customerAddressDraft.labelType === 'OTHER'">
+              <label>Custom label</label>
+              <input [(ngModel)]="customerAddressDraft.customLabel" maxlength="60" placeholder="e.g. Family villa">
+            </div>
+            <div class="form-field"><label>Building / house number</label><input [(ngModel)]="customerAddressDraft.buildingNumber" maxlength="50" placeholder="Building number"></div>
+            <div class="form-field"><label>Street number / name</label><input [(ngModel)]="customerAddressDraft.streetNumber" maxlength="60" placeholder="Street number or name"></div>
+            <div class="form-field"><label>Zone</label><input [(ngModel)]="customerAddressDraft.zone" maxlength="50" placeholder="Zone number or name"></div>
+            <div class="form-field"><label>Area / locality</label><input [(ngModel)]="customerAddressDraft.area" maxlength="100" placeholder="Area or locality"></div>
+            <div class="form-field"><label>Floor <span class="optional">optional</span></label><input [(ngModel)]="customerAddressDraft.floorNumber" maxlength="20" placeholder="Floor"></div>
+            <div class="form-field"><label>Room / apartment <span class="optional">optional</span></label><input [(ngModel)]="customerAddressDraft.roomNumber" maxlength="20" placeholder="Apartment or unit"></div>
+            <div class="form-field"><label>Latitude <span class="optional">optional</span></label><input type="number" [(ngModel)]="customerAddressDraft.latitude" step="any" placeholder="25.2854"></div>
+            <div class="form-field"><label>Longitude <span class="optional">optional</span></label><input type="number" [(ngModel)]="customerAddressDraft.longitude" step="any" placeholder="51.5310"></div>
+          </div>
+          <div class="address-map-control">
+            <span *ngIf="customerAddressDraft.latitude !== null && customerAddressDraft.longitude !== null">Selected GPS: {{ customerAddressDraft.latitude }}, {{ customerAddressDraft.longitude }}</span>
+            <span *ngIf="customerAddressDraft.latitude === null || customerAddressDraft.longitude === null">Choose a point on the map to fill GPS coordinates.</span>
+            <button class="button button-quiet button-small" type="button" (click)="openCustomerAddressMap()">Choose on map</button>
+          </div>
+          <label class="toggle-filter"><input type="checkbox" [(ngModel)]="customerAddressDraft.isPrimary"> Set as primary address</label>
+          <div class="button-row address-form-actions">
+            <button class="button button-dark" type="button" (click)="saveCustomerAddress()">Save address</button>
+            <button class="button button-quiet" type="button" (click)="resetCustomerAddressDraft()">Cancel</button>
+          </div>
+        </div>
+
+        <div *ngIf="!customerAddresses.length && !customerAddressFormOpen" class="empty-state" style="margin-top: 20px;">
+          <p>No saved addresses yet.</p>
+          <button class="button button-dark button-small" type="button" (click)="startCustomerAddressEdit()">Add your first address</button>
+        </div>
+
+        <div *ngIf="customerAddresses.length" class="saved-address-list">
+          <div *ngFor="let address of customerAddresses" class="saved-address-card">
+            <div class="saved-address-heading">
+              <div>
+                <strong>{{ address.labelType === 'OTHER' ? (address.customLabel || 'Other') : (address.labelType | titlecase) }}</strong>
+                <span *ngIf="address.isPrimary" class="primary-address-badge">Primary address</span>
+              </div>
+              <div class="saved-address-actions">
+                <button class="address-icon-button" type="button" aria-label="Edit address" title="Edit address" (click)="startCustomerAddressEdit(address)">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="m4 16.5-.8 4.3 4.3-.8L19 8.5 15.5 5 4 16.5Z"></path><path d="m13.8 6.7 3.5 3.5M13 21h7"></path></svg>
+                </button>
+                <button class="address-icon-button address-delete-button" type="button" aria-label="Delete address" title="Delete address" (click)="deleteCustomerAddress(address.id)">
+                  <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M10 11v6m4-6v6M6 7l1 14h10l1-14M9 7V4h6v3"></path></svg>
+                </button>
+              </div>
+            </div>
+            <div class="saved-address-details">
+              <div><span>Building / house no.</span><strong>{{ address.buildingNumber || 'Not provided' }}</strong></div>
+              <div><span>Street no. / name</span><strong>{{ address.streetNumber || 'Not provided' }}</strong></div>
+              <div><span>Zone</span><strong>{{ address.zone || 'Not provided' }}</strong></div>
+              <div><span>Area / locality</span><strong>{{ address.area || 'Not provided' }}</strong></div>
+              <div><span>Floor</span><strong>{{ address.floorNumber || 'Not provided' }}</strong></div>
+              <div><span>Room / apartment</span><strong>{{ address.roomNumber || 'Not provided' }}</strong></div>
+            </div>
+            <div class="saved-address-gps" *ngIf="address.latitude !== null && address.longitude !== null">
+              <span>GPS coordinates</span><strong>{{ address.latitude }}, {{ address.longitude }}</strong>
+            </div>
+            <div class="saved-address-footer">
+              <button class="button button-dark button-small" type="button" (click)="useCustomerAddressForDelivery(address)">Use for order</button>
+              <button class="text-button" type="button" *ngIf="!address.isPrimary" (click)="setPrimaryCustomerAddress(address.id)">Set as primary</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
     <section class="hero" *ngIf="view === 'home'">
       <div class="hero-copy">
         <span class="eyebrow">MADE FOR DOHA</span>
@@ -312,7 +396,59 @@
             </ng-container>
           </div>
           <div class="checkout-location-card"><div><strong>Delivery pin</strong><span>{{ deliveryLocationLabel || 'Choose a delivery location first' }}</span></div><button class="button button-quiet button-small" (click)="openMapPicker('delivery')">{{ deliveryLatitude !== null ? 'Change pin' : 'Choose pin' }}</button></div>
-          <div class="form-field"><label>Full delivery address</label><textarea [(ngModel)]="deliveryAddress" placeholder="Building, apartment, street, zone, and a nearby landmark" rows="3" required minlength="5"></textarea><small>We use your map pin to confirm free-delivery coverage. Add the exact building and unit details here.</small></div>
+          <div class="form-field" *ngIf="isCustomer && customerAddresses.length">
+            <label>Use a saved address</label>
+            <select [ngModel]="selectedCheckoutAddressId" (ngModelChange)="selectCheckoutAddress($event)">
+              <option value="">Enter a new delivery address</option>
+              <option *ngFor="let savedAddress of customerAddresses" [value]="savedAddress.id">
+                {{ savedAddress.labelType === 'OTHER' ? savedAddress.customLabel : (savedAddress.labelType | titlecase) }}
+                {{ savedAddress.isPrimary ? ' · Primary' : '' }}
+              </option>
+            </select>
+          </div>
+          <div class="checkout-address-grid">
+            <div class="form-field">
+              <label>Address name</label>
+              <select [(ngModel)]="deliveryAddressLabelType">
+                <option value="HOME">Home</option>
+                <option value="OFFICE">Office</option>
+                <option value="OTHER">Other</option>
+              </select>
+            </div>
+            <div class="form-field" *ngIf="deliveryAddressLabelType === 'OTHER'">
+              <label>Custom address name</label>
+              <input [(ngModel)]="deliveryCustomAddressLabel" placeholder="e.g. Family home" maxlength="60">
+            </div>
+            <div class="form-field">
+              <label>Building / house number <span class="optional">optional</span></label>
+              <input [(ngModel)]="deliveryBuildingNumber" placeholder="Building or house number" maxlength="50">
+            </div>
+            <div class="form-field">
+              <label>Street number / name <span class="optional">optional</span></label>
+              <input [(ngModel)]="deliveryStreetNumber" placeholder="Street number or street name" maxlength="60">
+            </div>
+            <div class="form-field">
+              <label>Zone <span class="optional">optional</span></label>
+              <input [(ngModel)]="deliveryZone" placeholder="Zone number or name" maxlength="50">
+            </div>
+            <div class="form-field">
+              <label>Area / locality <span class="optional">optional</span></label>
+              <input [(ngModel)]="deliveryArea" placeholder="Area or locality" maxlength="100">
+            </div>
+            <div class="form-field">
+              <label>Floor <span class="optional">optional</span></label>
+              <input [(ngModel)]="deliveryFloorNumber" placeholder="Floor number" maxlength="20">
+            </div>
+            <div class="form-field">
+              <label>Room / apartment <span class="optional">optional</span></label>
+              <input [(ngModel)]="deliveryRoomNumber" placeholder="Apartment or unit number" maxlength="20">
+            </div>
+          </div>
+          <label class="partner-toggle" *ngIf="isCustomer">
+            <input type="checkbox" [(ngModel)]="saveCheckoutAddress">
+            <span>Save this address as my primary address in My Addresses</span>
+          </label>
+          <small class="muted">Address details are optional when your delivery pin is set. Add details to help the restaurant find you.</small>
           <div class="delivery-coverage-warning" *ngIf="!isSelectedRestaurantInDeliveryRange && deliveryLatitude !== null">This restaurant's free-delivery area does not include your selected pin. Choose another restaurant or change your delivery location.</div>
           <div class="form-field"><label>Promotion code <span class="optional">optional</span></label><input [(ngModel)]="promotionCode" (ngModelChange)="invalidateOrderQuote()" placeholder="e.g. KABHI10"><button class="text-button" type="button" *ngIf="!orderQuote && !orderQuoteLoading" (click)="refreshOrderQuote()">Update order total</button></div>
           <div class="form-field" *ngIf="selectedRestaurant?.paymentMethods?.length">
@@ -756,7 +892,7 @@
   </div>
   <div class="map-modal-backdrop" *ngIf="mapPickerOpen" (click)="closeMapPicker()">
     <section class="map-modal" role="dialog" aria-modal="true" aria-labelledby="map-modal-title" (click)="$event.stopPropagation()">
-      <div class="map-modal-heading"><div><span class="eyebrow">{{ mapPickerPurpose === 'delivery' ? 'DELIVERY LOCATION' : 'RESTAURANT LOCATION' }}</span><h2 id="map-modal-title">{{ mapPickerPurpose === 'delivery' ? 'Where should we deliver?' : 'Set your restaurant pin.' }}</h2><p>{{ mapPickerPurpose === 'delivery' ? 'Click the map to choose where you want your order delivered.' : 'Click the restaurant entrance or central point on the map.' }}</p></div><button class="map-close" aria-label="Close map" (click)="closeMapPicker()">×</button></div>
+      <div class="map-modal-heading"><div><span class="eyebrow">{{ mapPickerPurpose === 'delivery' ? 'DELIVERY LOCATION' : mapPickerPurpose === 'customerAddress' ? 'SAVED ADDRESS LOCATION' : 'RESTAURANT LOCATION' }}</span><h2 id="map-modal-title">{{ mapPickerPurpose === 'delivery' ? 'Where should we deliver?' : mapPickerPurpose === 'customerAddress' ? 'Pin your saved address.' : 'Set your restaurant pin.' }}</h2><p>{{ mapPickerPurpose === 'delivery' ? 'Click the map to choose where you want your order delivered.' : mapPickerPurpose === 'customerAddress' ? 'Click the map to set the saved address coordinates.' : 'Click the restaurant entrance or central point on the map.' }}</p></div><button class="map-close" aria-label="Close map" (click)="closeMapPicker()">×</button></div>
       <div class="map-loading" *ngIf="mapLoading"><span class="global-loader-spinner"></span><span>Loading map…</span></div>
       <div class="map-error" *ngIf="mapError" role="alert">{{ mapError }}</div>
       <div class="map-notice" *ngIf="mapNotice" role="status">{{ mapNotice }}</div>

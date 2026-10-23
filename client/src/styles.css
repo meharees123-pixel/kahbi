@@ -64,6 +64,29 @@ button:disabled { opacity: .55; cursor: not-allowed; }
 .checkout-location-card > div, .location-picker-control > div { display: grid; gap: 4px; min-width: 0; }
 .checkout-location-card strong, .location-picker-control strong { color: var(--green); font-size: 11px; }
 .checkout-location-card span, .location-picker-control span { overflow-wrap: anywhere; color: var(--muted); font-size: 10px; }
+.checkout-address-grid, .address-form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); column-gap: 12px; }
+.address-form-grid .form-field { min-width: 0; }
+.address-map-control { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 2px 0 16px; padding: 12px; border: 1px solid var(--line); border-radius: 9px; color: var(--muted); background: #f8f8f2; font-size: 10px; }
+.address-map-control span { min-width: 0; overflow-wrap: anywhere; }
+.address-form-actions { display: flex; gap: 9px; margin-top: 18px; }
+.saved-address-list { display: grid; gap: 14px; margin-top: 20px; }
+.saved-address-card { padding: 18px; border: 1px solid var(--line); border-radius: 14px; background: var(--paper); }
+.saved-address-heading, .saved-address-footer { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.saved-address-heading > div:first-child { display: flex; flex-wrap: wrap; align-items: center; gap: 9px; }
+.saved-address-heading strong { color: var(--green); font-size: 16px; }
+.primary-address-badge { padding: 4px 8px; border-radius: 999px; color: #3e6841; background: #e8f0df; font-size: 9px; font-weight: 700; }
+.saved-address-actions { display: flex; gap: 7px; }
+.address-icon-button { display: grid; width: 34px; height: 34px; place-items: center; border: 1px solid var(--line); border-radius: 9px; color: var(--green); background: white; }
+.address-icon-button:hover { background: #f1f5ec; }
+.address-icon-button svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.7; }
+.address-delete-button { color: #a84e3c; }
+.address-delete-button:hover { background: #fff2ed; }
+.saved-address-details { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px 20px; margin-top: 17px; padding: 15px; border-radius: 10px; background: #f7f8f2; }
+.saved-address-details > div, .saved-address-gps { display: grid; gap: 4px; min-width: 0; }
+.saved-address-details span, .saved-address-gps span { color: var(--muted); font-size: 9px; }
+.saved-address-details strong, .saved-address-gps strong { color: var(--ink); font-size: 11px; font-weight: 600; overflow-wrap: anywhere; }
+.saved-address-gps { margin-top: 10px; padding: 12px 15px; border: 1px solid #dce8d9; border-radius: 9px; background: #f5f8f0; }
+.saved-address-footer { justify-content: flex-start; margin-top: 14px; }
 .form-field small { color: var(--muted); font-size: 10px; line-height: 1.5; }
 .delivery-coverage-warning { margin: 12px 0; padding: 11px 12px; border: 1px solid #efd6cd; border-radius: 9px; color: #8b4033; background: #fff8f5; font-size: 11px; line-height: 1.5; }
 .radius-field { display: grid; align-content: start; gap: 5px; color: var(--muted); font-size: 10px; }
@@ -79,6 +102,7 @@ button:disabled { opacity: .55; cursor: not-allowed; }
 .location-picker-map .leaflet-container { width: 100%; height: 100%; border-radius: inherit; z-index: 0; font-family: 'DM Sans', sans-serif; }
 .location-picker-map .leaflet-control-attribution { font-size: 9px; }
 .location-picker-map .leaflet-control-zoom a { color: var(--green); }
+.location-picker-map .map-selection-pin { border: 0; background: transparent; }
 .map-loading { height: min(52vh, 430px); min-height: 220px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; color: var(--muted); font-size: 12px; }
 .map-error, .map-notice { margin-top: 15px; padding: 11px 12px; border-radius: 9px; color: #8b4033; background: #fff2ec; font-size: 11px; line-height: 1.5; }
 .map-notice { color: #586a45; background: #f0f5e8; }
