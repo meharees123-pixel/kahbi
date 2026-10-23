@@ -86,6 +86,11 @@ interface MenuItem {
   chefRecommended: boolean;
 }
 
+interface CustomerCart {
+  restaurant: Restaurant;
+  items: (MenuItem & { quantity: number })[];
+}
+
 interface BulkMenuRow {
   rowNumber: number;
   restaurantId: string;
@@ -321,6 +326,7 @@ export class AppComponent implements OnInit, OnDestroy {
     ? 'http://localhost:3000/api'
     : '/api';
   private readonly tokenKey = 'kahbi.session';
+  private readonly cartStorageKey = 'kahbi.guest-cart';
   private readonly deliveryLocationKeys = {
     latitude: 'kahbi.delivery.latitude',
     longitude: 'kahbi.delivery.longitude',
@@ -331,6 +337,8 @@ export class AppComponent implements OnInit, OnDestroy {
   private mapGeocodeTimer: ReturnType<typeof setTimeout> | null = null;
   private mapSelectionRequest = 0;
   view = 'home';
+  authModalOpen = false;
+  authModalView: 'login' | 'signup' = 'login';
   loginPortal: LoginPortal = 'CUSTOMER';
   user: User | null = null;
   restaurants: Restaurant[] = [];
@@ -340,9 +348,11 @@ export class AppComponent implements OnInit, OnDestroy {
   promotions: Promotion[] = [];
   advertisements: Advertisement[] = [];
   cart: { [id: string]: number } = {};
+  private cartMenu: MenuItem[] = [];
   orderQuote: OrderQuote | null = null;
   orderQuoteLoading = false;
   private orderQuoteRequest = 0;
+  private customerCartSync: Promise<void> = Promise.resolve();
   customerTerms: CustomerTerms | null = null;
   customerTermsLoading = false;
   customerTermsAccepted = false;
@@ -636,14 +646,17 @@ export class AppComponent implements OnInit, OnDestroy {
       this.http.get<{ user: User }>(`${this.api}/auth/me`, { headers: this.headers() }).subscribe({
         next: ({ user }) => {
           this.user = user;
+          if (user.role !== 'CUSTOMER') this.restoreGuestCart();
           if (!['partnerRegistration', 'activateRestaurant', 'legal'].includes(this.view)) this.loadRoleLanding();
         },
         error: () => {
           localStorage.removeItem(this.tokenKey);
+          this.restoreGuestCart();
           this.loadRestaurants();
         }
       });
     } else {
+      this.restoreGuestCart();
       this.loadRestaurants();
     }
   }
@@ -654,7 +667,7 @@ export class AppComponent implements OnInit, OnDestroy {
   }
 
   get cartItems(): { item: MenuItem; quantity: number }[] {
-    return this.menu
+    return this.cartMenu
       .filter((item) => this.cart[item._id] > 0)
       .map((item) => ({ item, quantity: this.cart[item._id] }));
   }
@@ -1055,11 +1068,13 @@ export class AppComponent implements OnInit, OnDestroy {
   }
 
   private loadRoleLanding(): void {
+    this.authModalOpen = false;
     window.history.replaceState(null, '', '/');
     if (this.user?.role === 'CUSTOMER') {
       this.view = 'home';
       this.loadFeedbackOrders(false);
       this.loadCustomerAddresses();
+      this.loadCustomerCart();
       this.loadRestaurants();
     } else if (this.user?.role.startsWith('RESTAURANT_')) {
       this.loadRestaurantPortal();
@@ -1074,13 +1089,20 @@ export class AppComponent implements OnInit, OnDestroy {
   openLogin(portal: LoginPortal): void {
     this.loginPortal = portal;
     this.signupRestaurant = portal === 'RESTAURANT';
+    this.authModalView = 'login';
+    this.authModalOpen = true;
     this.customerOtpChallengeId = '';
     this.customerOtpCode = '';
     this.customerOtpDevelopmentCode = '';
     this.customerOtpPurpose = 'LOGIN';
-    this.view = 'login';
     this.error = '';
-    window.history.pushState(null, '', `/login/${portal.toLowerCase()}`);
+  }
+
+  closeLogin(): void {
+    this.authModalOpen = false;
+    if (window.location.pathname.startsWith('/login/')) {
+      window.history.replaceState(null, '', '/');
+    }
   }
 
   openSignup(): void {
@@ -1089,6 +1111,7 @@ export class AppComponent implements OnInit, OnDestroy {
       this.notice = 'Enter your WhatsApp number and verify the code to create your account.';
       return;
     }
+    this.closeLogin();
     this.openPartnerRegistration();
   }
 
@@ -1110,6 +1133,7 @@ export class AppComponent implements OnInit, OnDestroy {
   }
 
   navigateHome(): void {
+    this.authModalOpen = false;
     if (this.user) {
       this.loadRoleLanding();
       return;
@@ -1173,6 +1197,7 @@ export class AppComponent implements OnInit, OnDestroy {
 
   private applyLocationRoute(): void {
     const route = window.location.pathname.replace(/\/+$/, '') || '/';
+    this.authModalOpen = false;
     const portalByRoute: Record<string, LoginPortal> = {
       '/login/customer': 'CUSTOMER',
       '/login/restaurant': 'RESTAURANT',
@@ -1196,7 +1221,9 @@ export class AppComponent implements OnInit, OnDestroy {
     if (portal) {
       this.loginPortal = portal;
       this.signupRestaurant = portal === 'RESTAURANT';
-      this.view = 'login';
+      this.authModalView = 'login';
+      this.authModalOpen = true;
+      this.view = 'home';
       return;
     }
     if (route === '/' && !this.user && (this.view === 'login' || this.view === 'signup')) {
@@ -1510,6 +1537,10 @@ export class AppComponent implements OnInit, OnDestroy {
             : null
         };
         this.menu = data.items;
+        if (sessionStorage.getItem('kahbi.cartRestaurant') === data.restaurant._id) {
+          this.cartMenu = data.items;
+          this.persistCart();
+        }
         this.view = 'restaurant';
         this.error = '';
         this.changeDetector.markForCheck();
@@ -1520,21 +1551,177 @@ export class AppComponent implements OnInit, OnDestroy {
 
   addToCart(item: MenuItem): void {
     if (!this.selectedRestaurant || this.selectedRestaurant.availability !== 'OPEN' || item.availability !== 'AVAILABLE') return;
+    if ((this.cart[item._id] || 0) >= 20) return;
     const cartRestaurantId = sessionStorage.getItem('kahbi.cartRestaurant');
     if (cartRestaurantId && cartRestaurantId !== this.selectedRestaurant._id) {
       if (!window.confirm('Your cart has items from another restaurant. Clear it and add this item?')) return;
       this.cart = {};
+      this.cartMenu = [];
     }
     sessionStorage.setItem('kahbi.cartRestaurant', this.selectedRestaurant._id);
+    if (!this.cartMenu.length || cartRestaurantId !== this.selectedRestaurant._id) this.cartMenu = this.menu;
     this.cart[item._id] = (this.cart[item._id] || 0) + 1;
+    this.persistCart();
     this.error = '';
     this.notice = `${item.name} added to your cart.`;
+    this.syncCustomerCart();
   }
 
   setQuantity(itemId: string, quantity: number): void {
     if (quantity < 1) delete this.cart[itemId];
     else this.cart[itemId] = Math.min(20, quantity);
+    if (!this.cartCount) {
+      this.cartMenu = [];
+      sessionStorage.removeItem('kahbi.cartRestaurant');
+    }
+    this.persistCart();
+    this.syncCustomerCart();
     if (this.view === 'cart') this.refreshOrderQuote();
+  }
+
+  private syncCustomerCart(): void {
+    if (!this.isCustomer) return;
+    const items = Object.entries(this.cart)
+      .filter(([, quantity]) => quantity > 0)
+      .map(([menuItemId, quantity]) => ({ menuItemId, quantity }));
+    const restaurantId = sessionStorage.getItem('kahbi.cartRestaurant') || this.selectedRestaurant?._id;
+    this.customerCartSync = this.customerCartSync.catch(() => undefined).then(async () => {
+      try {
+        await firstValueFrom(this.http.put(
+          `${this.api}/customer/cart`,
+          { restaurantId, items },
+          { headers: this.headers() }
+        ));
+      } catch (error) {
+        this.showError(error as { error?: { error?: string } });
+      }
+    });
+  }
+
+  private persistCart(): void {
+    const restaurantId = sessionStorage.getItem('kahbi.cartRestaurant');
+    if (!this.cartCount || !restaurantId) {
+      localStorage.removeItem(this.cartStorageKey);
+      return;
+    }
+    localStorage.setItem(this.cartStorageKey, JSON.stringify({
+      restaurantId,
+      items: this.cart
+    }));
+  }
+
+  private restoreGuestCart(afterLoad?: () => void): void {
+    const savedCart = localStorage.getItem(this.cartStorageKey);
+    if (!savedCart) return;
+
+    let restaurantId: string;
+    let items: Record<string, number>;
+    try {
+      const parsed: unknown = JSON.parse(savedCart);
+      if (typeof parsed !== 'object' || parsed === null) throw new Error('Saved cart is invalid.');
+      const stored = parsed as { restaurantId?: unknown; items?: unknown };
+      if (typeof stored.restaurantId !== 'string' || !stored.restaurantId ||
+          typeof stored.items !== 'object' || stored.items === null || Array.isArray(stored.items)) {
+        throw new Error('Saved cart is invalid.');
+      }
+      const storedItems = stored.items as Record<string, unknown>;
+      const validItems = Object.entries(storedItems).every(([itemId, quantity]) =>
+        !!itemId && Number.isInteger(quantity) && Number(quantity) > 0 && Number(quantity) <= 20
+      );
+      if (!validItems || !Object.keys(storedItems).length) throw new Error('Saved cart is invalid.');
+      restaurantId = stored.restaurantId;
+      items = storedItems as Record<string, number>;
+    } catch {
+      localStorage.removeItem(this.cartStorageKey);
+      sessionStorage.removeItem('kahbi.cartRestaurant');
+      this.showError({ error: { error: 'Your saved cart could not be restored. Please add your items again.' } });
+      return;
+    }
+
+    this.cart = items;
+    sessionStorage.setItem('kahbi.cartRestaurant', restaurantId);
+    this.http.get<{ restaurant: Restaurant; items: MenuItem[] }>(`${this.api}/restaurants/${restaurantId}/menu`).subscribe({
+      next: ({ restaurant, items: menuItems }) => {
+        this.selectedRestaurant = {
+          ...restaurant,
+          distanceKm: this.deliveryLatitude !== null && this.deliveryLongitude !== null &&
+            restaurant.latitude != null && restaurant.longitude != null
+            ? Number(this.distanceKm(this.deliveryLatitude, this.deliveryLongitude, restaurant.latitude, restaurant.longitude).toFixed(2))
+            : null
+        };
+        this.cartMenu = menuItems;
+        const itemsById = new Map(menuItems.map((item) => [item._id, item]));
+        const unavailableItems = Object.keys(this.cart).filter((itemId) =>
+          itemsById.get(itemId)?.availability === 'UNAVAILABLE'
+        );
+        const restoredCart = Object.fromEntries(
+          Object.entries(this.cart).filter(([itemId]) =>
+            itemsById.get(itemId)?.availability === 'AVAILABLE'
+          )
+        );
+        if (Object.keys(restoredCart).length !== Object.keys(this.cart).length) {
+          this.cart = restoredCart;
+          if (!this.cartCount) {
+            sessionStorage.removeItem('kahbi.cartRestaurant');
+          }
+          this.persistCart();
+          if (unavailableItems.length) {
+            this.notice = 'One or more items are unavailable. Refresh the menu and try again.';
+          }
+        }
+        if (this.isCustomer) this.syncCustomerCart();
+        this.changeDetector.markForCheck();
+        afterLoad?.();
+      },
+      error: (error) => this.showError(error)
+    });
+  }
+
+  private loadCustomerCart(afterLoad?: () => void): void {
+    if (!this.isCustomer) return;
+    this.http.get<{ cart: CustomerCart | null; removedItems?: boolean }>(
+      `${this.api}/customer/cart`,
+      { headers: this.headers() }
+    ).subscribe({
+      next: ({ cart, removedItems }) => {
+        if (cart) {
+          this.selectedRestaurant = {
+            ...cart.restaurant,
+            distanceKm: this.deliveryLatitude !== null && this.deliveryLongitude !== null &&
+              cart.restaurant.latitude != null && cart.restaurant.longitude != null
+              ? Number(this.distanceKm(this.deliveryLatitude, this.deliveryLongitude, cart.restaurant.latitude, cart.restaurant.longitude).toFixed(2))
+              : null
+          };
+          this.cart = Object.fromEntries(cart.items.map(({ _id, quantity }) => [_id, quantity]));
+          this.cartMenu = cart.items;
+          sessionStorage.setItem('kahbi.cartRestaurant', cart.restaurant._id);
+          this.persistCart();
+        } else if (removedItems) {
+          this.cart = {};
+          this.cartMenu = [];
+          sessionStorage.removeItem('kahbi.cartRestaurant');
+          this.persistCart();
+          this.notice = 'Unavailable items were removed from your cart.';
+        } else if (this.cartCount && sessionStorage.getItem('kahbi.cartRestaurant')) {
+          this.persistCart();
+          this.restoreGuestCart();
+          this.syncCustomerCart();
+        } else if (localStorage.getItem(this.cartStorageKey)) {
+          this.restoreGuestCart();
+        } else {
+          this.cart = {};
+          this.cartMenu = [];
+          sessionStorage.removeItem('kahbi.cartRestaurant');
+          this.persistCart();
+        }
+        afterLoad?.();
+        this.changeDetector.markForCheck();
+      },
+      error: (error) => {
+        this.showError(error);
+        afterLoad?.();
+      }
+    });
   }
 
   invalidateOrderQuote(): void {
@@ -1583,11 +1770,18 @@ export class AppComponent implements OnInit, OnDestroy {
     }
     this.view = 'cart';
     this.error = '';
-    const methods = this.selectedRestaurant?.paymentMethods?.length
-      ? this.selectedRestaurant.paymentMethods
-      : ['CASH_TO_RESTAURANT'];
-    this.orderPaymentMethod = methods.includes('CASH_TO_RESTAURANT') ? 'CASH_TO_RESTAURANT' : methods[0];
-    this.refreshOrderQuote();
+    const prepareCart = () => {
+      const methods = this.selectedRestaurant?.paymentMethods?.length
+        ? this.selectedRestaurant.paymentMethods
+        : ['CASH_TO_RESTAURANT'];
+      this.orderPaymentMethod = methods.includes('CASH_TO_RESTAURANT') ? 'CASH_TO_RESTAURANT' : methods[0];
+      this.refreshOrderQuote();
+    };
+    if (this.isCustomer) {
+      this.customerCartSync.then(() => this.loadCustomerCart(prepareCart));
+    } else if (sessionStorage.getItem('kahbi.cartRestaurant')) {
+      this.restoreGuestCart(prepareCart);
+    } else prepareCart();
     if (this.isCustomer) {
       this.loadCustomerTerms();
       this.loadCustomerAddresses();
@@ -1891,6 +2085,7 @@ export class AppComponent implements OnInit, OnDestroy {
         }
         const { order } = response;
         this.cart = {};
+        this.cartMenu = [];
         this.orderQuote = null;
         this.selectedCheckoutAddressId = '';
         this.saveCheckoutAddress = false;
@@ -1898,6 +2093,7 @@ export class AppComponent implements OnInit, OnDestroy {
         this.customerTerms = { ...this.customerTerms!, acceptanceRequired: false };
         this.customerTermsAccepted = false;
         sessionStorage.removeItem('kahbi.cartRestaurant');
+        this.persistCart();
         this.trackedOrder = order;
         this.trackReference = order.reference;
         this.trackPhone = this.isCustomer ? this.user?.phone || '' : this.guestPhone;
@@ -2047,8 +2243,9 @@ export class AppComponent implements OnInit, OnDestroy {
         this.error = '';
         if (purpose === 'ORDER') {
           this.notice = 'WhatsApp number verified. Your account is ready; you can now place your order.';
+          this.authModalOpen = false;
           this.view = 'cart';
-          this.refreshOrderQuote();
+          this.loadCustomerCart(() => this.refreshOrderQuote());
           this.loadCustomerTerms();
         } else {
           this.notice = 'Your WhatsApp number is verified. Welcome to KABHI.';
