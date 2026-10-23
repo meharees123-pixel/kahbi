@@ -190,7 +190,7 @@
         <ng-container [ngSwitch]="legalPage">
           <div *ngSwitchCase="'terms'"><h1>Restaurant Partner Terms</h1><p>By submitting a registration, you confirm that you are authorized to represent the restaurant and that your submission is accurate. Submission is subject to verification and KABHI Admin approval; it does not guarantee acceptance or customer visibility.</p><p>Restaurants remain responsible for their kitchens, food preparation, delivery staff and fulfilment. KABHI provides restaurant discovery, location-based ordering, order management and WhatsApp communication. Restaurant and menu details may require Admin review. A restaurant becomes eligible for customer ordering only after required setup and menu approval, and when service status, menu availability and delivery coverage permit.</p><p>Any delivery fee and order total applicable to a customer must be displayed before order confirmation. Accepted version: {{ partnerTermsVersion }}.</p></div>
           <div *ngSwitchCase="'privacy'"><h1>Privacy Policy</h1><p>KABHI collects the restaurant, representative, contact, address, map, operating and delivery details supplied in this registration to verify and administer partner applications. Terms acceptance and submission time are recorded for audit purposes.</p><p>Application information is available to authorized KABHI Admin users. Only approved and configured customer-facing restaurant information is made available to customers. Contact KABHI to request information about your application or its handling.</p></div>
-          <div *ngSwitchCase="'contact'"><h1>Contact KABHI</h1><p>For questions about a partner application, keep your Registration ID available. KABHI will contact the authorized representative using the WhatsApp number or email supplied in the registration when contact details are configured.</p><p>If your application requires correction, the Admin-provided reason and resubmission option will appear on your registration status page.</p></div>
+          <div *ngSwitchCase="'contact'"><h1>Contact KABHI</h1><p>For questions about a partner application, keep your Registration ID available. KABHI will contact the authorized representative using the WhatsApp number or email supplied in the registration when contact details are configured.</p><p>If you cannot access the registered WhatsApp number, ask KABHI Support for Admin-assisted recovery using your Registration ID and official business identity records. An Admin must verify those records through an independently confirmed business contact before the registered number can be changed; password recovery still requires a code sent to the updated number.</p><p>If your application requires correction, the Admin-provided reason and resubmission option will appear on your registration status page.</p></div>
           <div *ngSwitchCase="'about'"><h1>About KABHI</h1><p>KABHI connects customers with local restaurants in Qatar through restaurant discovery, location-based ordering, order management and WhatsApp communication.</p><p>Restaurant partners continue to manage their own kitchens, food preparation, delivery staff and order fulfilment. KABHI keeps registration review, restaurant approval, menu approval and operating status separate.</p></div>
           <div *ngSwitchDefault><h1>Platform Policies</h1><p>Partner applications, restaurant details and customer-facing menu changes are subject to KABHI Admin review. Approval of an application is separate from restaurant operating status. Restaurant registration alone never makes a restaurant customer-visible.</p><p>Restaurants manage food preparation, delivery staff and order fulfilment. Applicable delivery fees and final payable amounts must be visible to customers before they confirm orders.</p></div>
         </ng-container>
@@ -553,14 +553,87 @@
           <div class="form-field"><label>Free-delivery radius (km)</label><input [(ngModel)]="signupServiceRadiusKm" type="number" min="0.5" max="100" step="0.5"><small>Customers inside this radius qualify for free delivery. Enter 0.5–100 km.</small></div>
           <p class="fine-print">Your application will be reviewed before the restaurant appears to customers.</p>
         </ng-container>
-        <div class="form-field" *ngIf="loginPortal !== 'CUSTOMER' || authModalView === 'signup'"><label>Email</label><input [(ngModel)]="authEmail" type="email" placeholder="you&#64;example.com" autocomplete="email"></div>
-        <div class="form-field" *ngIf="loginPortal !== 'CUSTOMER' || authModalView === 'signup'"><label>Password</label><input [(ngModel)]="authPassword" type="password" placeholder="At least 10 characters" autocomplete="current-password"></div>
-        <button class="button button-accent button-wide" *ngIf="loginPortal !== 'CUSTOMER' || authModalView === 'signup'" (click)="authModalView === 'login' ? signIn() : signUp()">{{ authModalView === 'login' ? 'Sign in' : 'Create account' }} <span>→</span></button>
+        <ng-container *ngIf="authModalView === 'login' && loginPortal === 'RESTAURANT'">
+          <ng-container [ngSwitch]="restaurantRecoveryView">
+            <ng-container *ngSwitchCase="'login'">
+              <div class="form-field"><label>Login ID / WhatsApp Number</label><input [(ngModel)]="authEmail" type="text" placeholder="Login ID or +974 5XXX XXXX" autocomplete="username"></div>
+              <div class="form-field"><label>Password</label><input [(ngModel)]="authPassword" type="password" placeholder="Password" autocomplete="current-password"></div>
+              <div class="restaurant-recovery-links">
+                <button class="text-button" type="button" (click)="startRestaurantRecovery('request-id')">Forgot Login ID?</button>
+                <button class="text-button" type="button" (click)="startRestaurantRecovery('request-password')">Forgot Password?</button>
+              </div>
+              <button class="button button-accent button-wide" [disabled]="loading" (click)="signIn()">{{ loading ? 'Signing in…' : 'Login' }} <span>→</span></button>
+              <a class="restaurant-support-link" href="/contact">Contact KABHI Support</a>
+            </ng-container>
+            <ng-container *ngSwitchCase="'request-id'">
+              <p class="fine-print">Enter the WhatsApp number registered to your restaurant account.</p>
+              <div class="form-field"><label>Registered WhatsApp number</label><input [(ngModel)]="restaurantRecoveryPhone" type="tel" autocomplete="tel" placeholder="+974 5XXX XXXX"></div>
+              <button class="button button-accent button-wide" [disabled]="loading" (click)="requestRestaurantRecovery('RESTAURANT_LOGIN_ID_RECOVERY')">{{ loading ? 'Requesting code…' : 'Send verification code' }} <span>→</span></button>
+              <a class="restaurant-support-link" href="/contact">Can't access your registered number? Contact KABHI Support</a>
+              <button class="text-button restaurant-recovery-back" type="button" (click)="returnToRestaurantLogin()">Back to login</button>
+            </ng-container>
+            <ng-container *ngSwitchCase="'request-password'">
+              <p class="fine-print">Enter your registered Login ID or WhatsApp number. We’ll send a verification code to the number on your restaurant account.</p>
+              <div class="form-field"><label>Login ID or WhatsApp number</label><input [(ngModel)]="restaurantRecoveryIdentifier" type="text" autocomplete="username" placeholder="Login ID or +974 5XXX XXXX"></div>
+              <button class="button button-accent button-wide" [disabled]="loading" (click)="requestRestaurantRecovery('RESTAURANT_PASSWORD_RECOVERY')">{{ loading ? 'Requesting code…' : 'Send verification code' }} <span>→</span></button>
+              <a class="restaurant-support-link" href="/contact">Can't access your registered number? Contact KABHI Support</a>
+              <button class="text-button restaurant-recovery-back" type="button" (click)="returnToRestaurantLogin()">Back to login</button>
+            </ng-container>
+            <ng-container *ngSwitchCase="'verify-id'">
+              <p class="fine-print">{{ restaurantRecoveryMessage }} Code expires in {{ restaurantRecoveryExpiryMinutes }} minutes.</p>
+              <div class="development-otp-callout" *ngIf="restaurantRecoveryDevelopmentCode" role="status" aria-live="polite">
+                <strong>Development verification code</strong><span>{{ restaurantRecoveryDevelopmentCode }}</span>
+                <small>WhatsApp delivery is disabled in this development environment.</small>
+              </div>
+              <div class="form-field"><label>Verification code</label><input [(ngModel)]="restaurantRecoveryCode" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="Six-digit code"></div>
+              <button class="button button-accent button-wide" [disabled]="loading" (click)="verifyRestaurantRecovery('RESTAURANT_LOGIN_ID_RECOVERY')">{{ loading ? 'Verifying…' : 'Verify code' }} <span>→</span></button>
+              <button class="text-button restaurant-recovery-back" type="button" (click)="returnToRestaurantLogin()">Back to login</button>
+            </ng-container>
+            <ng-container *ngSwitchCase="'verify-password'">
+              <p class="fine-print">{{ restaurantRecoveryMessage }} Code expires in {{ restaurantRecoveryExpiryMinutes }} minutes.</p>
+              <div class="development-otp-callout" *ngIf="restaurantRecoveryDevelopmentCode" role="status" aria-live="polite">
+                <strong>Development verification code</strong><span>{{ restaurantRecoveryDevelopmentCode }}</span>
+                <small>WhatsApp delivery is disabled in this development environment.</small>
+              </div>
+              <div class="form-field"><label>Verification code</label><input [(ngModel)]="restaurantRecoveryCode" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="Six-digit code"></div>
+              <button class="button button-accent button-wide" [disabled]="loading" (click)="verifyRestaurantRecovery('RESTAURANT_PASSWORD_RECOVERY')">{{ loading ? 'Verifying…' : 'Verify code' }} <span>→</span></button>
+              <button class="text-button restaurant-recovery-back" type="button" (click)="returnToRestaurantLogin()">Back to login</button>
+            </ng-container>
+            <ng-container *ngSwitchCase="'set-password'">
+              <p class="fine-print">Create a new password with at least 10 characters, including a letter and a number.</p>
+              <div class="form-field"><label>New Password</label><input [(ngModel)]="restaurantNewPassword" type="password" autocomplete="new-password" maxlength="200"></div>
+              <div class="form-field"><label>Confirm New Password</label><input [(ngModel)]="restaurantConfirmPassword" type="password" autocomplete="new-password" maxlength="200"></div>
+              <button class="button button-accent button-wide" [disabled]="loading" (click)="resetRestaurantPassword()">{{ loading ? 'Saving password…' : 'Set new password' }} <span>→</span></button>
+            </ng-container>
+            <ng-container *ngSwitchCase="'id-found'">
+              <p class="fine-print">Your registered Restaurant Login ID is:</p>
+              <p class="recovered-login-id" aria-live="polite">{{ restaurantRecoveredLoginId }}</p>
+              <button class="button button-accent button-wide" type="button" (click)="returnToRestaurantLogin()">Return to login</button>
+            </ng-container>
+            <ng-container *ngSwitchCase="'pending'">
+              <p class="recovery-status-message" role="status">{{ restaurantRecoveryMessage }}</p>
+              <a class="restaurant-support-link" href="/contact">Contact KABHI Support</a>
+              <button class="text-button restaurant-recovery-back" type="button" (click)="returnToRestaurantLogin()">Return to login</button>
+            </ng-container>
+            <ng-container *ngSwitchCase="'admin-help'">
+              <p class="recovery-status-message" role="status">{{ restaurantRecoveryMessage }}</p>
+              <a class="restaurant-support-link" href="/contact">Contact KABHI Support</a>
+              <button class="text-button restaurant-recovery-back" type="button" (click)="returnToRestaurantLogin()">Return to login</button>
+            </ng-container>
+            <ng-container *ngSwitchCase="'reset-success'">
+              <p class="recovery-status-message" role="status">{{ restaurantRecoveryMessage }}</p>
+              <button class="button button-accent button-wide" type="button" (click)="returnToRestaurantLogin()">Return to login</button>
+            </ng-container>
+          </ng-container>
+        </ng-container>
+        <div class="form-field" *ngIf="(loginPortal !== 'CUSTOMER' && !(loginPortal === 'RESTAURANT' && authModalView === 'login')) || authModalView === 'signup'"><label>Email</label><input [(ngModel)]="authEmail" type="email" placeholder="you&#64;example.com" autocomplete="email"></div>
+        <div class="form-field" *ngIf="(loginPortal !== 'CUSTOMER' && !(loginPortal === 'RESTAURANT' && authModalView === 'login')) || authModalView === 'signup'"><label>Password</label><input [(ngModel)]="authPassword" type="password" placeholder="At least 10 characters" autocomplete="current-password"></div>
+        <button class="button button-accent button-wide" *ngIf="(loginPortal !== 'CUSTOMER' && !(loginPortal === 'RESTAURANT' && authModalView === 'login')) || authModalView === 'signup'" (click)="authModalView === 'login' ? signIn() : signUp()">{{ authModalView === 'login' ? 'Sign in' : 'Create account' }} <span>→</span></button>
         <p class="auth-switch" *ngIf="authModalView === 'login' && loginPortal === 'CUSTOMER'">New to KABHI? Enter your WhatsApp number and verify the code to create your account.</p>
-        <p class="auth-switch" *ngIf="authModalView === 'login' && loginPortal === 'RESTAURANT'">Own a restaurant? <button class="text-button" (click)="openSignup()">Apply to join KABHI</button></p>
+        <p class="auth-switch" *ngIf="authModalView === 'login' && loginPortal === 'RESTAURANT' && restaurantRecoveryView === 'login'">Own a restaurant? <button class="text-button" (click)="openSignup()">Apply to join KABHI</button></p>
         <p class="auth-switch" *ngIf="authModalView === 'signup'">Already have an account? <button class="text-button" (click)="authModalView = 'login'; signupRestaurant = loginPortal === 'RESTAURANT'">Sign in</button></p>
         <div class="demo-logins" *ngIf="authModalView === 'login' && loginPortal === 'CUSTOMER'"><strong>Customer demo</strong><span>WhatsApp: +97450000002</span><small>Configure WhatsApp Cloud API and an approved OTP template to receive sign-in codes.</small><button class="text-button" (click)="closeLogin(); trackReference = ''; trackedOrder = null; view = 'track'">Track a guest order instead</button></div>
-        <div class="demo-logins" *ngIf="authModalView === 'login' && loginPortal === 'RESTAURANT'"><strong>Restaurant demo accounts</strong><span>restaurant&#64;kahbi.demo — KABHI Demo Hotel</span><span>owner.pearl&#64;kahbi.demo — Pearl Garden Kitchen</span><span>owner.souq&#64;kahbi.demo — Souq Flame Grill</span><span>owner.corniche&#64;kahbi.demo — Corniche Breakfast Club</span><span>owner.lusail&#64;kahbi.demo — Lusail Spice House</span><small>Each restaurant has its own login. Password: Demo123!</small></div>
+        <div class="demo-logins" *ngIf="authModalView === 'login' && loginPortal === 'RESTAURANT' && restaurantRecoveryView === 'login'"><strong>Restaurant demo accounts</strong><span>restaurant&#64;kahbi.demo — KABHI Demo Hotel</span><span>owner.pearl&#64;kahbi.demo — Pearl Garden Kitchen</span><span>owner.souq&#64;kahbi.demo — Souq Flame Grill</span><span>owner.corniche&#64;kahbi.demo — Corniche Breakfast Club</span><span>owner.lusail&#64;kahbi.demo — Lusail Spice House</span><small>Each restaurant has its own login.</small></div>
         <div class="demo-logins" *ngIf="authModalView === 'login' && loginPortal === 'ADMIN'"><strong>Admin demo account</strong><span>admin&#64;kahbi.demo</span><small>Password: Demo123!</small><small>Admin access includes every restaurant and its menu.</small></div>
       </div>
         </div>

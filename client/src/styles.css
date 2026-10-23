@@ -361,6 +361,11 @@ h1 em, h2 em { color: #cde08e; font-weight: 500; }
 .portal-picker-options .portal-choice-active { border-color: #b6cfad; color: var(--green); background: #f0f5e9; box-shadow: inset 0 0 0 1px #b6cfad; }
 .portal-picker > small { display: block; margin-top: 8px; color: #89948b; font-size: 9px; }
 .auth-switch { color: var(--muted); text-align: center; font-size: 10px; margin: 17px 0; }
+.restaurant-recovery-links { display: flex; justify-content: space-between; gap: 12px; margin: 0 0 14px; }
+.restaurant-support-link { display: block; margin: 16px 0 0; color: #558c71; font-size: 10px; font-weight: 600; text-align: center; }
+.restaurant-recovery-back { display: block; margin: 15px auto 0; }
+.recovered-login-id { overflow-wrap: anywhere; margin: 10px 0 22px; padding: 13px; border-radius: 8px; color: var(--green); background: #f1f4e8; font-size: 14px; font-weight: 700; text-align: center; }
+.recovery-status-message { margin: 12px 0 18px; color: var(--muted); font-size: 11px; line-height: 1.7; text-align: center; }
 .restaurant-signup { display: block; margin: 12px auto; }
 .demo-logins { display: flex; flex-direction: column; gap: 7px; margin-top: 20px; padding: 13px; border-radius: 9px; background: #f3f5ec; color: #667368; font-size: 9px; }
 .demo-logins strong { color: var(--green); margin-bottom: 3px; }
