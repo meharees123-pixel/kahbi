@@ -3,6 +3,22 @@ const bcrypt = require("bcryptjs");
 
 const { Schema } = mongoose;
 
+const CustomerAddressSchema = new Schema({
+  labelType: { type: String, enum: ["HOME", "OFFICE", "OTHER"], default: "HOME" },
+  customLabel: { type: String, default: "", trim: true, maxlength: 60 },
+  floorNumber: { type: String, default: "", trim: true, maxlength: 20 },
+  roomNumber: { type: String, default: "", trim: true, maxlength: 20 },
+  buildingNumber: { type: String, default: "", trim: true, maxlength: 50 },
+  streetNumber: { type: String, default: "", trim: true, maxlength: 60 },
+  zone: { type: String, default: "", trim: true, maxlength: 50 },
+  area: { type: String, default: "", trim: true, maxlength: 100 },
+  latitude: { type: Number, default: null },
+  longitude: { type: Number, default: null },
+  isPrimary: { type: Boolean, default: false },
+  createdAt: { type: Date, default: Date.now },
+  updatedAt: { type: Date, default: Date.now }
+}, { _id: true });
+
 const UserSchema = new Schema(
   {
     name: { type: String, required: true, trim: true, maxlength: 100 },
@@ -11,6 +27,8 @@ const UserSchema = new Schema(
     whatsappVerifiedAt: { type: Date, default: null },
     customerTermsVersion: { type: String, default: "" },
     customerTermsAcceptedAt: { type: Date, default: null },
+    addresses: { type: [CustomerAddressSchema], default: [] },
+    primaryAddressId: { type: Schema.Types.ObjectId, default: null },
     passwordHash: { type: String, required: true, select: false },
     role: {
       type: String,
@@ -298,6 +316,7 @@ const PlatformSettingSchema = new Schema({
 }, { timestamps: true });
 
 module.exports = {
+  CustomerAddress: mongoose.model("CustomerAddress", CustomerAddressSchema),
   User: mongoose.model("User", UserSchema),
   Restaurant: mongoose.model("Restaurant", RestaurantSchema),
   MenuItem: mongoose.model("MenuItem", MenuItemSchema),

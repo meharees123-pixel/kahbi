@@ -3,7 +3,7 @@ import { HttpClient, HttpHeaders } from '@angular/common/http';
 import { ChangeDetectorRef, Component, OnDestroy, OnInit } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import * as L from 'leaflet';
-import { finalize, firstValueFrom } from 'rxjs';
+import { finalize, firstValueFrom, switchMap } from 'rxjs';
 import { LoadingIndicatorService } from './loading-indicator.service';
 
 interface User {
@@ -14,6 +14,24 @@ interface User {
   role: string;
   restaurantId?: string;
   demo?: boolean;
+  primaryAddressId?: string | null;
+}
+
+interface CustomerAddress {
+  id: string;
+  labelType: 'HOME' | 'OFFICE' | 'OTHER';
+  customLabel: string;
+  floorNumber: string;
+  roomNumber: string;
+  buildingNumber: string;
+  streetNumber: string;
+  zone: string;
+  area: string;
+  latitude: number | null;
+  longitude: number | null;
+  isPrimary: boolean;
+  createdAt?: string;
+  updatedAt?: string;
 }
 
 interface Restaurant {
@@ -393,12 +411,37 @@ export class AppComponent implements OnInit, OnDestroy {
   search = '';
   openOnly = false;
   guestPhone = '';
-  deliveryAddress = '';
+  deliveryBuildingNumber = '';
+  deliveryStreetNumber = '';
+  deliveryZone = '';
+  deliveryArea = '';
+  deliveryFloorNumber = '';
+  deliveryRoomNumber = '';
+  deliveryAddressLabelType: CustomerAddress['labelType'] = 'HOME';
+  deliveryCustomAddressLabel = '';
+  selectedCheckoutAddressId = '';
+  saveCheckoutAddress = false;
   deliveryLatitude: number | null = null;
   deliveryLongitude: number | null = null;
   deliveryLocationLabel = '';
+  customerAddresses: CustomerAddress[] = [];
+  customerAddressDraft: CustomerAddress = {
+    id: '',
+    labelType: 'HOME',
+    customLabel: '',
+    floorNumber: '',
+    roomNumber: '',
+    buildingNumber: '',
+    streetNumber: '',
+    zone: '',
+    area: '',
+    latitude: null,
+    longitude: null,
+    isPrimary: false
+  };
+  customerAddressFormOpen = false;
   mapPickerOpen = false;
-  mapPickerPurpose: 'delivery' | 'signupRestaurant' | 'partnerRegistration' | 'adminCreateRestaurant' | 'adminEditRestaurant' = 'delivery';
+  mapPickerPurpose: 'delivery' | 'customerAddress' | 'signupRestaurant' | 'partnerRegistration' | 'adminCreateRestaurant' | 'adminEditRestaurant' = 'delivery';
   mapSelection: MapPoint | null = null;
   mapSelectionAddress = '';
   mapLoading = false;
@@ -1016,6 +1059,7 @@ export class AppComponent implements OnInit, OnDestroy {
     if (this.user?.role === 'CUSTOMER') {
       this.view = 'home';
       this.loadFeedbackOrders(false);
+      this.loadCustomerAddresses();
       this.loadRestaurants();
     } else if (this.user?.role.startsWith('RESTAURANT_')) {
       this.loadRestaurantPortal();
@@ -1194,7 +1238,7 @@ export class AppComponent implements OnInit, OnDestroy {
     }
     navigator.geolocation.getCurrentPosition(
       (position) => {
-        this.setDeliveryLocation(position.coords.latitude, position.coords.longitude, 'Current location');
+        this.changeDeliveryLocation(position.coords.latitude, position.coords.longitude, 'Current location');
         this.notice = 'Nearby restaurants updated for your location.';
         this.loadRestaurants();
       },
@@ -1212,10 +1256,11 @@ export class AppComponent implements OnInit, OnDestroy {
     this.mapSelection = this.savedMapPoint(purpose);
     this.mapSelectionAddress = this.mapSelection
       ? purpose === 'delivery' ? this.deliveryLocationLabel
-        : purpose === 'signupRestaurant' ? this.signupAddress
-          : purpose === 'partnerRegistration' ? this.partnerApplication.address
-          : purpose === 'adminCreateRestaurant' ? this.newAdminRestaurantAddress
-            : this.adminRestaurant?.address || ''
+        : purpose === 'customerAddress' ? this.customerAddressDraft.area
+          : purpose === 'signupRestaurant' ? this.signupAddress
+            : purpose === 'partnerRegistration' ? this.partnerApplication.address
+              : purpose === 'adminCreateRestaurant' ? this.newAdminRestaurantAddress
+                : this.adminRestaurant?.address || ''
       : '';
     this.mapError = '';
     this.mapNotice = '';
@@ -1260,15 +1305,13 @@ export class AppComponent implements OnInit, OnDestroy {
     const { lat, lng } = this.mapSelection;
     const locationLabel = this.mapSelectionAddress || `${lat.toFixed(5)}, ${lng.toFixed(5)}`;
     if (this.mapPickerPurpose === 'delivery') {
-      const previousLabel = this.deliveryLocationLabel;
-      const addressFollowsPin = this.deliveryAddress.trim() === previousLabel && !!previousLabel;
-      this.setDeliveryLocation(lat, lng, locationLabel);
-      if (addressFollowsPin) {
-        this.deliveryAddress = locationLabel;
-      }
+      this.changeDeliveryLocation(lat, lng, locationLabel);
       this.notice = 'Showing restaurants that deliver to your selected location.';
       this.loadRestaurants();
       if (this.view === 'cart') this.refreshOrderQuote();
+    } else if (this.mapPickerPurpose === 'customerAddress') {
+      this.customerAddressDraft.latitude = lat;
+      this.customerAddressDraft.longitude = lng;
     } else if (this.mapPickerPurpose === 'signupRestaurant') {
       this.signupLatitude = lat;
       this.signupLongitude = lng;
@@ -1297,6 +1340,46 @@ export class AppComponent implements OnInit, OnDestroy {
     localStorage.setItem(this.deliveryLocationKeys.latitude, String(latitude));
     localStorage.setItem(this.deliveryLocationKeys.longitude, String(longitude));
     localStorage.setItem(this.deliveryLocationKeys.label, label);
+  }
+
+  private changeDeliveryLocation(latitude: number, longitude: number, label: string): void {
+    const previousLatitude = this.deliveryLatitude;
+    const previousLongitude = this.deliveryLongitude;
+    const closeAddress = this.nearestAddressWithinDeliveryRadius(latitude, longitude    );
+    const selectedAddress = this.customerAddresses.find((address) => address.id === this.selectedCheckoutAddressId);
+    const baselineLatitude = selectedAddress?.latitude ?? previousLatitude;
+    const baselineLongitude = selectedAddress?.longitude ?? previousLongitude;
+    const movedBeyondAddress = baselineLatitude !== null && baselineLongitude !== null &&
+      this.distanceKm(latitude, longitude, baselineLatitude, baselineLongitude) > 0.1;
+
+    if (closeAddress) {
+      this.applyCheckoutAddress(closeAddress);
+    } else if (movedBeyondAddress) {
+      this.clearCheckoutAddressFields();
+    }
+    this.setDeliveryLocation(latitude, longitude, label);
+    if (this.view === 'cart') this.refreshOrderQuote();
+  }
+
+  private nearestAddressWithinDeliveryRadius(latitude: number, longitude: number): CustomerAddress | null {
+    const nearest = this.customerAddresses.reduce<{ address: CustomerAddress; distance: number } | null>((current, address) => {
+      if (address.latitude === null || address.longitude === null) return current;
+      const distance = this.distanceKm(latitude, longitude, address.latitude, address.longitude);
+      return distance <= 0.1 && (!current || distance < current.distance) ? { address, distance } : current;
+    }, null);
+    return nearest?.address || null;
+  }
+
+  private clearCheckoutAddressFields(): void {
+    this.selectedCheckoutAddressId = '';
+    this.deliveryBuildingNumber = '';
+    this.deliveryStreetNumber = '';
+    this.deliveryZone = '';
+    this.deliveryArea = '';
+    this.deliveryFloorNumber = '';
+    this.deliveryRoomNumber = '';
+    this.deliveryAddressLabelType = 'HOME';
+    this.deliveryCustomAddressLabel = '';
   }
 
   private isCoordinate(value: number, min: number, max: number): boolean {
@@ -1346,6 +1429,9 @@ export class AppComponent implements OnInit, OnDestroy {
   private savedMapPoint(purpose: AppComponent['mapPickerPurpose']): MapPoint | null {
     if (purpose === 'delivery' && this.deliveryLatitude !== null && this.deliveryLongitude !== null) {
       return { lat: this.deliveryLatitude, lng: this.deliveryLongitude };
+    }
+    if (purpose === 'customerAddress' && this.customerAddressDraft.latitude !== null && this.customerAddressDraft.longitude !== null) {
+      return { lat: this.customerAddressDraft.latitude, lng: this.customerAddressDraft.longitude };
     }
     if (purpose === 'signupRestaurant' && this.signupLatitude !== null && this.signupLongitude !== null) {
       return { lat: this.signupLatitude, lng: this.signupLongitude };
@@ -1502,7 +1588,201 @@ export class AppComponent implements OnInit, OnDestroy {
       : ['CASH_TO_RESTAURANT'];
     this.orderPaymentMethod = methods.includes('CASH_TO_RESTAURANT') ? 'CASH_TO_RESTAURANT' : methods[0];
     this.refreshOrderQuote();
-    if (this.isCustomer) this.loadCustomerTerms();
+    if (this.isCustomer) {
+      this.loadCustomerTerms();
+      this.loadCustomerAddresses();
+    }
+  }
+
+  loadCustomerAddresses(): void {
+    if (!this.isCustomer) return;
+    this.http.get<{ addresses: CustomerAddress[]; primaryAddress: CustomerAddress | null }>(`${this.api}/customer/addresses`, { headers: this.headers() }).subscribe({
+      next: ({ addresses, primaryAddress }) => {
+        this.customerAddresses = addresses;
+        if (primaryAddress) {
+          const saved = this.customerAddresses.find((address) => address.id === primaryAddress.id);
+          if (saved) this.customerAddresses = this.customerAddresses.map((address) => ({ ...address, isPrimary: address.id === saved.id }));
+        }
+        if (!this.selectedCheckoutAddressId && primaryAddress) {
+          const matchingAddress = this.deliveryLatitude !== null && this.deliveryLongitude !== null
+            ? this.nearestAddressWithinDeliveryRadius(this.deliveryLatitude, this.deliveryLongitude)
+            : null;
+          if (matchingAddress) {
+            this.applyCheckoutAddress(matchingAddress);
+          } else if (this.deliveryLatitude === null && this.deliveryLongitude === null) {
+            this.applyCheckoutAddress(primaryAddress);
+          }
+        }
+        this.changeDetector.markForCheck();
+      },
+      error: (error) => this.showError(error)
+    });
+  }
+
+  openCustomerAddressManager(): void {
+    if (!this.isCustomer) return;
+    this.customerAddressFormOpen = false;
+    this.loadCustomerAddresses();
+    this.view = 'customerAddresses';
+    this.error = '';
+  }
+
+  resetCustomerAddressDraft(): void {
+    this.customerAddressDraft = {
+      id: '',
+      labelType: 'HOME',
+      customLabel: '',
+      floorNumber: '',
+      roomNumber: '',
+      buildingNumber: '',
+      streetNumber: '',
+      zone: '',
+      area: '',
+      latitude: null,
+      longitude: null,
+      isPrimary: false
+    };
+    this.customerAddressFormOpen = false;
+  }
+
+  startCustomerAddressEdit(address?: CustomerAddress): void {
+    this.customerAddressFormOpen = true;
+    if (address) {
+      this.customerAddressDraft = { ...address };
+      return;
+    }
+    this.customerAddressDraft = {
+      id: '',
+      labelType: 'HOME',
+      customLabel: '',
+      floorNumber: '',
+      roomNumber: '',
+      buildingNumber: '',
+      streetNumber: '',
+      zone: '',
+      area: '',
+      latitude: null,
+      longitude: null,
+      isPrimary: false
+    };
+  }
+
+  openCustomerAddressMap(): void {
+    this.openMapPicker('customerAddress');
+  }
+
+  saveCustomerAddress(): void {
+    if (!this.isCustomer) return;
+    const isEditing = !!this.customerAddressDraft.id;
+    const payload = {
+      labelType: this.customerAddressDraft.labelType,
+      customLabel: this.customerAddressDraft.customLabel,
+      floorNumber: this.customerAddressDraft.floorNumber,
+      roomNumber: this.customerAddressDraft.roomNumber,
+      buildingNumber: this.customerAddressDraft.buildingNumber,
+      streetNumber: this.customerAddressDraft.streetNumber,
+      zone: this.customerAddressDraft.zone,
+      area: this.customerAddressDraft.area,
+      latitude: this.customerAddressDraft.latitude,
+      longitude: this.customerAddressDraft.longitude,
+      isPrimary: this.customerAddressDraft.isPrimary
+    };
+    const request = isEditing
+      ? this.http.put<{ address: CustomerAddress }>(`${this.api}/customer/addresses/${this.customerAddressDraft.id}`, payload, { headers: this.headers() })
+      : this.http.post<{ address: CustomerAddress }>(`${this.api}/customer/addresses`, payload, { headers: this.headers() });
+    request.subscribe({
+      next: () => {
+        this.resetCustomerAddressDraft();
+        this.loadCustomerAddresses();
+        this.notice = isEditing ? 'Address updated.' : 'Address saved.';
+      },
+      error: (error) => this.showError(error)
+    });
+  }
+
+  deleteCustomerAddress(addressId: string): void {
+    if (!addressId || !this.isCustomer) return;
+    this.http.delete<{ removedId: string }>(`${this.api}/customer/addresses/${addressId}`, { headers: this.headers() }).subscribe({
+      next: () => {
+        this.loadCustomerAddresses();
+        this.notice = 'Address deleted.';
+      },
+      error: (error) => this.showError(error)
+    });
+  }
+
+  setPrimaryCustomerAddress(addressId: string): void {
+    if (!addressId || !this.isCustomer) return;
+    this.http.post<{ address: CustomerAddress }>(`${this.api}/customer/addresses/${addressId}/primary`, {}, { headers: this.headers() }).subscribe({
+      next: () => {
+        this.loadCustomerAddresses();
+        this.notice = 'Primary address updated.';
+      },
+      error: (error) => this.showError(error)
+    });
+  }
+
+  useCustomerAddressForDelivery(address: CustomerAddress): void {
+    if (!address) return;
+    this.applyCheckoutAddress(address);
+    this.view = 'cart';
+  }
+
+  selectCheckoutAddress(addressId: string): void {
+    this.selectedCheckoutAddressId = addressId;
+    const address = this.customerAddresses.find((entry) => entry.id === addressId);
+    if (address) this.applyCheckoutAddress(address);
+  }
+
+  private applyCheckoutAddress(address: CustomerAddress): void {
+    this.selectedCheckoutAddressId = address.id;
+    this.deliveryAddressLabelType = address.labelType;
+    this.deliveryCustomAddressLabel = address.customLabel;
+    this.deliveryBuildingNumber = address.buildingNumber;
+    this.deliveryStreetNumber = address.streetNumber;
+    this.deliveryZone = address.zone;
+    this.deliveryArea = address.area;
+    this.deliveryFloorNumber = address.floorNumber;
+    this.deliveryRoomNumber = address.roomNumber;
+    this.deliveryLatitude = address.latitude;
+    this.deliveryLongitude = address.longitude;
+    if (this.deliveryLatitude !== null && this.deliveryLongitude !== null) {
+      this.deliveryLocationLabel = `${address.labelType === 'OTHER' ? address.customLabel : address.labelType.toLowerCase()} delivery point`;
+      this.setDeliveryLocation(this.deliveryLatitude, this.deliveryLongitude, this.deliveryLocationLabel);
+    } else {
+      this.deliveryLocationLabel = '';
+      localStorage.removeItem(this.deliveryLocationKeys.latitude);
+      localStorage.removeItem(this.deliveryLocationKeys.longitude);
+      localStorage.removeItem(this.deliveryLocationKeys.label);
+    }
+    if (this.view === 'cart') this.refreshOrderQuote();
+  }
+
+  private get deliveryAddress(): string {
+    return [
+      this.deliveryBuildingNumber.trim(),
+      this.deliveryStreetNumber.trim(),
+      this.deliveryZone.trim() ? `Zone ${this.deliveryZone.trim()}` : '',
+      this.deliveryArea.trim(),
+      this.deliveryFloorNumber.trim() ? `Floor ${this.deliveryFloorNumber.trim()}` : '',
+      this.deliveryRoomNumber.trim() ? `Room ${this.deliveryRoomNumber.trim()}` : ''
+    ].filter(Boolean).join(', ');
+  }
+
+  private checkoutAddressPayload(): Omit<CustomerAddress, 'id' | 'createdAt' | 'updatedAt'> {
+    return {
+      labelType: this.deliveryAddressLabelType,
+      customLabel: this.deliveryCustomAddressLabel.trim(),
+      floorNumber: this.deliveryFloorNumber.trim(),
+      roomNumber: this.deliveryRoomNumber.trim(),
+      buildingNumber: this.deliveryBuildingNumber.trim(),
+      streetNumber: this.deliveryStreetNumber.trim(),
+      zone: this.deliveryZone.trim(),
+      area: this.deliveryArea.trim(),
+      latitude: this.deliveryLatitude,
+      longitude: this.deliveryLongitude,
+      isPrimary: true
+    };
   }
 
   placeOrder(): void {
@@ -1533,9 +1813,19 @@ export class AppComponent implements OnInit, OnDestroy {
       this.refreshOrderQuote();
       return;
     }
-    const address = this.deliveryAddress.trim();
-    if (address.length < 5) {
-      this.error = 'Enter a delivery address with at least 5 characters.';
+    const address = this.deliveryAddress ||
+      (this.deliveryLatitude !== null && this.deliveryLongitude !== null
+        ? `GPS location: ${this.deliveryLatitude}, ${this.deliveryLongitude}`
+        : '');
+    if (this.deliveryAddressLabelType === 'OTHER' && !this.deliveryCustomAddressLabel.trim()) {
+      this.error = 'Enter a name for this address.';
+      return;
+    }
+    const hasDeliveryCoordinates = this.deliveryLatitude !== null && this.deliveryLongitude !== null;
+    if (!hasDeliveryCoordinates &&
+        ((!this.deliveryBuildingNumber.trim() && !this.deliveryStreetNumber.trim()) ||
+          (!this.deliveryZone.trim() && !this.deliveryArea.trim()))) {
+      this.error = 'Enter a building or street number and a zone or area for the delivery address.';
       return;
     }
     this.loading = true;
@@ -1551,11 +1841,44 @@ export class AppComponent implements OnInit, OnDestroy {
       customerTermsAccepted: this.customerTerms.acceptanceRequired ? this.customerTermsAccepted : false,
       idempotencyKey
     };
+    if (this.saveCheckoutAddress && this.selectedCheckoutAddressId) {
+      body['savedAddressId'] = this.selectedCheckoutAddressId;
+    }
     if (this.deliveryLatitude !== null && this.deliveryLongitude !== null) {
       body['latitude'] = this.deliveryLatitude;
       body['longitude'] = this.deliveryLongitude;
     }
-    this.http.post<{ order?: Order }>(`${this.api}/orders`, body, { headers: this.headers().set('Idempotency-Key', idempotencyKey) }).pipe(
+    const addressRequest = this.saveCheckoutAddress
+      ? this.selectedCheckoutAddressId
+        ? this.http.put<{ address: CustomerAddress }>(
+          `${this.api}/customer/addresses/${this.selectedCheckoutAddressId}`,
+          this.checkoutAddressPayload(),
+          { headers: this.headers() }
+        )
+        : this.http.post<{ address: CustomerAddress }>(
+          `${this.api}/customer/addresses`,
+          this.checkoutAddressPayload(),
+          { headers: this.headers() }
+        )
+      : null;
+    const placeOrderRequest = addressRequest
+      ? addressRequest.pipe(
+        switchMap(({ address: savedAddress }) => {
+          body['savedAddressId'] = savedAddress.id;
+          this.selectedCheckoutAddressId = savedAddress.id;
+          return this.http.post<{ order?: Order }>(
+            `${this.api}/orders`,
+            body,
+            { headers: this.headers().set('Idempotency-Key', idempotencyKey) }
+          );
+        })
+      )
+      : this.http.post<{ order?: Order }>(
+        `${this.api}/orders`,
+        body,
+        { headers: this.headers().set('Idempotency-Key', idempotencyKey) }
+      );
+    placeOrderRequest.pipe(
       finalize(() => {
         this.loading = false;
         this.changeDetector.markForCheck();
@@ -1569,6 +1892,9 @@ export class AppComponent implements OnInit, OnDestroy {
         const { order } = response;
         this.cart = {};
         this.orderQuote = null;
+        this.selectedCheckoutAddressId = '';
+        this.saveCheckoutAddress = false;
+        this.customerAddresses = [];
         this.customerTerms = { ...this.customerTerms!, acceptanceRequired: false };
         this.customerTermsAccepted = false;
         sessionStorage.removeItem('kahbi.cartRestaurant');

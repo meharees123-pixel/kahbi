@@ -119,8 +119,88 @@ function publicUser(user) {
     email: String(user.email || "").endsWith("@customer.kahbi.invalid") ? "" : user.email,
     phone: user.phone,
     role: user.role,
-    demo: user.demo
+    demo: user.demo,
+    primaryAddressId: user.primaryAddressId || null
   };
+}
+
+function normalizeCustomerAddressInput(raw = {}, existing = null) {
+  const data = raw && typeof raw === "object" ? raw : {};
+  const invalidAddress = (message) => {
+    const error = new Error(message);
+    error.status = 400;
+    error.expose = true;
+    return error;
+  };
+  const labelType = ["HOME", "OFFICE", "OTHER"].includes(String(data.labelType || "HOME").toUpperCase())
+    ? String(data.labelType || "HOME").toUpperCase()
+    : "HOME";
+  const customLabel = String(data.customLabel || "").trim();
+  if (labelType === "OTHER" && !customLabel) {
+    throw invalidAddress("Please enter a custom label when the address type is Other.");
+  }
+  const latitude = data.latitude === undefined || data.latitude === null || data.latitude === "" ? null : Number(data.latitude);
+  const longitude = data.longitude === undefined || data.longitude === null || data.longitude === "" ? null : Number(data.longitude);
+  const hasLatitude = latitude !== null;
+  const hasLongitude = longitude !== null;
+  if (hasLatitude !== hasLongitude ||
+      (hasLatitude && (!isValidCoordinate(latitude, -90, 90) || !isValidCoordinate(longitude, -180, 180)))) {
+    throw invalidAddress("Enter a valid latitude and longitude, or leave both location fields empty.");
+  }
+  const hasGps = isValidCoordinate(latitude, -90, 90) && isValidCoordinate(longitude, -180, 180);
+  const hasBuildingOrStreet = !!String(data.buildingNumber || "").trim() || !!String(data.streetNumber || "").trim();
+  const hasZoneOrArea = !!String(data.zone || "").trim() || !!String(data.area || "").trim();
+  if (!hasGps && (!hasBuildingOrStreet || !hasZoneOrArea)) {
+    throw invalidAddress("Without GPS, provide a building or street and a zone or area.");
+  }
+  const address = {
+    labelType,
+    customLabel: labelType === "OTHER" ? customLabel : "",
+    floorNumber: String(data.floorNumber || "").trim(),
+    roomNumber: String(data.roomNumber || "").trim(),
+    buildingNumber: String(data.buildingNumber || "").trim(),
+    streetNumber: String(data.streetNumber || "").trim(),
+    zone: String(data.zone || "").trim(),
+    area: String(data.area || "").trim(),
+    latitude: hasGps ? latitude : null,
+    longitude: hasGps ? longitude : null,
+    isPrimary: Boolean(data.isPrimary || existing?.isPrimary)
+  };
+  address.updatedAt = new Date();
+  return address;
+}
+
+function serializeCustomerAddress(address) {
+  const raw = address && typeof address.toObject === "function" ? address.toObject() : address || {};
+  return {
+    id: String(raw._id || raw.id || ""),
+    labelType: raw.labelType || "HOME",
+    customLabel: raw.customLabel || "",
+    floorNumber: raw.floorNumber || "",
+    roomNumber: raw.roomNumber || "",
+    buildingNumber: raw.buildingNumber || "",
+    streetNumber: raw.streetNumber || "",
+    zone: raw.zone || "",
+    area: raw.area || "",
+    latitude: raw.latitude ?? null,
+    longitude: raw.longitude ?? null,
+    isPrimary: !!raw.isPrimary,
+    createdAt: raw.createdAt || new Date().toISOString(),
+    updatedAt: raw.updatedAt || raw.createdAt || new Date().toISOString()
+  };
+}
+
+function customerAddressSearchText(address) {
+  return [
+    address.labelType,
+    address.customLabel,
+    address.floorNumber,
+    address.roomNumber,
+    address.buildingNumber,
+    address.streetNumber,
+    address.zone,
+    address.area
+  ].filter(Boolean).join(" ").toLowerCase();
 }
 
 function maskPhone(phone) {
@@ -776,6 +856,122 @@ app.post("/api/orders/track", asyncRoute(async (req, res) => {
   res.json({ order: await orderWithRestaurantDetails(order) });
 }));
 
+async function customerAddressList(userId) {
+  const user = await User.findById(userId).lean();
+  const addresses = Array.isArray(user?.addresses) ? user.addresses : [];
+  return addresses
+    .map((entry) => serializeCustomerAddress(entry))
+    .sort((a, b) => {
+      if (a.isPrimary !== b.isPrimary) return a.isPrimary ? -1 : 1;
+      return new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime();
+    });
+}
+
+function customerAddressRouteHandlers() {
+  return {
+    list: async (req, res) => {
+      const addresses = await customerAddressList(req.user._id);
+      const primaryAddress = addresses.find((entry) => entry.isPrimary) || addresses[0] || null;
+      res.json({ addresses, primaryAddress });
+    },
+    create: async (req, res) => {
+      const user = await User.findById(req.user._id);
+      if (!user) return res.status(404).json({ error: "Your customer profile could not be found." });
+      const address = normalizeCustomerAddressInput(req.body);
+      const saved = { ...address, createdAt: new Date(), updatedAt: new Date() };
+      if (user.addresses.length === 0) saved.isPrimary = true;
+      if (req.body.isPrimary === true || req.body.primary === true) saved.isPrimary = true;
+      if (saved.isPrimary) {
+        user.addresses.forEach((entry) => { entry.isPrimary = false; });
+      }
+      user.addresses.push(saved);
+      user.primaryAddressId = saved.isPrimary ? user.addresses[user.addresses.length - 1]._id : user.primaryAddressId;
+      await user.save();
+      const created = serializeCustomerAddress(user.addresses[user.addresses.length - 1]);
+      res.status(201).json({ address: created, primaryAddress: created.isPrimary ? created : null });
+    },
+    update: async (req, res) => {
+      const user = await User.findById(req.user._id);
+      if (!user) return res.status(404).json({ error: "Your customer profile could not be found." });
+      const entry = user.addresses.id(req.params.id);
+      if (!entry) return res.status(404).json({ error: "This saved address was not found." });
+      const nextAddress = normalizeCustomerAddressInput({ ...entry.toObject(), ...req.body }, entry);
+      Object.assign(entry, nextAddress);
+      entry.updatedAt = new Date();
+      if (nextAddress.isPrimary) {
+        user.addresses.forEach((item) => { item.isPrimary = item._id.equals(entry._id); });
+      }
+      if (!user.addresses.some((item) => item.isPrimary)) {
+        user.addresses[0].isPrimary = true;
+      }
+      user.primaryAddressId = user.addresses.find((item) => item.isPrimary)?._id || null;
+      await user.save();
+      res.json({ address: serializeCustomerAddress(entry), primaryAddress: serializeCustomerAddress(user.addresses.find((item) => item.isPrimary) || user.addresses[0] || null) });
+    },
+    remove: async (req, res) => {
+      const user = await User.findById(req.user._id);
+      if (!user) return res.status(404).json({ error: "Your customer profile could not be found." });
+      const index = user.addresses.findIndex((entry) => String(entry._id) === String(req.params.id));
+      if (index === -1) return res.status(404).json({ error: "This saved address was not found." });
+      const [removed] = user.addresses.splice(index, 1);
+      const remaining = user.addresses;
+      if (removed.isPrimary || String(user.primaryAddressId) === String(req.params.id)) {
+        user.primaryAddressId = remaining.length ? remaining[0]._id : null;
+        if (remaining.length) remaining[0].isPrimary = true;
+      }
+      if (remaining.length && !remaining.some((entry) => entry.isPrimary)) {
+        remaining[0].isPrimary = true;
+        user.primaryAddressId = remaining[0]._id;
+      }
+      if (!remaining.length) user.primaryAddressId = null;
+      await user.save();
+      res.json({ removedId: String(req.params.id), primaryAddressId: user.primaryAddressId ? String(user.primaryAddressId) : null });
+    },
+    setPrimary: async (req, res) => {
+      const user = await User.findById(req.user._id);
+      if (!user) return res.status(404).json({ error: "Your customer profile could not be found." });
+      const target = user.addresses.find((entry) => String(entry._id) === String(req.params.id));
+      if (!target) return res.status(404).json({ error: "This saved address was not found." });
+      user.addresses.forEach((entry) => { entry.isPrimary = String(entry._id) === String(req.params.id); });
+      user.primaryAddressId = target._id;
+      await user.save();
+      const primary = serializeCustomerAddress(target);
+      res.json({ address: primary, primaryAddress: primary });
+    }
+  };
+}
+
+app.get(["/api/customer/addresses", "/api/customers/me/addresses", "/api/customers/addresses"], auth(), roles("CUSTOMER"), asyncRoute(async (req, res) => {
+  const addresses = await customerAddressList(req.user._id);
+  const primaryAddress = addresses.find((entry) => entry.isPrimary) || addresses[0] || null;
+  res.json({ addresses, primaryAddress });
+}));
+
+app.post(["/api/customer/addresses", "/api/customers/me/addresses", "/api/customers/addresses"], auth(), roles("CUSTOMER"), asyncRoute(async (req, res) => {
+  const handlers = customerAddressRouteHandlers();
+  await handlers.create(req, res);
+}));
+
+app.put(["/api/customer/addresses/:id", "/api/customers/me/addresses/:id", "/api/customers/addresses/:id"], auth(), roles("CUSTOMER"), asyncRoute(async (req, res) => {
+  const handlers = customerAddressRouteHandlers();
+  await handlers.update(req, res);
+}));
+
+app.patch(["/api/customer/addresses/:id", "/api/customers/me/addresses/:id", "/api/customers/addresses/:id"], auth(), roles("CUSTOMER"), asyncRoute(async (req, res) => {
+  const handlers = customerAddressRouteHandlers();
+  await handlers.update(req, res);
+}));
+
+app.post(["/api/customer/addresses/:id/primary", "/api/customers/me/addresses/:id/primary", "/api/customers/addresses/:id/primary"], auth(), roles("CUSTOMER"), asyncRoute(async (req, res) => {
+  const handlers = customerAddressRouteHandlers();
+  await handlers.setPrimary(req, res);
+}));
+
+app.delete(["/api/customer/addresses/:id", "/api/customers/me/addresses/:id", "/api/customers/addresses/:id"], auth(), roles("CUSTOMER"), asyncRoute(async (req, res) => {
+  const handlers = customerAddressRouteHandlers();
+  await handlers.remove(req, res);
+}));
+
 app.post("/api/orders/quote", orderQuoteRateLimit, auth(false), asyncRoute(async (req, res) => {
   if (req.user && req.user.role !== "CUSTOMER") return res.status(403).json({ error: "Only customers can request an order total." });
   const { restaurantId, items, latitude, longitude } = req.body;
@@ -854,6 +1050,30 @@ app.post("/api/orders", auth(false), asyncRoute(async (req, res) => {
   const { restaurantId, items, address, latitude, longitude, promotionCode } = req.body;
   if (req.user && req.user.role !== "CUSTOMER") return res.status(403).json({ error: "Only customer accounts can place orders." });
   if (!req.user) return res.status(401).json({ error: "Verify your WhatsApp number before placing an order." });
+  let orderAddress = typeof address === "string" ? address.trim() : "";
+  let orderLatitude = latitude;
+  let orderLongitude = longitude;
+  const savedAddressId = String(req.body.savedAddressId || req.body.addressId || "").trim();
+  if (savedAddressId) {
+    const user = await User.findById(req.user._id).select("addresses primaryAddressId");
+    if (!user) return res.status(404).json({ error: "Your customer profile could not be found." });
+    const savedAddress = user.addresses.find((entry) => String(entry._id) === savedAddressId);
+    if (!savedAddress) return res.status(404).json({ error: "The selected saved address could not be found." });
+    if (savedAddress.latitude !== null && savedAddress.longitude !== null && isValidCoordinate(Number(savedAddress.latitude), -90, 90) && isValidCoordinate(Number(savedAddress.longitude), -180, 180)) {
+      orderLatitude = Number(savedAddress.latitude);
+      orderLongitude = Number(savedAddress.longitude);
+    }
+    const addressParts = [
+      savedAddress.buildingNumber,
+      savedAddress.streetNumber,
+      savedAddress.roomNumber ? `Room ${savedAddress.roomNumber}` : "",
+      savedAddress.floorNumber ? `Floor ${savedAddress.floorNumber}` : "",
+      savedAddress.zone,
+      savedAddress.area,
+      savedAddress.customLabel && savedAddress.labelType === "OTHER" ? savedAddress.customLabel : ""
+    ].filter(Boolean);
+    orderAddress = addressParts.join(", ") || orderAddress;
+  }
   const idempotencyKey = String(req.get("Idempotency-Key") || req.body.idempotencyKey || "").trim();
   if (!idempotencyKey || idempotencyKey.length > 100) return res.status(400).json({ error: "A valid order request key is required." });
   const previous = await Order.findOne({ idempotencyKey });
@@ -870,7 +1090,7 @@ app.post("/api/orders", auth(false), asyncRoute(async (req, res) => {
   if (!Array.isArray(items) || items.length < 1 || items.length > 50) {
     return res.status(400).json({ error: "Add between 1 and 50 items to your order." });
   }
-  if (typeof address !== "string" || address.trim().length < 5) {
+  if (typeof orderAddress !== "string" || orderAddress.trim().length < 5) {
     return res.status(400).json({ error: "Enter a delivery address with at least 5 characters." });
   }
   const restaurant = await Restaurant.findOne({ _id: restaurantId, status: "APPROVED" });
@@ -890,10 +1110,10 @@ app.post("/api/orders", auth(false), asyncRoute(async (req, res) => {
   if (!PAYMENT_METHODS.includes(paymentMethod) || !availablePaymentMethods.includes(paymentMethod)) {
     return res.status(400).json({ error: "Choose a payment method offered by this restaurant." });
   }
-  const hasLatitude = latitude !== undefined;
-  const hasLongitude = longitude !== undefined;
+  const hasLatitude = orderLatitude !== undefined && orderLatitude !== null && orderLatitude !== "";
+  const hasLongitude = orderLongitude !== undefined && orderLongitude !== null && orderLongitude !== "";
   if (hasLatitude !== hasLongitude || !hasLatitude ||
-      !isValidCoordinate(Number(latitude), -90, 90) || !isValidCoordinate(Number(longitude), -180, 180)) {
+      !isValidCoordinate(Number(orderLatitude), -90, 90) || !isValidCoordinate(Number(orderLongitude), -180, 180)) {
     return res.status(400).json({ error: "Choose your delivery location on the map before placing your order." });
   }
   if (!isValidCoordinate(restaurant.latitude, -90, 90) ||
@@ -901,7 +1121,7 @@ app.post("/api/orders", auth(false), asyncRoute(async (req, res) => {
       !isValidServiceRadius(restaurant.serviceRadiusKm)) {
     return res.status(409).json({ error: "This restaurant has not configured its free-delivery area yet." });
   }
-  if (!isWithinServiceArea(Number(latitude), Number(longitude), restaurant.latitude, restaurant.longitude, restaurant.serviceRadiusKm)) {
+  if (!isWithinServiceArea(Number(orderLatitude), Number(orderLongitude), restaurant.latitude, restaurant.longitude, restaurant.serviceRadiusKm)) {
     return res.status(400).json({ error: "This delivery location is outside the restaurant's free-delivery area." });
   }
   const quantities = new Map();
@@ -974,9 +1194,9 @@ app.post("/api/orders", auth(false), asyncRoute(async (req, res) => {
     restaurantId: restaurant._id,
     restaurantName: restaurant.name,
     items: orderItems,
-    address: address.trim(),
-    latitude: Number(latitude),
-    longitude: Number(longitude),
+    address: orderAddress.trim(),
+    latitude: Number(orderLatitude),
+    longitude: Number(orderLongitude),
     subtotal,
     discount,
     deliveryFee,
