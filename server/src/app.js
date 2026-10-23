@@ -39,6 +39,7 @@ const {
   whatsappOtpConfiguration,
   sendWhatsappOtp
 } = require("./whatsapp");
+const { recoveryOtpTtlMs, validNewPassword, restaurantRecoveryStatus } = require("./restaurant-recovery");
 
 const app = express();
 const secret = process.env.JWT_SECRET || "local-development-secret-change-before-deploy";
@@ -52,6 +53,8 @@ app.use(cors({ origin: apiOrigin }));
 app.use(express.json({ limit: "4mb" }));
 app.use("/api/auth", rateLimit({ windowMs: 15 * 60 * 1000, limit: 100, standardHeaders: true, legacyHeaders: false }));
 const customerOtpRateLimit = rateLimit({ windowMs: 15 * 60 * 1000, limit: 10, standardHeaders: true, legacyHeaders: false });
+const restaurantRecoveryRequestRateLimit = rateLimit({ windowMs: 15 * 60 * 1000, limit: 5, standardHeaders: true, legacyHeaders: false });
+const restaurantRecoveryVerifyRateLimit = rateLimit({ windowMs: 15 * 60 * 1000, limit: 10, standardHeaders: true, legacyHeaders: false });
 const partnerRegistrationRateLimit = rateLimit({ windowMs: 60 * 60 * 1000, limit: 10, standardHeaders: true, legacyHeaders: false });
 const orderQuoteRateLimit = rateLimit({ windowMs: 15 * 60 * 1000, limit: 60, standardHeaders: true, legacyHeaders: false });
 const menuImportRateLimit = rateLimit({ windowMs: 60 * 60 * 1000, limit: 12, standardHeaders: true, legacyHeaders: false });
@@ -90,6 +93,9 @@ function auth(required = true) {
     }
     const user = await User.findById(decoded.sub);
     if (!user || user.status !== "ACTIVE") return res.status(401).json({ error: "This account is unavailable." });
+    if (user.passwordChangedAt && decoded.pwd !== user.passwordChangedAt.getTime()) {
+      return res.status(401).json({ error: "Your session is invalid or expired. Sign in again." });
+    }
     if (user.role === "CUSTOMER" && decoded.amr !== "whatsapp_otp") {
       return res.status(401).json({ error: "Customer sessions must be verified with WhatsApp OTP. Sign in again." });
     }
@@ -251,7 +257,9 @@ async function orderWithRestaurantDetails(order) {
 }
 
 function issueToken(user, authMethod = "password") {
-  return jwt.sign({ sub: String(user._id), role: user.role, amr: authMethod }, secret, { expiresIn: "8h", issuer: "kahbi-api" });
+  const claims = { sub: String(user._id), role: user.role, amr: authMethod };
+  if (user.passwordChangedAt) claims.pwd = user.passwordChangedAt.getTime();
+  return jwt.sign(claims, secret, { expiresIn: "8h", issuer: "kahbi-api" });
 }
 
 function roundMoney(amount) {
@@ -277,6 +285,62 @@ function secureTokenMatch(token, hash) {
   const candidate = Buffer.from(hashSecret(token), "hex");
   const expected = Buffer.from(hash, "hex");
   return candidate.length === expected.length && crypto.timingSafeEqual(candidate, expected);
+}
+
+async function findRestaurantRecoveryAccount({ phone, identifier }) {
+  let user = null;
+  let restaurant = null;
+  let registration = null;
+  let ambiguous = false;
+  if (phone) {
+    const phonePattern = customerPhoneQuery(phone);
+    const registrations = await RestaurantRegistration.find({ "details.whatsapp": phonePattern })
+      .sort({ updatedAt: -1 })
+      .limit(2);
+    if (registrations.length > 1) {
+      ambiguous = true;
+    } else {
+      registration = registrations[0] || null;
+    }
+    if (registration?.restaurantId) {
+      restaurant = await Restaurant.findById(registration.restaurantId);
+    } else if (!registration) {
+      const restaurants = await Restaurant.find({ whatsapp: phonePattern }).limit(2);
+      if (restaurants.length > 1) ambiguous = true;
+      else restaurant = restaurants[0] || null;
+      if (restaurant?.partnerRegistrationId) {
+        registration = await RestaurantRegistration.findOne({ registrationId: restaurant.partnerRegistrationId });
+      }
+    }
+    if (!user && restaurant) {
+      user = await User.findOne({ restaurantId: restaurant._id, role: { $in: restaurantRoles } }).sort({ createdAt: 1 });
+    }
+    if (!user && !registration) {
+      user = await User.findOne({ role: { $in: restaurantRoles }, phone: phonePattern }).sort({ createdAt: 1 });
+      if (user?.restaurantId) restaurant = await Restaurant.findById(user.restaurantId);
+    }
+  } else {
+    user = await User.findOne({ email: identifier.toLowerCase(), role: { $in: restaurantRoles } });
+    if (user?.restaurantId) restaurant = await Restaurant.findById(user.restaurantId);
+    if (restaurant?.partnerRegistrationId) {
+      registration = await RestaurantRegistration.findOne({ registrationId: restaurant.partnerRegistrationId });
+    }
+    if (!registration && restaurant) {
+      registration = await RestaurantRegistration.findOne({ restaurantId: restaurant._id }).sort({ updatedAt: -1 });
+    }
+  }
+  const registeredPhone = registration?.details?.whatsapp || restaurant?.whatsapp || (ambiguous ? phone : "");
+  return {
+    user,
+    restaurant,
+    registration,
+    ambiguous,
+    phone: normalizeWhatsappPhone(registeredPhone)
+  };
+}
+
+function recoveryGenericMessage() {
+  return "If these details match a restaurant account, a verification code will be sent to its registered WhatsApp number. If no code arrives or you cannot access that number, contact KABHI Support.";
 }
 
 function publicRegistration(registration, includeDetails = false) {
@@ -661,11 +725,255 @@ app.post("/api/auth/customer-otp/verify", asyncRoute(async (req, res) => {
   res.json({ token: issueToken(user, "whatsapp_otp"), user: publicUser(user), purpose: consumedChallenge.purpose });
 }));
 
+async function requestRestaurantRecovery(req, res, purpose, identifier) {
+  const message = recoveryGenericMessage();
+  const expiresInMs = recoveryOtpTtlMs();
+  const deliveryControl = await WhatsappOtpControl.findOne({ key: "primary" }).lean();
+  const deliveryEnabled = deliveryControl?.deliveryEnabled !== false;
+  const deliveryMode = developmentOtpMode(deliveryEnabled);
+  const whatsappEnvironment = {
+    ...(deliveryEnabled ? await whatsappRuntimeEnvironment() : process.env),
+    OTP_SIGNING_SECRET: resolvedOtpSigningSecret
+  };
+  if (deliveryEnabled) whatsappOtpConfiguration(whatsappEnvironment);
+  const signingSecret = otpSigningSecret(whatsappEnvironment);
+  const submittedPhone = normalizeWhatsappPhone(identifier);
+  const account = await findRestaurantRecoveryAccount(
+    submittedPhone ? { phone: submittedPhone } : { identifier }
+  );
+  const deliveryPhone = account.phone;
+  let challengeId = new mongoose.Types.ObjectId().toString();
+  let developmentCode;
+  if (deliveryPhone) {
+    const now = Date.now();
+    const [latest, requestsThisHour] = await Promise.all([
+      WhatsappOtp.findOne({
+        phone: deliveryPhone,
+        purpose: { $in: ["RESTAURANT_LOGIN_ID_RECOVERY", "RESTAURANT_PASSWORD_RECOVERY"] }
+      }).sort({ createdAt: -1 }).lean(),
+      WhatsappOtp.countDocuments({
+        phone: deliveryPhone,
+        purpose: { $in: ["RESTAURANT_LOGIN_ID_RECOVERY", "RESTAURANT_PASSWORD_RECOVERY"] },
+        createdAt: { $gte: new Date(now - 60 * 60 * 1000) }
+      })
+    ]);
+    if ((!latest || now - latest.createdAt.getTime() >= 60 * 1000) && requestsThisHour < 5) {
+      const code = String(crypto.randomInt(0, 1_000_000)).padStart(6, "0");
+      const challenge = new WhatsappOtp({
+        phone: deliveryPhone,
+        purpose,
+        codeHash: "",
+        expiresAt: new Date(now + expiresInMs),
+        deleteAt: new Date(now + 24 * 60 * 60 * 1000)
+      });
+      challenge.codeHash = hashOtp(String(challenge._id), code, signingSecret).toString("hex");
+      await challenge.save();
+      if (deliveryEnabled) {
+        try {
+          await sendWhatsappOtp(deliveryPhone, code, whatsappEnvironment);
+        } catch (error) {
+          await WhatsappOtp.updateOne({ _id: challenge._id }, { $set: { consumedAt: new Date() } });
+          await writeAudit({
+            action: "RESTAURANT_RECOVERY_OTP_DELIVERY_FAILED",
+            entity: "RestaurantAccountRecovery",
+            entityId: challenge._id,
+            details: { purpose }
+          });
+          console.error("Restaurant account recovery OTP delivery failed:", error.message);
+        }
+      } else {
+        developmentCode = code;
+      }
+      challengeId = String(challenge._id);
+    }
+  }
+  await writeAudit({
+    action: "RESTAURANT_RECOVERY_CODE_REQUESTED",
+    entity: "RestaurantAccountRecovery",
+    entityId: challengeId,
+    details: { purpose }
+  });
+  res.json({
+    challengeId,
+    message,
+    expiresInMinutes: expiresInMs / (60 * 1000),
+    ...(deliveryMode === "DEVELOPMENT" && developmentCode ? { developmentCode } : {})
+  });
+}
+
+app.post("/api/auth/restaurant-recovery/login-id/request", restaurantRecoveryRequestRateLimit, asyncRoute(async (req, res) => {
+  const phone = normalizeWhatsappPhone(req.body.phone);
+  if (!phone) return res.status(400).json({ error: "Enter a valid registered WhatsApp number, including country code." });
+  return requestRestaurantRecovery(req, res, "RESTAURANT_LOGIN_ID_RECOVERY", phone);
+}));
+
+app.post("/api/auth/restaurant-recovery/password/request", restaurantRecoveryRequestRateLimit, asyncRoute(async (req, res) => {
+  const identifier = String(req.body.identifier || "").trim().slice(0, 254);
+  if (!identifier) return res.status(400).json({ error: "Enter your registered Login ID or WhatsApp number." });
+  return requestRestaurantRecovery(req, res, "RESTAURANT_PASSWORD_RECOVERY", identifier);
+}));
+
+app.post("/api/auth/restaurant-recovery/verify", restaurantRecoveryVerifyRateLimit, asyncRoute(async (req, res) => {
+  const challengeId = String(req.body.challengeId || "");
+  const purpose = String(req.body.purpose || "");
+  const code = String(req.body.code || "").trim();
+  if (!mongoose.isValidObjectId(challengeId) ||
+      !["RESTAURANT_LOGIN_ID_RECOVERY", "RESTAURANT_PASSWORD_RECOVERY"].includes(purpose) ||
+      !/^\d{6}$/.test(code)) {
+    return res.status(400).json({ error: "That verification code is invalid or expired. Request a new code or contact KABHI Support." });
+  }
+  const challenge = await WhatsappOtp.findOneAndUpdate(
+    {
+      _id: challengeId,
+      purpose,
+      consumedAt: null,
+      verifiedAt: null,
+      expiresAt: { $gt: new Date() },
+      attempts: { $lt: 5 }
+    },
+    { $inc: { attempts: 1 } },
+    { new: true }
+  );
+  const genericOtpError = "That verification code is invalid or expired. Request a new code or contact KABHI Support.";
+  if (!challenge || !matchesOtp(
+    String(challenge._id),
+    code,
+    otpSigningSecret({ OTP_SIGNING_SECRET: resolvedOtpSigningSecret }),
+    challenge.codeHash
+  )) {
+    await writeAudit({
+      action: "RESTAURANT_RECOVERY_OTP_FAILED",
+      entity: "RestaurantAccountRecovery",
+      entityId: challengeId
+    });
+    return res.status(400).json({ error: genericOtpError });
+  }
+
+  const account = await findRestaurantRecoveryAccount({ phone: challenge.phone });
+  const status = restaurantRecoveryStatus(account);
+  const now = new Date();
+  if (status !== "ACTIVE") {
+    await WhatsappOtp.findOneAndUpdate(
+      { _id: challenge._id, consumedAt: null, verifiedAt: null },
+      { $set: { consumedAt: now } }
+    );
+    await writeAudit({
+      user: account.user,
+      action: "RESTAURANT_RECOVERY_STATUS_BLOCKED",
+      entity: "RestaurantAccountRecovery",
+      entityId: challenge._id,
+      details: { status }
+    });
+    return res.json({
+      status,
+      message: status === "PENDING_APPROVAL"
+        ? "Your restaurant account is pending approval or activation. Please contact KABHI Support if you need help."
+        : "This restaurant account needs KABHI Admin assistance. Please contact KABHI Support."
+    });
+  }
+  if (purpose === "RESTAURANT_LOGIN_ID_RECOVERY") {
+    const consumedChallenge = await WhatsappOtp.findOneAndUpdate(
+      { _id: challenge._id, consumedAt: null, verifiedAt: null },
+      { $set: { consumedAt: now } },
+      { new: true }
+    );
+    if (!consumedChallenge) return res.status(400).json({ error: genericOtpError });
+    await writeAudit({
+      user: account.user,
+      action: "RESTAURANT_LOGIN_ID_RECOVERED",
+      entity: "User",
+      entityId: account.user._id
+    });
+    return res.json({ status: "ACTIVE", loginId: account.user.email });
+  }
+
+  const recoveryToken = crypto.randomBytes(32).toString("base64url");
+  const verifiedChallenge = await WhatsappOtp.findOneAndUpdate(
+    { _id: challenge._id, consumedAt: null, verifiedAt: null },
+    { $set: { verifiedAt: now, recoveryTokenHash: hashSecret(recoveryToken) } },
+    { new: true }
+  );
+  if (!verifiedChallenge) return res.status(400).json({ error: genericOtpError });
+  await writeAudit({
+    user: account.user,
+    action: "RESTAURANT_RECOVERY_OTP_VERIFIED",
+    entity: "RestaurantAccountRecovery",
+    entityId: challenge._id
+  });
+  return res.json({
+    status: "ACTIVE",
+    challengeId: String(challenge._id),
+    recoveryToken
+  });
+}));
+
+app.post("/api/auth/restaurant-recovery/password/reset", restaurantRecoveryVerifyRateLimit, asyncRoute(async (req, res) => {
+  const challengeId = String(req.body.challengeId || "");
+  const recoveryToken = String(req.body.recoveryToken || "");
+  const newPassword = req.body.newPassword;
+  const confirmPassword = req.body.confirmPassword;
+  if (typeof newPassword !== "string" || typeof confirmPassword !== "string" || newPassword !== confirmPassword) {
+    return res.status(400).json({ error: "The new password and confirmation must match." });
+  }
+  if (!validNewPassword(newPassword)) {
+    return res.status(400).json({ error: "Choose a password of 10–200 characters containing at least one letter and one number." });
+  }
+  if (!mongoose.isValidObjectId(challengeId) || !recoveryToken) {
+    return res.status(400).json({ error: "Your password reset authorization is invalid or expired. Start recovery again." });
+  }
+  const challenge = await WhatsappOtp.findOne({
+    _id: challengeId,
+    purpose: "RESTAURANT_PASSWORD_RECOVERY",
+    consumedAt: null,
+    verifiedAt: { $ne: null },
+    expiresAt: { $gt: new Date() }
+  }).select("+recoveryTokenHash");
+  if (!challenge || !secureTokenMatch(recoveryToken, challenge.recoveryTokenHash)) {
+    return res.status(400).json({ error: "Your password reset authorization is invalid or expired. Start recovery again." });
+  }
+  const account = await findRestaurantRecoveryAccount({ phone: challenge.phone });
+  if (restaurantRecoveryStatus(account) !== "ACTIVE") {
+    return res.status(403).json({ error: "This restaurant account needs KABHI Admin assistance. Please contact KABHI Support." });
+  }
+  const consumedChallenge = await WhatsappOtp.findOneAndUpdate(
+    {
+      _id: challenge._id,
+      consumedAt: null,
+      verifiedAt: challenge.verifiedAt,
+      expiresAt: { $gt: new Date() },
+      recoveryTokenHash: challenge.recoveryTokenHash
+    },
+    { $set: { consumedAt: new Date(), recoveryTokenHash: "" } },
+    { new: true }
+  );
+  if (!consumedChallenge) {
+    return res.status(400).json({ error: "Your password reset authorization is invalid or expired. Start recovery again." });
+  }
+  await account.user.setPassword(newPassword);
+  account.user.passwordChangedAt = new Date();
+  await account.user.save();
+  await writeAudit({
+    user: account.user,
+    action: "RESTAURANT_PASSWORD_RESET",
+    entity: "User",
+    entityId: account.user._id
+  });
+  res.json({ message: "Your password has been reset successfully. Please log in with your new password." });
+}));
+
 app.post("/api/auth/login", asyncRoute(async (req, res) => {
-  const email = String(req.body.email || "").toLowerCase().trim();
-  const user = await User.findOne({ email }).select("+passwordHash");
+  const identifier = String(req.body.identifier || req.body.email || "").trim();
+  const portal = String(req.body.portal || "").toUpperCase();
+  let user = await User.findOne({ email: identifier.toLowerCase() }).select("+passwordHash");
+  if (!user && portal === "RESTAURANT") {
+    const phone = normalizeWhatsappPhone(identifier);
+    if (phone) {
+      const account = await findRestaurantRecoveryAccount({ phone });
+      if (account.user) user = await User.findById(account.user._id).select("+passwordHash");
+    }
+  }
   if (!user || !(await user.verifyPassword(String(req.body.password || "")))) {
-    return res.status(401).json({ error: "Email or password is incorrect." });
+    return res.status(401).json({ error: "Login ID, WhatsApp number, or password is incorrect." });
   }
   if (user.role === "CUSTOMER") {
     return res.status(403).json({ error: "Customer accounts sign in with a WhatsApp verification code." });
@@ -676,7 +984,6 @@ app.post("/api/auth/login", asyncRoute(async (req, res) => {
       return res.status(403).json({ error: "This restaurant account is suspended or unavailable." });
     }
   }
-  const portal = String(req.body.portal || "").toUpperCase();
   if (portal && !["CUSTOMER", "RESTAURANT", "ADMIN"].includes(portal)) {
     return res.status(400).json({ error: "Choose a valid sign-in portal." });
   }

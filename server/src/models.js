@@ -30,6 +30,7 @@ const UserSchema = new Schema(
     addresses: { type: [CustomerAddressSchema], default: [] },
     primaryAddressId: { type: Schema.Types.ObjectId, default: null },
     passwordHash: { type: String, required: true, select: false },
+    passwordChangedAt: { type: Date, default: null },
     role: {
       type: String,
       enum: ["CUSTOMER", "RESTAURANT_OWNER", "RESTAURANT_MANAGER", "RESTAURANT_STAFF", "ADMIN", "SUPER_ADMIN"],
@@ -267,11 +268,13 @@ const MessageLogSchema = new Schema({
 
 const WhatsappOtpSchema = new Schema({
   phone: { type: String, required: true, index: true },
-  purpose: { type: String, enum: ["LOGIN", "ORDER"], required: true },
+  purpose: { type: String, enum: ["LOGIN", "ORDER", "RESTAURANT_LOGIN_ID_RECOVERY", "RESTAURANT_PASSWORD_RECOVERY"], required: true },
   codeHash: { type: String, required: true },
   attempts: { type: Number, default: 0 },
   expiresAt: { type: Date, required: true },
   consumedAt: { type: Date, default: null },
+  verifiedAt: { type: Date, default: null },
+  recoveryTokenHash: { type: String, default: "", select: false },
   deleteAt: { type: Date, required: true }
 }, { timestamps: true });
 WhatsappOtpSchema.index({ phone: 1, purpose: 1, createdAt: -1 });

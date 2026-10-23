@@ -471,6 +471,18 @@ export class AppComponent implements OnInit, OnDestroy {
   customerOtpChallengeId = '';
   customerOtpDevelopmentCode = '';
   customerOtpPurpose: 'LOGIN' | 'ORDER' = 'LOGIN';
+  restaurantRecoveryView: 'login' | 'request-id' | 'request-password' | 'verify-id' | 'verify-password' | 'set-password' | 'id-found' | 'pending' | 'admin-help' | 'reset-success' = 'login';
+  restaurantRecoveryPhone = '';
+  restaurantRecoveryIdentifier = '';
+  restaurantRecoveryChallengeId = '';
+  restaurantRecoveryCode = '';
+  restaurantRecoveryDevelopmentCode = '';
+  restaurantRecoveryExpiryMinutes = 5;
+  restaurantRecoveryToken = '';
+  restaurantRecoveredLoginId = '';
+  restaurantRecoveryMessage = '';
+  restaurantNewPassword = '';
+  restaurantConfirmPassword = '';
   signupRestaurant = false;
   signupRestaurantName = '';
   signupCuisine = '';
@@ -1095,6 +1107,7 @@ export class AppComponent implements OnInit, OnDestroy {
     this.customerOtpCode = '';
     this.customerOtpDevelopmentCode = '';
     this.customerOtpPurpose = 'LOGIN';
+    this.returnToRestaurantLogin();
     this.error = '';
   }
 
@@ -2176,7 +2189,7 @@ export class AppComponent implements OnInit, OnDestroy {
       return;
     }
     this.http.post<{ token: string; user: User }>(`${this.api}/auth/login`, {
-      email: this.authEmail,
+      identifier: this.authEmail,
       password: this.authPassword,
       portal: this.loginPortal
     }).subscribe({
@@ -2197,6 +2210,133 @@ export class AppComponent implements OnInit, OnDestroy {
         this.showError(error);
       }
     });
+  }
+
+  startRestaurantRecovery(flow: 'request-id' | 'request-password'): void {
+    this.restaurantRecoveryView = flow;
+    this.restaurantRecoveryPhone = '';
+    this.restaurantRecoveryIdentifier = '';
+    this.restaurantRecoveryChallengeId = '';
+    this.restaurantRecoveryCode = '';
+    this.restaurantRecoveryDevelopmentCode = '';
+    this.restaurantRecoveryToken = '';
+    this.restaurantRecoveryMessage = '';
+    this.restaurantRecoveredLoginId = '';
+    this.restaurantNewPassword = '';
+    this.restaurantConfirmPassword = '';
+    this.error = '';
+    this.notice = '';
+  }
+
+  requestRestaurantRecovery(purpose: 'RESTAURANT_LOGIN_ID_RECOVERY' | 'RESTAURANT_PASSWORD_RECOVERY'): void {
+    const isLoginId = purpose === 'RESTAURANT_LOGIN_ID_RECOVERY';
+    const url = isLoginId
+      ? `${this.api}/auth/restaurant-recovery/login-id/request`
+      : `${this.api}/auth/restaurant-recovery/password/request`;
+    const body = isLoginId
+      ? { phone: this.restaurantRecoveryPhone }
+      : { identifier: this.restaurantRecoveryIdentifier };
+    this.loading = true;
+    this.error = '';
+    this.http.post<{ challengeId: string; message: string; developmentCode?: string; expiresInMinutes: number }>(url, body).pipe(finalize(() => {
+      this.loading = false;
+      this.changeDetector.markForCheck();
+    })).subscribe({
+      next: ({ challengeId, message, developmentCode, expiresInMinutes }) => {
+        this.restaurantRecoveryChallengeId = challengeId;
+        this.restaurantRecoveryCode = '';
+        this.restaurantRecoveryDevelopmentCode = developmentCode || '';
+        this.restaurantRecoveryExpiryMinutes = expiresInMinutes;
+        this.restaurantRecoveryView = isLoginId ? 'verify-id' : 'verify-password';
+        this.restaurantRecoveryMessage = message;
+      },
+      error: (error) => this.showError(error)
+    });
+  }
+
+  verifyRestaurantRecovery(purpose: 'RESTAURANT_LOGIN_ID_RECOVERY' | 'RESTAURANT_PASSWORD_RECOVERY'): void {
+    this.loading = true;
+    this.error = '';
+    this.http.post<{
+      status: 'ACTIVE' | 'PENDING_APPROVAL' | 'ADMIN_ASSISTANCE';
+      challengeId?: string;
+      recoveryToken?: string;
+      loginId?: string;
+      message?: string;
+    }>(`${this.api}/auth/restaurant-recovery/verify`, {
+      challengeId: this.restaurantRecoveryChallengeId,
+      purpose,
+      code: this.restaurantRecoveryCode.trim()
+    }).pipe(finalize(() => {
+      this.loading = false;
+      this.changeDetector.markForCheck();
+    })).subscribe({
+      next: (result) => {
+        this.restaurantRecoveryMessage = result.message || '';
+        if (result.status === 'PENDING_APPROVAL') {
+          this.restaurantRecoveryView = 'pending';
+        } else if (result.status === 'ADMIN_ASSISTANCE') {
+          this.restaurantRecoveryView = 'admin-help';
+        } else if (purpose === 'RESTAURANT_LOGIN_ID_RECOVERY' && result.loginId) {
+          this.restaurantRecoveredLoginId = result.loginId;
+          this.restaurantRecoveryView = 'id-found';
+        } else if (result.challengeId && result.recoveryToken) {
+          this.restaurantRecoveryChallengeId = result.challengeId;
+          this.restaurantRecoveryToken = result.recoveryToken;
+          this.restaurantRecoveryView = 'set-password';
+        } else {
+          this.error = 'We could not complete account recovery. Start again or contact KABHI Support.';
+        }
+      },
+      error: (error) => this.showError(error)
+    });
+  }
+
+  resetRestaurantPassword(): void {
+    if (this.restaurantNewPassword !== this.restaurantConfirmPassword) {
+      this.error = 'The new password and confirmation must match.';
+      return;
+    }
+    if (this.restaurantNewPassword.length < 10 ||
+        this.restaurantNewPassword.length > 200 ||
+        !/[A-Za-z]/.test(this.restaurantNewPassword) ||
+        !/\d/.test(this.restaurantNewPassword)) {
+      this.error = 'Choose a password of 10–200 characters containing at least one letter and one number.';
+      return;
+    }
+    this.loading = true;
+    this.error = '';
+    this.http.post<{ message: string }>(`${this.api}/auth/restaurant-recovery/password/reset`, {
+      challengeId: this.restaurantRecoveryChallengeId,
+      recoveryToken: this.restaurantRecoveryToken,
+      newPassword: this.restaurantNewPassword,
+      confirmPassword: this.restaurantConfirmPassword
+    }).pipe(finalize(() => {
+      this.loading = false;
+      this.changeDetector.markForCheck();
+    })).subscribe({
+      next: ({ message }) => {
+        this.restaurantRecoveryView = 'reset-success';
+        this.restaurantRecoveryMessage = message;
+        this.restaurantNewPassword = '';
+        this.restaurantConfirmPassword = '';
+      },
+      error: (error) => this.showError(error)
+    });
+  }
+
+  returnToRestaurantLogin(): void {
+    this.restaurantRecoveryView = 'login';
+    this.restaurantRecoveryChallengeId = '';
+    this.restaurantRecoveryCode = '';
+    this.restaurantRecoveryDevelopmentCode = '';
+    this.restaurantRecoveryToken = '';
+    this.restaurantRecoveryMessage = '';
+    this.restaurantRecoveredLoginId = '';
+    this.restaurantNewPassword = '';
+    this.restaurantConfirmPassword = '';
+    this.error = '';
+    this.notice = '';
   }
 
   requestCustomerOtp(purpose: 'LOGIN' | 'ORDER'): void {
