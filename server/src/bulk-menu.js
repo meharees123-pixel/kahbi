@@ -3,6 +3,8 @@ const { Readable } = require("node:stream");
 const yauzl = require("yauzl");
 
 const MAX_MENU_ROWS = 500;
+const MAX_MENU_ZIP_BYTES = 10 * 1024 * 1024;
+const MAX_MENU_IMAGE_BYTES = 256 * 1024;
 const TIME_PATTERN = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
 const MENU_HEADERS = [
   "Category",
@@ -262,9 +264,9 @@ function parseImageArchive(buffer) {
         const mimeType = { jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", webp: "image/webp" }[extension];
         const mode = (entry.externalFileAttributes >>> 16) & 0o170000;
         if (!mimeType || mode === 0o120000) return archive.readEntry();
-        if (images.length >= MAX_MENU_ROWS || entry.uncompressedSize > 256 * 1024 ||
-            uncompressedTotal + entry.uncompressedSize > 20 * 1024 * 1024) {
-          return finish({ error: "The ZIP contains too many images or an image exceeds the 256 KB per-image limit." });
+        if (images.length >= MAX_MENU_ROWS || entry.uncompressedSize > MAX_MENU_IMAGE_BYTES ||
+            uncompressedTotal + entry.uncompressedSize > MAX_MENU_ZIP_BYTES) {
+          return finish({ error: "The ZIP contains too many images, exceeds the 10 MB archive limit, or includes an image over 256 KB." });
         }
         uncompressedTotal += entry.uncompressedSize;
         archive.openReadStream(entry, (streamError, stream) => {
@@ -273,7 +275,7 @@ function parseImageArchive(buffer) {
           let size = 0;
           stream.on("data", (chunk) => {
             size += chunk.length;
-            if (size > 256 * 1024) {
+            if (size > MAX_MENU_IMAGE_BYTES) {
               stream.destroy();
               return finish({ error: "An image in the ZIP exceeds the 256 KB per-image limit." });
             }
@@ -293,6 +295,8 @@ function parseImageArchive(buffer) {
 
 module.exports = {
   MAX_MENU_ROWS,
+  MAX_MENU_ZIP_BYTES,
+  MAX_MENU_IMAGE_BYTES,
   MENU_HEADERS,
   parseMenuFile,
   parseImageArchive,

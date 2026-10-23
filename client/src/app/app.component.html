@@ -526,7 +526,7 @@
       <section class="auth-modal" role="dialog" aria-modal="true" aria-labelledby="auth-dialog-title" (click)="$event.stopPropagation()">
         <button class="auth-modal-close" type="button" aria-label="Close sign in" (click)="closeLogin()">×</button>
         <div class="auth-wrap">
-      <div class="auth-aside"><span class="brand-mark">K</span><span class="eyebrow">{{ loginPortal === 'ADMIN' ? 'KABHI ADMIN' : loginPortal === 'RESTAURANT' ? 'RESTAURANT PORTAL' : 'WELCOME TO KABHI' }}</span><h2>{{ loginPortal === 'ADMIN' ? 'Platform oversight.' : loginPortal === 'RESTAURANT' ? 'Your kitchen, managed.' : 'Made for good moments.' }}</h2><p>{{ loginPortal === 'ADMIN' ? 'Manage restaurants, menus, and orders across KABHI.' : loginPortal === 'RESTAURANT' ? 'Sign in to manage your restaurant, menu, and incoming orders.' : 'Discover the kitchens worth knowing in Qatar.' }}</p></div>
+      <div class="auth-aside"><span class="brand-mark">K</span><span class="eyebrow">{{ loginPortal === 'ADMIN' ? 'KABHI ADMIN' : loginPortal === 'RESTAURANT' ? 'RESTAURANT PORTAL' : 'WELCOME TO KABHI' }}</span><h2>{{ loginPortal === 'ADMIN' ? 'Platform oversight.' : loginPortal === 'RESTAURANT' ? 'Your kitchen, managed.' : 'Made for good moments.' }}</h2><p>{{ loginPortal === 'ADMIN' ? 'Manage restaurants, menus, and orders across KABHI.' : loginPortal === 'RESTAURANT' ? 'After signing in, open your Restaurant Dashboard and choose Import Menu to upload photos or take a menu picture.' : 'Discover the kitchens worth knowing in Qatar.' }}</p></div>
       <div class="auth-card">
         <span class="eyebrow">{{ authModalView === 'login' ? loginPortal + ' SIGN IN' : 'JOIN KABHI' }}</span><h1 id="auth-dialog-title">{{ authModalView === 'login' ? (loginPortal === 'CUSTOMER' ? 'Sign in with WhatsApp.' : 'Sign in to your portal.') : (signupRestaurant ? 'List your restaurant.' : 'Create an account.') }}</h1>
         <div class="form-field" *ngIf="authModalView === 'signup'"><label>{{ signupRestaurant ? 'Owner name' : 'Full name' }}</label><input [(ngModel)]="signupName" placeholder="Your name"></div>
@@ -697,9 +697,22 @@
             <div class="pagination-controls" *ngIf="completedRestaurantOrdersTotalPages > 1"><button class="button button-quiet button-small" [disabled]="completedRestaurantOrdersPage <= 1 || completedRestaurantOrdersLoading" (click)="loadCompletedRestaurantOrders(completedRestaurantOrdersPage - 1)">Previous</button><span>Page {{ completedRestaurantOrdersPage }} of {{ completedRestaurantOrdersTotalPages }}</span><button class="button button-quiet button-small" [disabled]="completedRestaurantOrdersPage >= completedRestaurantOrdersTotalPages || completedRestaurantOrdersLoading" (click)="loadCompletedRestaurantOrders(completedRestaurantOrdersPage + 1)">Next</button></div>
           </ng-container>
         </div>
-        <div class="portal-panel"><div class="panel-heading"><div><span class="eyebrow">YOUR KITCHEN</span><h2>Menu availability</h2></div><button *ngIf="user?.role === 'RESTAURANT_OWNER' || user?.role === 'RESTAURANT_MANAGER'" class="button button-quiet button-small" (click)="bulkMenuOpen = !bulkMenuOpen">{{ bulkMenuOpen ? 'Close bulk upload' : 'Bulk Upload Menu' }}</button></div>
+        <div class="portal-panel"><div class="panel-heading"><div><span class="eyebrow">YOUR KITCHEN</span><h2>Menu availability</h2></div><button *ngIf="user?.role === 'RESTAURANT_OWNER' || user?.role === 'RESTAURANT_MANAGER'" class="button button-quiet button-small" (click)="bulkMenuOpen = !bulkMenuOpen">{{ bulkMenuOpen ? 'Close menu import' : 'Import Menu' }}</button></div>
           <section class="bulk-menu-panel" *ngIf="bulkMenuOpen">
-            <div class="bulk-menu-toolbar"><div><strong>Import a menu in one operation</strong><small>Upload up to 500 rows per CSV or Excel .xlsx file. Each item will follow KABHI's Admin menu-approval process.</small></div><button class="button button-quiet button-small" (click)="downloadMenuTemplate()">Download CSV template</button></div>
+            <div class="bulk-menu-toolbar"><div><strong>Import a menu in one operation</strong><small>Review every extracted item before importing. New items follow KABHI's Admin menu-approval process.</small></div><button class="button button-quiet button-small" (click)="downloadMenuTemplate()">Download CSV template</button></div>
+            <div class="bulk-menu-photo">
+              <div><strong>Import from menu photos</strong><p>Choose photos from your device or take a new picture. English text is scanned on your device; check the results and correct them before importing.</p></div>
+              <div class="bulk-menu-photo-controls">
+                <label class="button button-quiet button-small image-file-button">Choose photos<input type="file" accept="image/jpeg,image/png,.jpg,.jpeg,.png" multiple (change)="selectBulkMenuPhotos($event)"></label>
+                <label class="button button-quiet button-small image-file-button">Take a photo<input type="file" accept="image/jpeg,image/png" capture="environment" (change)="selectBulkMenuPhotos($event)"></label>
+                <button class="button button-accent button-small" [disabled]="!bulkMenuPhotoFiles.length || bulkMenuPhotoLoading" (click)="extractBulkMenuPhotos()">{{ bulkMenuPhotoLoading ? 'Scanning photos…' : 'Scan and review menu' }}</button>
+              </div>
+              <ul class="bulk-menu-photo-list" *ngIf="bulkMenuPhotoFiles.length">
+                <li *ngFor="let file of bulkMenuPhotoFiles; let fileIndex = index"><span>{{ file.name }}</span><button type="button" class="text-button" [disabled]="bulkMenuPhotoLoading" (click)="removeBulkMenuPhoto(fileIndex)">Remove</button></li>
+              </ul>
+              <small class="bulk-menu-photo-status" *ngIf="bulkMenuPhotoStatus" aria-live="polite">{{ bulkMenuPhotoStatus }}</small>
+              <small class="bulk-menu-photo-note">JPEG or PNG · up to 10 photos · 10 MB per photo · 20 MB total. First use downloads the English OCR model; images stay in your browser.</small>
+            </div>
             <div class="bulk-menu-file-controls">
               <label class="button button-quiet button-small image-file-button">Choose CSV or Excel file<input type="file" accept=".csv,.xlsx,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" (change)="selectBulkMenuFile($event)"></label>
               <span class="bulk-menu-filename">{{ bulkMenuFile?.name || 'No menu file selected' }}</span>
@@ -715,7 +728,7 @@
               <button class="button button-quiet button-small" *ngIf="bulkImageErrorReport" (click)="downloadBulkImageErrors()">Download image error report</button>
             </div>
             <div *ngIf="bulkMenuRows.length" class="bulk-menu-preview">
-              <div class="bulk-menu-counts"><strong>Preview · {{ bulkMenuRows.length }} rows</strong><span class="bulk-valid-count">{{ bulkMenuValidCount }} valid</span><span class="bulk-invalid-count">{{ bulkMenuInvalidCount }} invalid</span></div>
+              <div class="bulk-menu-counts"><strong>Review · {{ bulkMenuRows.length }} rows</strong><span class="bulk-valid-count">{{ bulkMenuValidCount }} valid</span><span class="bulk-invalid-count">{{ bulkMenuInvalidCount }} invalid</span><button class="button button-quiet button-small" [disabled]="bulkMenuRows.length >= 500" (click)="addBulkMenuRow()">Add item</button></div>
               <div class="bulk-menu-strategy">
                 <label>Existing menu items
                   <select [(ngModel)]="bulkMenuMode">
@@ -728,7 +741,7 @@
                 <button class="button button-accent button-small" [disabled]="bulkMenuImporting || !bulkMenuValidCount || (bulkMenuMode === 'REPLACE' && (bulkMenuInvalidCount > 0 || !bulkMenuReplaceConfirmed))" (click)="importBulkMenu()">{{ bulkMenuImporting ? 'Importing…' : 'Import valid items' }}</button>
               </div>
               <div class="bulk-menu-row" *ngFor="let row of bulkMenuRows; let rowIndex = index" [class.bulk-menu-row-invalid]="row.errors.length">
-                <div class="bulk-row-heading"><strong>Row {{ row.rowNumber }}</strong><span *ngIf="row.existingItemId">Matches existing item {{ row.existingItemName }} · {{ row.existingItemId }}</span><span *ngIf="!row.errors.length && !row.existingItemId">New item</span></div>
+                <div class="bulk-row-heading"><strong>Row {{ row.rowNumber }}</strong><span *ngIf="row.existingItemId">Matches existing item {{ row.existingItemName }} · {{ row.existingItemId }}</span><span *ngIf="!row.errors.length && !row.existingItemId">New item</span><button type="button" class="text-button" (click)="removeBulkMenuRow(rowIndex)">Remove item</button></div>
                 <div class="bulk-menu-fields">
                   <label>Category<input [(ngModel)]="row.category" (ngModelChange)="validateBulkMenuRows()"></label>
                   <label>Item Name<input [(ngModel)]="row.name" (ngModelChange)="validateBulkMenuRows()"></label>
@@ -738,6 +751,7 @@
                   <label>Availability End (HH:MM)<input [(ngModel)]="row.availabilityEnd" (ngModelChange)="validateBulkMenuRows()" placeholder="e.g. 22:00"></label>
                   <label>Image URL (Optional)<input [(ngModel)]="row.imageUrl" (ngModelChange)="validateBulkMenuRows()" type="url" placeholder="https://…"></label>
                 </div>
+                <ul class="bulk-row-warnings" *ngIf="row.extractionWarnings?.length"><li *ngFor="let warning of row.extractionWarnings">{{ warning }}</li></ul>
                 <ul class="bulk-row-errors" *ngIf="row.errors.length"><li *ngFor="let rowError of row.errors">{{ rowError }}</li></ul>
               </div>
             </div>
