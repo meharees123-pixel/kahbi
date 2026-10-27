@@ -1,11 +1,19 @@
+/// <reference types="google.maps" />
+
 import { CommonModule } from '@angular/common';
 import { HttpClient, HttpErrorResponse, HttpHeaders } from '@angular/common/http';
 import { ChangeDetectorRef, Component, OnDestroy, OnInit } from '@angular/core';
 import { FormsModule } from '@angular/forms';
-import * as L from 'leaflet';
 import { finalize, firstValueFrom, switchMap } from 'rxjs';
 import { LoadingIndicatorService } from './loading-indicator.service';
 import { FirebasePhoneAuthService } from './firebase-phone-auth.service';
+
+declare global {
+  interface Window {
+    google?: typeof google;
+    kahbiGoogleMapsInit?: () => void;
+  }
+}
 
 interface User {
   id: string;
@@ -318,6 +326,12 @@ type PhoneVerificationFlow = 'LOGIN' | 'ORDER';
   templateUrl: './app.component.html'
 })
 export class AppComponent implements OnInit, OnDestroy {
+  private static googleMapsReadyPromise: Promise<void> | null = null;
+  private static readonly googleMapsScriptId = 'kahbi-google-maps-api';
+  private static readonly googleMapsCallbackName = 'kahbiGoogleMapsInit';
+  private static readonly defaultMapPoint: MapPoint = { lat: 25.2854, lng: 51.531 };
+  private static readonly mapLanguageKey = 'kahbi.map.language';
+  private static readonly mapRestoreKey = 'kahbi.map.restore';
   private readonly maxImageBytes = 256 * 1024;
   private readonly maxSourceImageBytes = 10 * 1024 * 1024;
   private readonly maxImagePixels = 40_000_000;
@@ -333,10 +347,16 @@ export class AppComponent implements OnInit, OnDestroy {
     longitude: 'kahbi.delivery.longitude',
     label: 'kahbi.delivery.label'
   };
-  private mapPicker: L.Map | null = null;
-  private mapMarker: L.Marker | null = null;
+  private mapPicker: google.maps.Map | null = null;
+  private mapMarker: google.maps.Marker | null = null;
+  private mapGeocoder: google.maps.Geocoder | null = null;
   private mapGeocodeTimer: ReturnType<typeof setTimeout> | null = null;
   private mapSelectionRequest = 0;
+  private mapInitializationRequest = 0;
+  private restaurantListRequest = 0;
+  private mapSelectionTouched = false;
+  private currentLocation: MapPoint | null = null;
+  private locationPermissionDenied = false;
   view = 'home';
   authModalOpen = false;
   authModalView: 'login' | 'signup' = 'login';
@@ -447,10 +467,13 @@ export class AppComponent implements OnInit, OnDestroy {
   mapPickerOpen = false;
   mapPickerPurpose: 'delivery' | 'customerAddress' | 'signupRestaurant' | 'partnerRegistration' | 'adminCreateRestaurant' | 'adminEditRestaurant' = 'delivery';
   mapSelection: MapPoint | null = null;
+  selectedLocation: MapPoint | null = null;
   mapSelectionAddress = '';
   mapLoading = false;
   mapError = '';
   mapNotice = '';
+  mapLanguage = 'en';
+  private activeMapLanguage = 'en';
   promotionCode = '';
   orderPaymentMethod = 'CASH_TO_RESTAURANT';
   trackReference = '';
@@ -655,6 +678,9 @@ export class AppComponent implements OnInit, OnDestroy {
       }
     }, 1000);
     this.applyLocationRoute();
+    this.mapLanguage = this.readMapLanguage();
+    this.activeMapLanguage = this.mapLanguage;
+    this.requestBrowserLocation();
     this.loadBrandLogo();
     if (this.view === 'partnerRegistration') this.restorePartnerRegistration();
     window.addEventListener('popstate', () => {
@@ -670,6 +696,7 @@ export class AppComponent implements OnInit, OnDestroy {
         this.deliveryLatitude = latitude;
         this.deliveryLongitude = longitude;
         this.deliveryLocationLabel = localStorage.getItem(this.deliveryLocationKeys.label) || 'Selected delivery location';
+        this.selectedLocation = { lat: latitude, lng: longitude };
       }
     }
     const token = localStorage.getItem(this.tokenKey);
@@ -690,11 +717,50 @@ export class AppComponent implements OnInit, OnDestroy {
       this.restoreGuestCart();
       this.loadRestaurants();
     }
+    this.restoreMapPickerAfterLanguageChange();
   }
 
   ngOnDestroy(): void {
     if (this.acceptanceCountdownTimer !== null) window.clearInterval(this.acceptanceCountdownTimer);
     if (this.errorDismissTimer) window.clearTimeout(this.errorDismissTimer);
+    this.destroyMapPicker();
+  }
+
+  private readMapLanguage(): string {
+    const savedLanguage = localStorage.getItem(AppComponent.mapLanguageKey);
+    return savedLanguage && /^[a-z]{2,3}(?:-[a-z]{2})?$/i.test(savedLanguage)
+      ? savedLanguage.toLowerCase()
+      : 'en';
+  }
+
+  private restoreMapPickerAfterLanguageChange(): void {
+    const storedState = sessionStorage.getItem(AppComponent.mapRestoreKey);
+    if (!storedState) return;
+    sessionStorage.removeItem(AppComponent.mapRestoreKey);
+
+    try {
+      const state: unknown = JSON.parse(storedState);
+      if (typeof state !== 'object' || state === null) return;
+      const restoreState = state as { purpose?: unknown; selection?: unknown };
+      const purpose = restoreState.purpose;
+      if (!this.isMapPickerPurpose(purpose)) return;
+      const selection = this.isMapPoint(restoreState.selection) ? restoreState.selection : null;
+      window.setTimeout(() => this.openMapPicker(purpose, selection), 0);
+    } catch (error) {
+      if (!(error instanceof SyntaxError)) throw error;
+    }
+  }
+
+  private isMapPickerPurpose(value: unknown): value is AppComponent['mapPickerPurpose'] {
+    return value === 'delivery' || value === 'customerAddress' || value === 'signupRestaurant' ||
+      value === 'partnerRegistration' || value === 'adminCreateRestaurant' || value === 'adminEditRestaurant';
+  }
+
+  private isMapPoint(value: unknown): value is MapPoint {
+    if (typeof value !== 'object' || value === null) return false;
+    const point = value as { lat?: unknown; lng?: unknown };
+    return typeof point.lat === 'number' && this.isCoordinate(point.lat, -90, 90) &&
+      typeof point.lng === 'number' && this.isCoordinate(point.lng, -180, 180);
   }
 
   get cartItems(): { item: MenuItem; quantity: number }[] {
@@ -1311,6 +1377,7 @@ export class AppComponent implements OnInit, OnDestroy {
   }
 
   loadRestaurants(): void {
+    const requestId = ++this.restaurantListRequest;
     const query = new URLSearchParams();
     if (this.search.trim()) query.set('search', this.search.trim());
     if (this.openOnly) query.set('open', 'true');
@@ -1320,13 +1387,16 @@ export class AppComponent implements OnInit, OnDestroy {
     }
     this.http.get<{ restaurants: Restaurant[]; promotions: Promotion[]; advertisements: Advertisement[] }>(`${this.api}/restaurants?${query.toString()}`, { headers: this.headers() }).subscribe({
       next: (data) => {
+        if (requestId !== this.restaurantListRequest) return;
         this.restaurants = data.restaurants;
         this.promotions = data.promotions;
         this.advertisements = data.advertisements;
         this.error = '';
         this.changeDetector.markForCheck();
       },
-      error: (error) => this.showError(error)
+      error: (error) => {
+        if (requestId === this.restaurantListRequest) this.showError(error);
+      }
     });
   }
 
@@ -1334,29 +1404,76 @@ export class AppComponent implements OnInit, OnDestroy {
     this.loadRestaurants();
   }
 
+  private requestBrowserLocation(): void {
+    if (!navigator.geolocation) {
+      this.locationPermissionDenied = true;
+      this.notice = 'Location services are unavailable. Choose your delivery location manually on the map.';
+      return;
+    }
+
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        this.currentLocation = {
+          lat: position.coords.latitude,
+          lng: position.coords.longitude
+        };
+        this.locationPermissionDenied = false;
+        if (this.deliveryLatitude === null || this.deliveryLongitude === null) {
+          this.selectedLocation = this.currentLocation;
+          this.changeDeliveryLocation(this.currentLocation.lat, this.currentLocation.lng, 'Current location');
+          this.loadRestaurants();
+        }
+
+        if (this.mapPickerOpen && !this.mapSelectionTouched) {
+          this.mapPicker?.setCenter(this.currentLocation);
+          this.setMapSelection(this.currentLocation, false);
+        }
+        this.changeDetector.markForCheck();
+      },
+      () => {
+        this.locationPermissionDenied = true;
+        this.notice = 'Location permission was not granted. Choose your location manually on the map.';
+        if (this.mapPickerOpen) {
+          this.mapNotice = this.notice;
+          this.changeDetector.markForCheck();
+        }
+      },
+      { timeout: 10000, maximumAge: 60000 }
+    );
+  }
+
   chooseLocation(): void {
     if (!navigator.geolocation) {
+      this.locationPermissionDenied = true;
+      this.mapNotice = 'Location services are unavailable. Click the correct location on the map.';
       this.openMapPicker('delivery');
       return;
     }
     navigator.geolocation.getCurrentPosition(
       (position) => {
-        this.changeDeliveryLocation(position.coords.latitude, position.coords.longitude, 'Current location');
+        const point = { lat: position.coords.latitude, lng: position.coords.longitude };
+        this.currentLocation = point;
+        this.selectedLocation = point;
+        this.changeDeliveryLocation(point.lat, point.lng, 'Current location');
         this.notice = 'Nearby restaurants updated for your location.';
         this.loadRestaurants();
       },
       () => {
+        this.locationPermissionDenied = true;
         this.notice = 'Location permission was not granted. Choose your delivery point on the map instead.';
+        this.mapNotice = this.notice;
         this.openMapPicker('delivery');
       },
       { timeout: 8000 }
     );
   }
 
-  openMapPicker(purpose: AppComponent['mapPickerPurpose']): void {
+  openMapPicker(purpose: AppComponent['mapPickerPurpose'], restoredSelection: MapPoint | null = null): void {
     this.mapPickerPurpose = purpose;
     this.mapPickerOpen = true;
-    this.mapSelection = this.savedMapPoint(purpose);
+    this.mapSelectionTouched = !!restoredSelection || !!this.savedMapPoint(purpose);
+    this.mapSelection = restoredSelection || this.savedMapPoint(purpose) || this.currentLocation || AppComponent.defaultMapPoint;
+    this.selectedLocation = this.mapSelection;
     this.mapSelectionAddress = this.mapSelection
       ? purpose === 'delivery' ? this.deliveryLocationLabel
         : purpose === 'customerAddress' ? this.customerAddressDraft.area
@@ -1366,22 +1483,43 @@ export class AppComponent implements OnInit, OnDestroy {
                 : this.adminRestaurant?.address || ''
       : '';
     this.mapError = '';
-    this.mapNotice = '';
+    this.mapNotice = this.locationPermissionDenied
+      ? 'Location permission was not granted. Click the map or drag the pin to choose a location manually.'
+      : '';
     this.mapLoading = true;
     this.changeDetector.markForCheck();
-    window.setTimeout(() => void this.initializeMapPicker(), 0);
+    const requestId = ++this.mapInitializationRequest;
+    window.setTimeout(() => void this.initializeMapPicker(requestId), 0);
   }
 
   closeMapPicker(): void {
     this.mapPickerOpen = false;
-    this.mapSelectionRequest += 1;
-    this.mapPicker?.remove();
-    this.mapPicker = null;
-    this.mapMarker = null;
-    if (this.mapGeocodeTimer) {
-      clearTimeout(this.mapGeocodeTimer);
-      this.mapGeocodeTimer = null;
+    this.destroyMapPicker();
+  }
+
+  changeMapLanguage(langCode: string): void {
+    const language = langCode.trim().toLowerCase();
+    if (!/^[a-z]{2,3}(?:-[a-z]{2})?$/.test(language)) {
+      this.mapError = 'Enter a valid language code, such as en, ar, es, or fr.';
+      return;
     }
+    if (language === this.activeMapLanguage) return;
+
+    if (this.mapPickerOpen) {
+      sessionStorage.setItem(AppComponent.mapRestoreKey, JSON.stringify({
+        purpose: this.mapPickerPurpose,
+        selection: this.mapSelection
+      }));
+    }
+    localStorage.setItem(AppComponent.mapLanguageKey, language);
+    this.mapLanguage = language;
+    this.activeMapLanguage = language;
+    this.destroyMapPicker();
+    document.getElementById(AppComponent.googleMapsScriptId)?.remove();
+    AppComponent.googleMapsReadyPromise = null;
+
+    // The Maps JavaScript API's language is fixed after its first load.
+    window.location.reload();
   }
 
   useCurrentLocationInPicker(): void {
@@ -1392,7 +1530,10 @@ export class AppComponent implements OnInit, OnDestroy {
     navigator.geolocation.getCurrentPosition(
       (position) => {
         const point = { lat: position.coords.latitude, lng: position.coords.longitude };
-        this.mapPicker?.setView([point.lat, point.lng], 15);
+        this.currentLocation = point;
+        this.mapPicker?.setCenter(point);
+        this.mapPicker?.setZoom(15);
+        this.mapSelectionTouched = true;
         this.setMapSelection(point);
       },
       () => {
@@ -1498,35 +1639,96 @@ export class AppComponent implements OnInit, OnDestroy {
     return 6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
   }
 
-  private async initializeMapPicker(): Promise<void> {
+  private async initializeMapPicker(requestId: number): Promise<void> {
     try {
-      if (!this.mapPickerOpen) return;
+      if (!this.mapPickerOpen || requestId !== this.mapInitializationRequest) return;
       const element = document.getElementById('location-picker-map');
       if (!element) throw new Error('The location map could not be initialized. Close it and try again.');
+      await this.loadGoogleMaps();
+      if (!this.mapPickerOpen || requestId !== this.mapInitializationRequest) return;
+
       const center = this.mapInitialPoint();
-      this.mapPicker = L.map(element, { zoomControl: true, scrollWheelZoom: false })
-        .setView([center.lat, center.lng], this.mapSelection ? 15 : 11);
-      L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-        maxZoom: 19,
-        attribution: '&copy; <a href="https://www.openstreetmap.org/copyright" target="_blank" rel="noopener noreferrer">OpenStreetMap</a> contributors'
-      }).addTo(this.mapPicker);
-      if (this.mapSelection) {
-        this.setMapMarker(this.mapSelection);
-      }
-      this.mapPicker.on('click', (event: L.LeafletMouseEvent) => {
-        this.setMapSelection({ lat: event.latlng.lat, lng: event.latlng.lng });
+      this.mapPicker = new google.maps.Map(element, {
+        center,
+        zoom: this.mapSelectionTouched || this.currentLocation ? 15 : 11,
+        mapTypeControl: false,
+        streetViewControl: false,
+        fullscreenControl: false,
+        clickableIcons: false,
+        scrollwheel: false
+      });
+      this.mapGeocoder = new google.maps.Geocoder();
+      this.setMapMarker(this.mapSelection || center);
+      this.mapPicker.addListener('click', (event: google.maps.MapMouseEvent) => {
+        if (!event.latLng) return;
+        this.setMapSelection({ lat: event.latLng.lat(), lng: event.latLng.lng() });
       });
     } catch (error) {
-      this.mapError = error instanceof Error ? error.message : 'The OpenStreetMap picker could not be initialized.';
+      if (requestId === this.mapInitializationRequest) {
+        this.mapError = error instanceof Error ? error.message : 'The Google Maps picker could not be initialized.';
+      }
     } finally {
-      this.mapLoading = false;
-      this.changeDetector.markForCheck();
-      window.setTimeout(() => this.mapPicker?.invalidateSize(), 0);
+      if (requestId === this.mapInitializationRequest) {
+        this.mapLoading = false;
+        this.changeDetector.markForCheck();
+      }
     }
   }
 
+  private loadGoogleMaps(): Promise<void> {
+    if (window.google?.maps) return Promise.resolve();
+    if (AppComponent.googleMapsReadyPromise) return AppComponent.googleMapsReadyPromise;
+
+    AppComponent.googleMapsReadyPromise = firstValueFrom(
+      this.http.get<{ googleMapsApiKey: string }>(`${this.api}/config`)
+    ).then(({ googleMapsApiKey }) => {
+      if (!googleMapsApiKey) {
+        throw new Error('Set GOOGLE_MAPS_API_KEY in the server environment before using the location picker.');
+      }
+
+      return new Promise<void>((resolve, reject) => {
+        const script = document.createElement('script');
+        script.id = AppComponent.googleMapsScriptId;
+        script.async = true;
+        script.defer = true;
+        script.src = `https://maps.googleapis.com/maps/api/js?key=${encodeURIComponent(googleMapsApiKey)}&language=${encodeURIComponent(this.mapLanguage)}&libraries=places&callback=${AppComponent.googleMapsCallbackName}`;
+        script.onerror = () => {
+          delete window.kahbiGoogleMapsInit;
+          script.remove();
+          reject(new Error('Google Maps could not be loaded. Check your connection and Maps API configuration.'));
+        };
+        window.kahbiGoogleMapsInit = () => {
+          delete window.kahbiGoogleMapsInit;
+          resolve();
+        };
+        document.head.appendChild(script);
+      });
+    }).catch((error: unknown) => {
+      AppComponent.googleMapsReadyPromise = null;
+      throw error;
+    });
+
+    return AppComponent.googleMapsReadyPromise;
+  }
+
+  private destroyMapPicker(): void {
+    this.mapInitializationRequest += 1;
+    this.mapSelectionRequest += 1;
+    if (this.mapGeocodeTimer) {
+      clearTimeout(this.mapGeocodeTimer);
+      this.mapGeocodeTimer = null;
+    }
+    this.mapPicker?.unbindAll();
+    this.mapMarker?.setMap(null);
+    this.mapGeocoder = null;
+    this.mapMarker = null;
+    this.mapPicker = null;
+    document.getElementById('location-picker-map')?.replaceChildren();
+  }
+
   private mapInitialPoint(): MapPoint {
-    return this.savedMapPoint(this.mapPickerPurpose) || { lat: 25.2854, lng: 51.531 };
+    return this.mapSelection || this.savedMapPoint(this.mapPickerPurpose) ||
+      this.currentLocation || AppComponent.defaultMapPoint;
   }
 
   private savedMapPoint(purpose: AppComponent['mapPickerPurpose']): MapPoint | null {
@@ -1551,8 +1753,10 @@ export class AppComponent implements OnInit, OnDestroy {
     return null;
   }
 
-  private setMapSelection(point: MapPoint): void {
+  private setMapSelection(point: MapPoint, userInitiated = true): void {
     this.mapSelection = point;
+    this.selectedLocation = point;
+    if (userInitiated) this.mapSelectionTouched = true;
     this.setMapMarker(point);
     this.mapSelectionAddress = `${point.lat.toFixed(5)}, ${point.lng.toFixed(5)}`;
     this.mapError = '';
@@ -1568,30 +1772,27 @@ export class AppComponent implements OnInit, OnDestroy {
   private setMapMarker(point: MapPoint): void {
     if (!this.mapPicker) return;
     if (this.mapMarker) {
-      this.mapMarker.setLatLng([point.lat, point.lng]);
+      this.mapMarker.setPosition(point);
       return;
     }
-  this.mapMarker = L.marker([point.lat, point.lng], {
-      icon: L.divIcon({
-        className: 'map-selection-pin',
-        html: '<svg viewBox="0 0 32 42" width="32" height="42" aria-hidden="true"><path d="M16 1C7.72 1 1 7.72 1 16c0 10.5 15 25 15 25s15-14.5 15-25C31 7.72 24.28 1 16 1Z" fill="#0e4037" stroke="#fff" stroke-width="2"/><circle cx="16" cy="16" r="5" fill="#fff"/></svg>',
-        iconSize: [32, 42],
-        iconAnchor: [16, 42]
-      }),
+    this.mapMarker = new google.maps.Marker({
+      map: this.mapPicker,
+      position: point,
+      draggable: true,
       title: 'Selected location'
-    }).addTo(this.mapPicker);
-    
-
+    });
+    this.mapMarker.addListener('dragend', () => {
+      const position = this.mapMarker?.getPosition();
+      if (position) this.setMapSelection({ lat: position.lat(), lng: position.lng() });
+    });
   }
 
   private async reverseGeocodeSelection(point: MapPoint, requestId: number): Promise<void> {
     try {
-      const result = await firstValueFrom(this.http.get<{ display_name?: string }>(
-        'https://nominatim.openstreetmap.org/reverse',
-        { params: { format: 'jsonv2', lat: String(point.lat), lon: String(point.lng), zoom: '18' } }
-      ));
-      if (requestId === this.mapSelectionRequest && result.display_name) {
-        this.mapSelectionAddress = result.display_name;
+      if (!this.mapGeocoder) return;
+      const { results } = await this.mapGeocoder.geocode({ location: point });
+      if (requestId === this.mapSelectionRequest && results[0]?.formatted_address) {
+        this.mapSelectionAddress = results[0].formatted_address;
       }
     } catch {
       if (requestId === this.mapSelectionRequest) {

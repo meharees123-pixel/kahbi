@@ -432,6 +432,11 @@ function requestedPage(value) {
 
 app.get("/api/health", (_req, res) => res.json({ status: "ok", service: "kahbi-api", currency }));
 
+app.get("/api/config", (_req, res) => {
+  res.set("Cache-Control", "no-store");
+  res.json({ googleMapsApiKey: process.env.GOOGLE_MAPS_API_KEY || "" });
+});
+
 app.get("/api/customer-terms", auth(false), asyncRoute(async (req, res) => {
   const terms = await currentCustomerTerms();
   res.json({
