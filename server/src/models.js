@@ -25,6 +25,7 @@ const UserSchema = new Schema(
     email: { type: String, required: true, unique: true, lowercase: true, trim: true },
     phone: { type: String, trim: true, default: "" },
     whatsappVerifiedAt: { type: Date, default: null },
+    phoneVerifiedAt: { type: Date, default: null },
     customerTermsVersion: { type: String, default: "" },
     customerTermsAcceptedAt: { type: Date, default: null },
     addresses: { type: [CustomerAddressSchema], default: [] },
@@ -266,10 +267,9 @@ const MessageLogSchema = new Schema({
   error: { type: String, default: "WhatsApp provider is not configured; demo mode only." }
 }, { timestamps: true });
 
-const WhatsappOtpSchema = new Schema({
+const PhoneAuthChallengeSchema = new Schema({
   phone: { type: String, required: true, index: true },
-  purpose: { type: String, enum: ["LOGIN", "ORDER", "RESTAURANT_LOGIN_ID_RECOVERY", "RESTAURANT_PASSWORD_RECOVERY"], required: true },
-  codeHash: { type: String, required: true },
+  purpose: { type: String, enum: ["RESTAURANT_LOGIN_ID_RECOVERY", "RESTAURANT_PASSWORD_RECOVERY"], required: true },
   attempts: { type: Number, default: 0 },
   expiresAt: { type: Date, required: true },
   consumedAt: { type: Date, default: null },
@@ -277,25 +277,8 @@ const WhatsappOtpSchema = new Schema({
   recoveryTokenHash: { type: String, default: "", select: false },
   deleteAt: { type: Date, required: true }
 }, { timestamps: true });
-WhatsappOtpSchema.index({ phone: 1, purpose: 1, createdAt: -1 });
-WhatsappOtpSchema.index({ deleteAt: 1 }, { expireAfterSeconds: 0 });
-
-const WhatsappSettingsSchema = new Schema({
-  key: { type: String, required: true, unique: true },
-  encryptedConfiguration: {
-    salt: { type: String, required: true },
-    iv: { type: String, required: true },
-    authTag: { type: String, required: true },
-    ciphertext: { type: String, required: true }
-  },
-  updatedBy: { type: Schema.Types.ObjectId, ref: "User", default: null }
-}, { timestamps: true });
-
-const WhatsappOtpControlSchema = new Schema({
-  key: { type: String, required: true, unique: true },
-  deliveryEnabled: { type: Boolean, required: true, default: true },
-  updatedBy: { type: Schema.Types.ObjectId, ref: "User", default: null }
-}, { timestamps: true });
+PhoneAuthChallengeSchema.index({ phone: 1, purpose: 1, createdAt: -1 });
+PhoneAuthChallengeSchema.index({ deleteAt: 1 }, { expireAfterSeconds: 0 });
 
 const RestaurantRegistrationSchema = new Schema({
   registrationId: { type: String, required: true, unique: true },
@@ -342,9 +325,7 @@ module.exports = {
   Feedback: mongoose.model("Feedback", FeedbackSchema),
   AuditLog: mongoose.model("AuditLog", AuditSchema),
   MessageLog: mongoose.model("MessageLog", MessageLogSchema),
-  WhatsappOtp: mongoose.model("WhatsappOtp", WhatsappOtpSchema),
-  WhatsappSettings: mongoose.model("WhatsappSettings", WhatsappSettingsSchema),
-  WhatsappOtpControl: mongoose.model("WhatsappOtpControl", WhatsappOtpControlSchema),
+  PhoneAuthChallenge: mongoose.model("PhoneAuthChallenge", PhoneAuthChallengeSchema),
   RestaurantRegistration: mongoose.model("RestaurantRegistration", RestaurantRegistrationSchema),
   PlatformSetting: mongoose.model("PlatformSetting", PlatformSettingSchema)
 };

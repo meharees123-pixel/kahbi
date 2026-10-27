@@ -386,19 +386,24 @@
           <ng-template #emptyCart><div class="empty-state"><h3>Your cart is empty</h3><button class="button button-dark" (click)="view = 'home'">Explore restaurants</button></div></ng-template>
         </div>
         <aside class="checkout-card"><span class="eyebrow">DELIVERY DETAILS</span><h2>Where to?</h2>
-          <div class="form-field" *ngIf="!isCustomer"><label>Mobile / WhatsApp</label><input [(ngModel)]="guestPhone" placeholder="+974 5XXX XXXX" autocomplete="tel" type="tel" required><small>Enter the number in international format, including its country code.</small></div>
-          <div class="form-field signed-customer-phone" *ngIf="isCustomer"><label>WhatsApp</label><span>{{ user?.phone }}</span></div>
+          <div class="form-field" *ngIf="!isCustomer">
+            <label for="order-phone-number">Mobile number</label>
+            <div class="phone-input-row">
+              <select aria-label="Phone country code" [(ngModel)]="guestCountryCode" (ngModelChange)="customerPhoneChanged('ORDER')" [disabled]="loading">
+                <option *ngFor="let country of phoneCountryCodes" [ngValue]="country.code">{{ country.country }} ({{ country.code }})</option>
+              </select>
+              <input id="order-phone-number" [(ngModel)]="guestPhone" (ngModelChange)="customerPhoneChanged('ORDER')" placeholder="5XXX XXXX" autocomplete="tel-national" type="tel" required>
+            </div>
+            <small>Enter your number without the country calling code. Qatar (+974) is selected by default.</small>
+          </div>
+          <div class="form-field signed-customer-phone" *ngIf="isCustomer"><label>Phone number</label><span>{{ user?.phone }}</span></div>
           <div class="whatsapp-verification" *ngIf="!isCustomer">
-            <strong>Verify your WhatsApp number</strong>
-            <p>Verify your number before your first order. Verification also creates your customer account.</p>
-            <button class="button button-quiet button-small" *ngIf="!customerOtpChallengeId" [disabled]="loading" (click)="requestCustomerOtp('ORDER')">Request verification code</button>
+            <strong>Verify your number</strong>
+            <p>Firebase will text a verification code before your first order. Verification also creates your customer account.</p>
+            <button class="button button-quiet button-small" *ngIf="!customerOtpChallengeId" [disabled]="loading" (click)="requestCustomerOtp('ORDER')">Send verification code</button>
             <ng-container *ngIf="customerOtpChallengeId && customerOtpPurpose === 'ORDER'">
-              <div class="development-otp-callout" *ngIf="customerOtpDevelopmentCode" role="status" aria-live="polite">
-                <strong>Development verification code</strong><span>{{ customerOtpDevelopmentCode }}</span>
-                <small>WhatsApp delivery is disabled. Enter this code to continue.</small>
-              </div>
-              <div class="form-field"><label>Six-digit WhatsApp code</label><input [(ngModel)]="customerOtpCode" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="123456"></div>
-              <div class="order-actions"><button class="button button-dark button-small" [disabled]="loading" (click)="verifyCustomerOtp('ORDER')">Verify number</button><button class="text-button" [disabled]="loading" (click)="customerOtpChallengeId = ''; customerOtpCode = ''; customerOtpDevelopmentCode = ''">Change number</button></div>
+              <div class="form-field"><label>Six-digit SMS code</label><input [(ngModel)]="customerOtpCode" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="123456"></div>
+              <div class="order-actions"><button class="button button-dark button-small" [disabled]="loading" (click)="verifyCustomerOtp('ORDER')">Verify number</button><button class="text-button" [disabled]="loading" (click)="customerOtpChallengeId = ''; customerOtpCode = ''; customerFirebaseIdToken = ''">Change number</button></div>
             </ng-container>
           </div>
           <div class="checkout-location-card"><div><strong>Delivery pin</strong><span>{{ deliveryLocationLabel || 'Choose a delivery location first' }}</span></div><button class="button button-quiet button-small" (click)="openMapPicker('delivery')">{{ deliveryLatitude !== null ? 'Change pin' : 'Choose pin' }}</button></div>
@@ -477,7 +482,7 @@
             <input id="customer-terms-accepted" [(ngModel)]="customerTermsAccepted" type="checkbox" [disabled]="customerTermsLoading || !customerTerms">
             <span><label for="customer-terms-accepted">I have read and agree to KABHI</label> <a class="customer-terms-link" href="#customer-terms" (click)="$event.preventDefault(); openCustomerTerms()">Terms and Conditions</a>.</span>
           </div>
-          <button class="button button-accent button-wide" [disabled]="loading || orderQuoteLoading || !orderQuote || !isCustomer || !customerTerms || customerTermsLoading || (customerTerms.acceptanceRequired && !customerTermsAccepted) || !cartItems.length || deliveryLatitude === null || deliveryLongitude === null || !isSelectedRestaurantInDeliveryRange" (click)="placeOrder()">{{ loading ? 'Working…' : isCustomer ? 'Place order' : 'Verify WhatsApp to continue' }} <span>→</span></button>
+          <button class="button button-accent button-wide" [disabled]="loading || orderQuoteLoading || !orderQuote || !isCustomer || !customerTerms || customerTermsLoading || (customerTerms.acceptanceRequired && !customerTermsAccepted) || !cartItems.length || deliveryLatitude === null || deliveryLongitude === null || !isSelectedRestaurantInDeliveryRange" (click)="placeOrder()">{{ loading ? 'Working…' : isCustomer ? 'Place order' : 'Verify phone to continue' }} <span>→</span></button>
           <p class="fine-print">The displayed total is calculated by KABHI using current menu prices and any valid promotion. Tax is not charged by KABHI.</p>
         </aside>
       </div>
@@ -526,23 +531,27 @@
       <section class="auth-modal" role="dialog" aria-modal="true" aria-labelledby="auth-dialog-title" (click)="$event.stopPropagation()">
         <button class="auth-modal-close" type="button" aria-label="Close sign in" (click)="closeLogin()">×</button>
         <div class="auth-wrap">
-      <div class="auth-aside"><span class="brand-mark">K</span><span class="eyebrow">{{ loginPortal === 'ADMIN' ? 'KABHI ADMIN' : loginPortal === 'RESTAURANT' ? 'RESTAURANT PORTAL' : 'WELCOME TO KABHI' }}</span><h2>{{ loginPortal === 'ADMIN' ? 'Platform oversight.' : loginPortal === 'RESTAURANT' ? 'Your kitchen, managed.' : 'Made for good moments.' }}</h2><p>{{ loginPortal === 'ADMIN' ? 'Manage restaurants, menus, and orders across KABHI.' : loginPortal === 'RESTAURANT' ? 'Sign in to manage your restaurant, menu, and incoming orders.' : 'Discover the kitchens worth knowing in Qatar.' }}</p></div>
+      <div class="auth-aside"><span class="brand-mark">K</span><span class="eyebrow">{{ loginPortal === 'ADMIN' ? 'KABHI ADMIN' : loginPortal === 'RESTAURANT' ? 'RESTAURANT PORTAL' : 'WELCOME TO KABHI' }}</span><h2>{{ loginPortal === 'ADMIN' ? 'Platform oversight.' : loginPortal === 'RESTAURANT' ? 'Your kitchen, managed.' : 'Made for good moments.' }}</h2><p>{{ loginPortal === 'ADMIN' ? 'Manage restaurants, menus, and orders across KABHI.' : loginPortal === 'RESTAURANT' ? 'After signing in, open your Restaurant Dashboard and choose Import Menu to upload photos or take a menu picture.' : 'Discover the kitchens worth knowing in Qatar.' }}</p></div>
       <div class="auth-card">
-        <span class="eyebrow">{{ authModalView === 'login' ? loginPortal + ' SIGN IN' : 'JOIN KABHI' }}</span><h1 id="auth-dialog-title">{{ authModalView === 'login' ? (loginPortal === 'CUSTOMER' ? 'Sign in with WhatsApp.' : 'Sign in to your portal.') : (signupRestaurant ? 'List your restaurant.' : 'Create an account.') }}</h1>
+        <span class="eyebrow">{{ authModalView === 'login' ? loginPortal + ' SIGN IN' : 'JOIN KABHI' }}</span><h1 id="auth-dialog-title">{{ authModalView === 'login' ? (loginPortal === 'CUSTOMER' ? 'Sign in with your phone.' : 'Sign in to your portal.') : (signupRestaurant ? 'List your restaurant.' : 'Create an account.') }}</h1>
         <div class="form-field" *ngIf="authModalView === 'signup'"><label>{{ signupRestaurant ? 'Owner name' : 'Full name' }}</label><input [(ngModel)]="signupName" placeholder="Your name"></div>
         <div class="form-field" *ngIf="authModalView === 'signup'"><label>Mobile / WhatsApp</label><input [(ngModel)]="signupPhone" placeholder="+974 5XXX XXXX"></div>
         <ng-container *ngIf="authModalView === 'login' && loginPortal === 'CUSTOMER'">
-          <div class="form-field"><label>WhatsApp number</label><input [(ngModel)]="customerAuthPhone" placeholder="+974 5XXX XXXX" autocomplete="tel" type="tel"></div>
-          <button class="button button-accent button-wide" *ngIf="!customerOtpChallengeId" [disabled]="loading" (click)="requestCustomerOtp('LOGIN')">{{ loading ? 'Requesting code…' : 'Request verification code' }} <span>→</span></button>
-          <ng-container *ngIf="customerOtpChallengeId && customerOtpPurpose === 'LOGIN'">
-            <p class="fine-print">{{ customerOtpDevelopmentCode ? 'Enter the development code shown below. It expires in five minutes.' : 'Enter the six-digit code sent to ' + customerAuthPhone + '. It expires in five minutes.' }}</p>
-            <div class="development-otp-callout" *ngIf="customerOtpDevelopmentCode" role="status" aria-live="polite">
-              <strong>Development verification code</strong><span>{{ customerOtpDevelopmentCode }}</span>
-              <small>WhatsApp delivery is disabled. Enter this code to sign in.</small>
+          <div class="form-field">
+            <label for="customer-login-phone">Phone number</label>
+            <div class="phone-input-row">
+              <select aria-label="Phone country code" [(ngModel)]="customerAuthCountryCode" (ngModelChange)="customerPhoneChanged('LOGIN')" [disabled]="loading">
+                <option *ngFor="let country of phoneCountryCodes" [ngValue]="country.code">{{ country.country }} ({{ country.code }})</option>
+              </select>
+              <input id="customer-login-phone" [(ngModel)]="customerAuthPhone" (ngModelChange)="customerPhoneChanged('LOGIN')" [disabled]="loading" placeholder="5XXX XXXX" autocomplete="tel-national" type="tel">
             </div>
-            <div class="form-field"><label>Verification code</label><input [(ngModel)]="customerOtpCode" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="123456"></div>
+          </div>
+          <button class="button button-accent button-wide" *ngIf="!customerOtpChallengeId" [disabled]="loading" (click)="requestCustomerOtp('LOGIN')">{{ loading ? 'Sending code…' : 'Send verification code' }} <span>→</span></button>
+          <ng-container *ngIf="customerOtpChallengeId && customerOtpPurpose === 'LOGIN'">
+            <p class="fine-print">Enter the six-digit SMS code sent to {{ customerAuthPhone }}.</p>
+            <div class="form-field"><label>SMS verification code</label><input [(ngModel)]="customerOtpCode" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="123456"></div>
             <button class="button button-accent button-wide" [disabled]="loading" (click)="verifyCustomerOtp('LOGIN')">{{ loading ? 'Verifying…' : 'Verify and sign in' }} <span>→</span></button>
-            <button class="text-button restaurant-signup" [disabled]="loading" (click)="customerOtpChallengeId = ''; customerOtpCode = ''; customerOtpDevelopmentCode = ''">Change number</button>
+            <button class="text-button restaurant-signup" [disabled]="loading" (click)="customerOtpChallengeId = ''; customerOtpCode = ''; customerFirebaseIdToken = ''">Change number</button>
           </ng-container>
         </ng-container>
         <ng-container *ngIf="authModalView === 'signup' && signupRestaurant">
@@ -556,7 +565,7 @@
         <ng-container *ngIf="authModalView === 'login' && loginPortal === 'RESTAURANT'">
           <ng-container [ngSwitch]="restaurantRecoveryView">
             <ng-container *ngSwitchCase="'login'">
-              <div class="form-field"><label>Login ID / WhatsApp Number</label><input [(ngModel)]="authEmail" type="text" placeholder="Login ID or +974 5XXX XXXX" autocomplete="username"></div>
+              <div class="form-field"><label>Login ID / phone number</label><input [(ngModel)]="authEmail" type="text" placeholder="Login ID or +974 5XXX XXXX" autocomplete="username"></div>
               <div class="form-field"><label>Password</label><input [(ngModel)]="authPassword" type="password" placeholder="Password" autocomplete="current-password"></div>
               <div class="restaurant-recovery-links">
                 <button class="text-button" type="button" (click)="startRestaurantRecovery('request-id')">Forgot Login ID?</button>
@@ -566,37 +575,47 @@
               <a class="restaurant-support-link" href="/contact">Contact KABHI Support</a>
             </ng-container>
             <ng-container *ngSwitchCase="'request-id'">
-              <p class="fine-print">Enter the WhatsApp number registered to your restaurant account.</p>
-              <div class="form-field"><label>Registered WhatsApp number</label><input [(ngModel)]="restaurantRecoveryPhone" type="tel" autocomplete="tel" placeholder="+974 5XXX XXXX"></div>
-              <button class="button button-accent button-wide" [disabled]="loading" (click)="requestRestaurantRecovery('RESTAURANT_LOGIN_ID_RECOVERY')">{{ loading ? 'Requesting code…' : 'Send verification code' }} <span>→</span></button>
+              <p class="fine-print">Enter the phone number registered to your restaurant account. Firebase will send an SMS code.</p>
+              <div class="form-field">
+                <label for="recovery-id-phone">Registered phone number</label>
+                <div class="phone-input-row">
+                  <select aria-label="Phone country code" [(ngModel)]="restaurantRecoveryCountryCode" [disabled]="loading">
+                    <option *ngFor="let country of phoneCountryCodes" [ngValue]="country.code">{{ country.country }} ({{ country.code }})</option>
+                  </select>
+                  <input id="recovery-id-phone" [(ngModel)]="restaurantRecoveryPhone" type="tel" autocomplete="tel-national" placeholder="5XXX XXXX" [disabled]="loading">
+                </div>
+              </div>
+              <button class="button button-accent button-wide" [disabled]="loading" (click)="requestRestaurantRecovery('RESTAURANT_LOGIN_ID_RECOVERY')">{{ loading ? 'Sending code…' : 'Send verification code' }} <span>→</span></button>
               <a class="restaurant-support-link" href="/contact">Can't access your registered number? Contact KABHI Support</a>
               <button class="text-button restaurant-recovery-back" type="button" (click)="returnToRestaurantLogin()">Back to login</button>
             </ng-container>
             <ng-container *ngSwitchCase="'request-password'">
-              <p class="fine-print">Enter your registered Login ID or WhatsApp number. We’ll send a verification code to the number on your restaurant account.</p>
-              <div class="form-field"><label>Login ID or WhatsApp number</label><input [(ngModel)]="restaurantRecoveryIdentifier" type="text" autocomplete="username" placeholder="Login ID or +974 5XXX XXXX"></div>
-              <button class="button button-accent button-wide" [disabled]="loading" (click)="requestRestaurantRecovery('RESTAURANT_PASSWORD_RECOVERY')">{{ loading ? 'Requesting code…' : 'Send verification code' }} <span>→</span></button>
+              <p class="fine-print">Enter the phone number registered to your restaurant account to verify the password reset with Firebase SMS.</p>
+              <div class="form-field">
+                <label for="recovery-password-phone">Registered phone number</label>
+                <div class="phone-input-row">
+                  <select aria-label="Phone country code" [(ngModel)]="restaurantRecoveryCountryCode" [disabled]="loading">
+                    <option *ngFor="let country of phoneCountryCodes" [ngValue]="country.code">{{ country.country }} ({{ country.code }})</option>
+                  </select>
+                  <input id="recovery-password-phone" [(ngModel)]="restaurantRecoveryPhone" type="tel" autocomplete="tel-national" placeholder="5XXX XXXX" [disabled]="loading">
+                </div>
+              </div>
+              <button class="button button-accent button-wide" [disabled]="loading" (click)="requestRestaurantRecovery('RESTAURANT_PASSWORD_RECOVERY')">{{ loading ? 'Sending code…' : 'Send verification code' }} <span>→</span></button>
               <a class="restaurant-support-link" href="/contact">Can't access your registered number? Contact KABHI Support</a>
               <button class="text-button restaurant-recovery-back" type="button" (click)="returnToRestaurantLogin()">Back to login</button>
             </ng-container>
             <ng-container *ngSwitchCase="'verify-id'">
               <p class="fine-print">{{ restaurantRecoveryMessage }} Code expires in {{ restaurantRecoveryExpiryMinutes }} minutes.</p>
-              <div class="development-otp-callout" *ngIf="restaurantRecoveryDevelopmentCode" role="status" aria-live="polite">
-                <strong>Development verification code</strong><span>{{ restaurantRecoveryDevelopmentCode }}</span>
-                <small>WhatsApp delivery is disabled in this development environment.</small>
-              </div>
-              <div class="form-field"><label>Verification code</label><input [(ngModel)]="restaurantRecoveryCode" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="Six-digit code"></div>
+              <div class="form-field"><label>Firebase SMS code</label><input [(ngModel)]="restaurantRecoveryCode" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="Six-digit code"></div>
               <button class="button button-accent button-wide" [disabled]="loading" (click)="verifyRestaurantRecovery('RESTAURANT_LOGIN_ID_RECOVERY')">{{ loading ? 'Verifying…' : 'Verify code' }} <span>→</span></button>
+              <button class="text-button restaurant-recovery-back" type="button" [disabled]="loading" (click)="changeRestaurantRecoveryPhone()">Change phone number</button>
               <button class="text-button restaurant-recovery-back" type="button" (click)="returnToRestaurantLogin()">Back to login</button>
             </ng-container>
             <ng-container *ngSwitchCase="'verify-password'">
               <p class="fine-print">{{ restaurantRecoveryMessage }} Code expires in {{ restaurantRecoveryExpiryMinutes }} minutes.</p>
-              <div class="development-otp-callout" *ngIf="restaurantRecoveryDevelopmentCode" role="status" aria-live="polite">
-                <strong>Development verification code</strong><span>{{ restaurantRecoveryDevelopmentCode }}</span>
-                <small>WhatsApp delivery is disabled in this development environment.</small>
-              </div>
-              <div class="form-field"><label>Verification code</label><input [(ngModel)]="restaurantRecoveryCode" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="Six-digit code"></div>
+              <div class="form-field"><label>Firebase SMS code</label><input [(ngModel)]="restaurantRecoveryCode" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="Six-digit code"></div>
               <button class="button button-accent button-wide" [disabled]="loading" (click)="verifyRestaurantRecovery('RESTAURANT_PASSWORD_RECOVERY')">{{ loading ? 'Verifying…' : 'Verify code' }} <span>→</span></button>
+              <button class="text-button restaurant-recovery-back" type="button" [disabled]="loading" (click)="changeRestaurantRecoveryPhone()">Change phone number</button>
               <button class="text-button restaurant-recovery-back" type="button" (click)="returnToRestaurantLogin()">Back to login</button>
             </ng-container>
             <ng-container *ngSwitchCase="'set-password'">
@@ -629,10 +648,10 @@
         <div class="form-field" *ngIf="(loginPortal !== 'CUSTOMER' && !(loginPortal === 'RESTAURANT' && authModalView === 'login')) || authModalView === 'signup'"><label>Email</label><input [(ngModel)]="authEmail" type="email" placeholder="you&#64;example.com" autocomplete="email"></div>
         <div class="form-field" *ngIf="(loginPortal !== 'CUSTOMER' && !(loginPortal === 'RESTAURANT' && authModalView === 'login')) || authModalView === 'signup'"><label>Password</label><input [(ngModel)]="authPassword" type="password" placeholder="At least 10 characters" autocomplete="current-password"></div>
         <button class="button button-accent button-wide" *ngIf="(loginPortal !== 'CUSTOMER' && !(loginPortal === 'RESTAURANT' && authModalView === 'login')) || authModalView === 'signup'" (click)="authModalView === 'login' ? signIn() : signUp()">{{ authModalView === 'login' ? 'Sign in' : 'Create account' }} <span>→</span></button>
-        <p class="auth-switch" *ngIf="authModalView === 'login' && loginPortal === 'CUSTOMER'">New to KABHI? Enter your WhatsApp number and verify the code to create your account.</p>
+        <p class="auth-switch" *ngIf="authModalView === 'login' && loginPortal === 'CUSTOMER'">New to KABHI? Verify your phone number with Firebase SMS to create your account.</p>
         <p class="auth-switch" *ngIf="authModalView === 'login' && loginPortal === 'RESTAURANT' && restaurantRecoveryView === 'login'">Own a restaurant? <button class="text-button" (click)="openSignup()">Apply to join KABHI</button></p>
         <p class="auth-switch" *ngIf="authModalView === 'signup'">Already have an account? <button class="text-button" (click)="authModalView = 'login'; signupRestaurant = loginPortal === 'RESTAURANT'">Sign in</button></p>
-        <div class="demo-logins" *ngIf="authModalView === 'login' && loginPortal === 'CUSTOMER'"><strong>Customer demo</strong><span>WhatsApp: +97450000002</span><small>Configure WhatsApp Cloud API and an approved OTP template to receive sign-in codes.</small><button class="text-button" (click)="closeLogin(); trackReference = ''; trackedOrder = null; view = 'track'">Track a guest order instead</button></div>
+        <div class="demo-logins" *ngIf="authModalView === 'login' && loginPortal === 'CUSTOMER'"><strong>Customer demo</strong><span>Phone: +97450000002</span><small>Configure Firebase Phone Authentication to receive sign-in codes.</small><button class="text-button" (click)="closeLogin(); trackReference = ''; trackedOrder = null; view = 'track'">Track a guest order instead</button></div>
         <div class="demo-logins" *ngIf="authModalView === 'login' && loginPortal === 'RESTAURANT' && restaurantRecoveryView === 'login'"><strong>Restaurant demo accounts</strong><span>restaurant&#64;kahbi.demo — KABHI Demo Hotel</span><span>owner.pearl&#64;kahbi.demo — Pearl Garden Kitchen</span><span>owner.souq&#64;kahbi.demo — Souq Flame Grill</span><span>owner.corniche&#64;kahbi.demo — Corniche Breakfast Club</span><span>owner.lusail&#64;kahbi.demo — Lusail Spice House</span><small>Each restaurant has its own login.</small></div>
         <div class="demo-logins" *ngIf="authModalView === 'login' && loginPortal === 'ADMIN'"><strong>Admin demo account</strong><span>admin&#64;kahbi.demo</span><small>Password: Demo123!</small><small>Admin access includes every restaurant and its menu.</small></div>
       </div>
@@ -697,9 +716,22 @@
             <div class="pagination-controls" *ngIf="completedRestaurantOrdersTotalPages > 1"><button class="button button-quiet button-small" [disabled]="completedRestaurantOrdersPage <= 1 || completedRestaurantOrdersLoading" (click)="loadCompletedRestaurantOrders(completedRestaurantOrdersPage - 1)">Previous</button><span>Page {{ completedRestaurantOrdersPage }} of {{ completedRestaurantOrdersTotalPages }}</span><button class="button button-quiet button-small" [disabled]="completedRestaurantOrdersPage >= completedRestaurantOrdersTotalPages || completedRestaurantOrdersLoading" (click)="loadCompletedRestaurantOrders(completedRestaurantOrdersPage + 1)">Next</button></div>
           </ng-container>
         </div>
-        <div class="portal-panel"><div class="panel-heading"><div><span class="eyebrow">YOUR KITCHEN</span><h2>Menu availability</h2></div><button *ngIf="user?.role === 'RESTAURANT_OWNER' || user?.role === 'RESTAURANT_MANAGER'" class="button button-quiet button-small" (click)="bulkMenuOpen = !bulkMenuOpen">{{ bulkMenuOpen ? 'Close bulk upload' : 'Bulk Upload Menu' }}</button></div>
+        <div class="portal-panel"><div class="panel-heading"><div><span class="eyebrow">YOUR KITCHEN</span><h2>Menu availability</h2></div><button *ngIf="user?.role === 'RESTAURANT_OWNER' || user?.role === 'RESTAURANT_MANAGER'" class="button button-quiet button-small" (click)="bulkMenuOpen = !bulkMenuOpen">{{ bulkMenuOpen ? 'Close menu import' : 'Import Menu' }}</button></div>
           <section class="bulk-menu-panel" *ngIf="bulkMenuOpen">
-            <div class="bulk-menu-toolbar"><div><strong>Import a menu in one operation</strong><small>Upload up to 500 rows per CSV or Excel .xlsx file. Each item will follow KABHI's Admin menu-approval process.</small></div><button class="button button-quiet button-small" (click)="downloadMenuTemplate()">Download CSV template</button></div>
+            <div class="bulk-menu-toolbar"><div><strong>Import a menu in one operation</strong><small>Review every extracted item before importing. New items follow KABHI's Admin menu-approval process.</small></div><button class="button button-quiet button-small" (click)="downloadMenuTemplate()">Download CSV template</button></div>
+            <div class="bulk-menu-photo">
+              <div><strong>Import from menu photos</strong><p>Choose photos from your device or take a new picture. English text is scanned on your device; check the results and correct them before importing.</p></div>
+              <div class="bulk-menu-photo-controls">
+                <label class="button button-quiet button-small image-file-button">Choose photos<input type="file" accept="image/jpeg,image/png,.jpg,.jpeg,.png" multiple (change)="selectBulkMenuPhotos($event)"></label>
+                <label class="button button-quiet button-small image-file-button">Take a photo<input type="file" accept="image/jpeg,image/png" capture="environment" (change)="selectBulkMenuPhotos($event)"></label>
+                <button class="button button-accent button-small" [disabled]="!bulkMenuPhotoFiles.length || bulkMenuPhotoLoading" (click)="extractBulkMenuPhotos()">{{ bulkMenuPhotoLoading ? 'Scanning photos…' : 'Scan and review menu' }}</button>
+              </div>
+              <ul class="bulk-menu-photo-list" *ngIf="bulkMenuPhotoFiles.length">
+                <li *ngFor="let file of bulkMenuPhotoFiles; let fileIndex = index"><span>{{ file.name }}</span><button type="button" class="text-button" [disabled]="bulkMenuPhotoLoading" (click)="removeBulkMenuPhoto(fileIndex)">Remove</button></li>
+              </ul>
+              <small class="bulk-menu-photo-status" *ngIf="bulkMenuPhotoStatus" aria-live="polite">{{ bulkMenuPhotoStatus }}</small>
+              <small class="bulk-menu-photo-note">JPEG or PNG · up to 10 photos · 10 MB per photo · 20 MB total. First use downloads the English OCR model; images stay in your browser.</small>
+            </div>
             <div class="bulk-menu-file-controls">
               <label class="button button-quiet button-small image-file-button">Choose CSV or Excel file<input type="file" accept=".csv,.xlsx,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" (change)="selectBulkMenuFile($event)"></label>
               <span class="bulk-menu-filename">{{ bulkMenuFile?.name || 'No menu file selected' }}</span>
@@ -715,7 +747,7 @@
               <button class="button button-quiet button-small" *ngIf="bulkImageErrorReport" (click)="downloadBulkImageErrors()">Download image error report</button>
             </div>
             <div *ngIf="bulkMenuRows.length" class="bulk-menu-preview">
-              <div class="bulk-menu-counts"><strong>Preview · {{ bulkMenuRows.length }} rows</strong><span class="bulk-valid-count">{{ bulkMenuValidCount }} valid</span><span class="bulk-invalid-count">{{ bulkMenuInvalidCount }} invalid</span></div>
+              <div class="bulk-menu-counts"><strong>Review · {{ bulkMenuRows.length }} rows</strong><span class="bulk-valid-count">{{ bulkMenuValidCount }} valid</span><span class="bulk-invalid-count">{{ bulkMenuInvalidCount }} invalid</span><button class="button button-quiet button-small" [disabled]="bulkMenuRows.length >= 500" (click)="addBulkMenuRow()">Add item</button></div>
               <div class="bulk-menu-strategy">
                 <label>Existing menu items
                   <select [(ngModel)]="bulkMenuMode">
@@ -728,7 +760,7 @@
                 <button class="button button-accent button-small" [disabled]="bulkMenuImporting || !bulkMenuValidCount || (bulkMenuMode === 'REPLACE' && (bulkMenuInvalidCount > 0 || !bulkMenuReplaceConfirmed))" (click)="importBulkMenu()">{{ bulkMenuImporting ? 'Importing…' : 'Import valid items' }}</button>
               </div>
               <div class="bulk-menu-row" *ngFor="let row of bulkMenuRows; let rowIndex = index" [class.bulk-menu-row-invalid]="row.errors.length">
-                <div class="bulk-row-heading"><strong>Row {{ row.rowNumber }}</strong><span *ngIf="row.existingItemId">Matches existing item {{ row.existingItemName }} · {{ row.existingItemId }}</span><span *ngIf="!row.errors.length && !row.existingItemId">New item</span></div>
+                <div class="bulk-row-heading"><strong>Row {{ row.rowNumber }}</strong><span *ngIf="row.existingItemId">Matches existing item {{ row.existingItemName }} · {{ row.existingItemId }}</span><span *ngIf="!row.errors.length && !row.existingItemId">New item</span><button type="button" class="text-button" (click)="removeBulkMenuRow(rowIndex)">Remove item</button></div>
                 <div class="bulk-menu-fields">
                   <label>Category<input [(ngModel)]="row.category" (ngModelChange)="validateBulkMenuRows()"></label>
                   <label>Item Name<input [(ngModel)]="row.name" (ngModelChange)="validateBulkMenuRows()"></label>
@@ -738,6 +770,7 @@
                   <label>Availability End (HH:MM)<input [(ngModel)]="row.availabilityEnd" (ngModelChange)="validateBulkMenuRows()" placeholder="e.g. 22:00"></label>
                   <label>Image URL (Optional)<input [(ngModel)]="row.imageUrl" (ngModelChange)="validateBulkMenuRows()" type="url" placeholder="https://…"></label>
                 </div>
+                <ul class="bulk-row-warnings" *ngIf="row.extractionWarnings?.length"><li *ngFor="let warning of row.extractionWarnings">{{ warning }}</li></ul>
                 <ul class="bulk-row-errors" *ngIf="row.errors.length"><li *ngFor="let rowError of row.errors">{{ rowError }}</li></ul>
               </div>
             </div>
@@ -818,26 +851,9 @@
       </div>
       <div class="portal-panel wide-panel whatsapp-admin-settings">
         <div class="panel-heading">
-          <div><span class="eyebrow">CUSTOMER SIGN-IN</span><h2>WhatsApp Cloud API</h2></div>
-          <span class="order-status" [ngClass]="adminWhatsappStatus?.configured ? 'order-status-delivered' : 'order-status-pending'">{{ adminWhatsappStatus?.configured ? 'Configured' : 'Setup required' }}</span>
+          <div><span class="eyebrow">CUSTOMER SIGN-IN</span><h2>Firebase Phone Authentication</h2></div>
         </div>
-        <p class="muted">Add Meta’s Cloud API credentials here when your WhatsApp account is ready. Secrets are encrypted before being saved and are never returned to the browser. Leave a saved secret blank to keep it unchanged.</p>
-        <p class="demo-callout" *ngIf="adminWhatsappStatus && !adminWhatsappStatus.encryptionKeyConfigured">Before saving, set <code>WHATSAPP_CONFIG_ENCRYPTION_KEY</code> in the root <code>.env</code> to a private random value of at least 32 characters, then restart the app.</p>
-        <p class="demo-callout" *ngIf="adminWhatsappStatus?.developmentOtpAllowed && !adminWhatsappStatus.otpSecretPersistent">Local OTPs use a private temporary signing key generated by the API; outstanding codes expire if the API restarts.</p>
-        <p class="demo-callout" *ngIf="adminWhatsappStatus && !adminWhatsappStatus.developmentOtpAllowed && !adminWhatsappStatus.otpSecretConfigured">Customer OTP requires <code>OTP_SIGNING_SECRET</code> in the root <code>.env</code> (at least 32 random characters).</p>
-        <div class="otp-delivery-control" *ngIf="adminWhatsappStatus">
-          <div><strong>WhatsApp OTP delivery</strong><small>{{ whatsappOtpDeliveryEnabled ? 'Codes are sent to customers through WhatsApp.' : 'WhatsApp is off; a development code will appear in the customer app.' }}</small></div>
-          <label><input type="checkbox" [checked]="whatsappOtpDeliveryEnabled" [disabled]="loading || !adminWhatsappStatus.developmentOtpAllowed" (change)="setWhatsappOtpDelivery($event)"> {{ whatsappOtpDeliveryEnabled ? 'Enabled' : 'Disabled' }}</label>
-        </div>
-        <p class="demo-callout" *ngIf="adminWhatsappStatus && !adminWhatsappStatus.developmentOtpAllowed">WhatsApp delivery cannot be disabled in production. Development OTP display is intentionally unavailable there.</p>
-        <div class="whatsapp-config-grid">
-          <label class="form-field"><span>Cloud API access token</span><input [(ngModel)]="whatsappAccessToken" type="password" autocomplete="new-password" [placeholder]="adminWhatsappStatus?.accessTokenConfigured ? 'Already saved — leave blank to keep' : 'Paste Meta access token'"></label>
-          <label class="form-field"><span>Phone Number ID</span><input [(ngModel)]="whatsappPhoneNumberId" inputmode="numeric" autocomplete="off" [placeholder]="adminWhatsappStatus?.phoneNumberIdConfigured ? 'Already saved — leave blank to keep' : 'Numeric ID from Meta API Setup'"></label>
-          <label class="form-field"><span>Approved OTP template</span><input [(ngModel)]="whatsappTemplateName" autocomplete="off"></label>
-          <label class="form-field"><span>Template language</span><input [(ngModel)]="whatsappLanguage" autocomplete="off"></label>
-          <label class="form-field"><span>Graph API version</span><input [(ngModel)]="whatsappGraphVersion" autocomplete="off"></label>
-        </div>
-        <div class="order-actions"><button class="button button-accent" [disabled]="loading || !adminWhatsappStatus?.encryptionKeyConfigured" (click)="saveAdminWhatsappConfig()">{{ loading ? 'Saving…' : 'Save WhatsApp settings' }}</button><small *ngIf="adminWhatsappStatus">Credentials source: {{ adminWhatsappStatus.source === 'admin' ? 'Admin settings' : 'Environment' }}.</small></div>
+        <p class="muted">Customer sign-in, checkout verification, and restaurant account recovery use Firebase SMS. Firebase project settings and server credentials are configured outside this dashboard; follow the setup steps in the project README. WhatsApp settings no longer control authentication.</p>
       </div>
       <div class="portal-columns">
         <div class="portal-panel"><div class="panel-heading"><div><span class="eyebrow">ONBOARDING</span><h2>Needs review</h2></div></div>

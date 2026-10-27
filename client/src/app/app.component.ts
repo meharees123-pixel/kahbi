@@ -1,10 +1,12 @@
 import { CommonModule } from '@angular/common';
-import { HttpClient, HttpHeaders } from '@angular/common/http';
+import { HttpClient, HttpErrorResponse, HttpHeaders } from '@angular/common/http';
 import { ChangeDetectorRef, Component, OnDestroy, OnInit } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import * as L from 'leaflet';
+import { createWorker } from 'tesseract.js';
 import { finalize, firstValueFrom, switchMap } from 'rxjs';
 import { LoadingIndicatorService } from './loading-indicator.service';
+import { FirebasePhoneAuthService } from './firebase-phone-auth.service';
 
 interface User {
   id: string;
@@ -108,6 +110,7 @@ interface BulkMenuRow {
   imageUrl: string;
   customizationOptions: string;
   errors: string[];
+  extractionWarnings?: string[];
   existingItemId?: string;
   existingItemName?: string;
 }
@@ -225,21 +228,6 @@ interface BillingRecord {
   createdAt: string;
 }
 
-interface WhatsappConfigStatus {
-  configured: boolean;
-  source: 'admin' | 'environment';
-  otpDeliveryEnabled: boolean;
-  developmentOtpAllowed: boolean;
-  accessTokenConfigured: boolean;
-  phoneNumberIdConfigured: boolean;
-  otpSecretConfigured: boolean;
-  otpSecretPersistent: boolean;
-  encryptionKeyConfigured: boolean;
-  templateName: string;
-  language: string;
-  graphVersion: string;
-}
-
 interface MapPoint {
   lat: number;
   lng: number;
@@ -311,6 +299,7 @@ type PartnerFormErrorField =
   | 'declaration_adminReview' | 'logoImageData' | 'coverImageData' | 'termsVersion';
 
 type LoginPortal = 'CUSTOMER' | 'RESTAURANT' | 'ADMIN';
+type PhoneVerificationFlow = 'LOGIN' | 'ORDER';
 
 @Component({
   selector: 'kahbi-root',
@@ -322,6 +311,8 @@ export class AppComponent implements OnInit, OnDestroy {
   private readonly maxImageBytes = 256 * 1024;
   private readonly maxSourceImageBytes = 10 * 1024 * 1024;
   private readonly maxImagePixels = 40_000_000;
+  private readonly maxMenuPhotoFiles = 10;
+  private readonly maxMenuPhotoBatchBytes = 20 * 1024 * 1024;
   private readonly api = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
     ? 'http://localhost:3000/api'
     : '/api';
@@ -407,13 +398,6 @@ export class AppComponent implements OnInit, OnDestroy {
   feedbackBannerDismissed = false;
   feedbackModalOrder: Order | null = null;
   feedbackModalOpen = false;
-  adminWhatsappStatus: WhatsappConfigStatus | null = null;
-  whatsappAccessToken = '';
-  whatsappPhoneNumberId = '';
-  whatsappOtpDeliveryEnabled = true;
-  whatsappTemplateName = 'kahbi_customer_otp';
-  whatsappLanguage = 'en_US';
-  whatsappGraphVersion = 'v23.0';
   private errorDismissTimer: ReturnType<typeof setTimeout> | null = null;
   private errorMessage = '';
   notice = '';
@@ -467,16 +451,37 @@ export class AppComponent implements OnInit, OnDestroy {
   signupName = '';
   signupPhone = '';
   customerAuthPhone = '';
+  guestCountryCode = '+974';
+  customerAuthCountryCode = '+974';
+  restaurantRecoveryCountryCode = '+974';
+  readonly phoneCountryCodes = [
+    { country: 'Qatar', code: '+974' },
+    { country: 'Saudi Arabia', code: '+966' },
+    { country: 'United Arab Emirates', code: '+971' },
+    { country: 'Bahrain', code: '+973' },
+    { country: 'Kuwait', code: '+965' },
+    { country: 'Oman', code: '+968' },
+    { country: 'India', code: '+91' },
+    { country: 'Pakistan', code: '+92' },
+    { country: 'Bangladesh', code: '+880' },
+    { country: 'Nepal', code: '+977' },
+    { country: 'Philippines', code: '+63' },
+    { country: 'Egypt', code: '+20' },
+    { country: 'United Kingdom', code: '+44' },
+    { country: 'United States / Canada', code: '+1' }
+  ];
   customerOtpCode = '';
   customerOtpChallengeId = '';
-  customerOtpDevelopmentCode = '';
+  customerFirebaseIdToken = '';
   customerOtpPurpose: 'LOGIN' | 'ORDER' = 'LOGIN';
   restaurantRecoveryView: 'login' | 'request-id' | 'request-password' | 'verify-id' | 'verify-password' | 'set-password' | 'id-found' | 'pending' | 'admin-help' | 'reset-success' = 'login';
   restaurantRecoveryPhone = '';
-  restaurantRecoveryIdentifier = '';
   restaurantRecoveryChallengeId = '';
+  restaurantRecoveryChallengePhone = '';
+  restaurantRecoveryChallengePurpose: 'RESTAURANT_LOGIN_ID_RECOVERY' | 'RESTAURANT_PASSWORD_RECOVERY' | null = null;
+  restaurantRecoveryChallengeExpiresAt = 0;
   restaurantRecoveryCode = '';
-  restaurantRecoveryDevelopmentCode = '';
+  restaurantRecoveryFirebaseIdToken = '';
   restaurantRecoveryExpiryMinutes = 5;
   restaurantRecoveryToken = '';
   restaurantRecoveredLoginId = '';
@@ -561,6 +566,9 @@ export class AppComponent implements OnInit, OnDestroy {
   bulkMenuReplaceConfirmed = false;
   bulkMenuSummary: { totalRows: number; imported: number; updated: number; failed: number; mode: string } | null = null;
   bulkMenuErrorReport = '';
+  bulkMenuPhotoFiles: File[] = [];
+  bulkMenuPhotoLoading = false;
+  bulkMenuPhotoStatus = '';
   bulkImageZipFile: File | null = null;
   bulkImageUploading = false;
   bulkImageResult = '';
@@ -598,7 +606,8 @@ export class AppComponent implements OnInit, OnDestroy {
   constructor(
     private readonly http: HttpClient,
     private readonly changeDetector: ChangeDetectorRef,
-    readonly loadingIndicator: LoadingIndicatorService
+    readonly loadingIndicator: LoadingIndicatorService,
+    private readonly firebasePhoneAuth: FirebasePhoneAuthService
   ) {}
 
   get error(): string {
@@ -740,9 +749,52 @@ export class AppComponent implements OnInit, OnDestroy {
     return token ? new HttpHeaders({ Authorization: `Bearer ${token}` }) : new HttpHeaders();
   }
 
-  private showError(error: { error?: { error?: string } }): void {
-    this.error = error.error?.error || 'Could not complete that request. Please try again.';
+  private showError(error: unknown): void {
+    let message: string | undefined;
+    if (error instanceof HttpErrorResponse) {
+      message = error.error?.error;
+    } else if (error instanceof Error) {
+      message = error.message;
+    } else if (typeof error === 'object' && error !== null && 'error' in error) {
+      const response = error.error;
+      if (typeof response === 'object' && response !== null && 'error' in response && typeof response.error === 'string') {
+        message = response.error;
+      }
+    }
+    this.error = message || 'Could not complete that request. Please try again.';
     this.changeDetector.markForCheck();
+  }
+
+  private phoneWithCountryCode(phone: string, countryCode: string): string {
+    const value = phone.trim().replace(/[().\s-]/g, '');
+    if (value.startsWith('+')) return value;
+    const nationalNumber = value.replace(/\D/g, '').replace(/^0+/, '');
+    return `${countryCode}${nationalNumber}`;
+  }
+
+  customerPhoneChanged(flow: PhoneVerificationFlow): void {
+    const firebaseFlow = `customer-${flow.toLowerCase()}`;
+    this.firebasePhoneAuth.clearFlow(firebaseFlow);
+    if (flow === 'ORDER' && this.customerOtpPurpose !== 'ORDER') return;
+    if (flow === 'LOGIN' && this.customerOtpPurpose !== 'LOGIN') return;
+    this.customerOtpChallengeId = '';
+    this.customerOtpCode = '';
+    this.customerFirebaseIdToken = '';
+  }
+
+  private clearRestaurantRecoveryPhoneVerification(): void {
+    this.firebasePhoneAuth.clearFlow('restaurant-recovery');
+    this.restaurantRecoveryChallengeId = '';
+    this.restaurantRecoveryChallengePhone = '';
+    this.restaurantRecoveryChallengePurpose = null;
+    this.restaurantRecoveryChallengeExpiresAt = 0;
+    this.restaurantRecoveryCode = '';
+    this.restaurantRecoveryFirebaseIdToken = '';
+  }
+
+  changeRestaurantRecoveryPhone(): void {
+    this.clearRestaurantRecoveryPhoneVerification();
+    this.restaurantRecoveryView = this.restaurantRecoveryView === 'verify-id' ? 'request-id' : 'request-password';
   }
 
   private loadBrandLogo(): void {
@@ -1105,7 +1157,8 @@ export class AppComponent implements OnInit, OnDestroy {
     this.authModalOpen = true;
     this.customerOtpChallengeId = '';
     this.customerOtpCode = '';
-    this.customerOtpDevelopmentCode = '';
+    this.customerFirebaseIdToken = '';
+    this.firebasePhoneAuth.clearFlow('customer-login');
     this.customerOtpPurpose = 'LOGIN';
     this.returnToRestaurantLogin();
     this.error = '';
@@ -1121,7 +1174,7 @@ export class AppComponent implements OnInit, OnDestroy {
   openSignup(): void {
     if (this.loginPortal === 'ADMIN') return;
     if (this.loginPortal === 'CUSTOMER') {
-      this.notice = 'Enter your WhatsApp number and verify the code to create your account.';
+      this.notice = 'Enter your phone number and verify the Firebase SMS code to create your account.';
       return;
     }
     this.closeLogin();
@@ -1779,7 +1832,8 @@ export class AppComponent implements OnInit, OnDestroy {
     if (!this.isCustomer && this.customerOtpPurpose !== 'ORDER') {
       this.customerOtpChallengeId = '';
       this.customerOtpCode = '';
-      this.customerOtpDevelopmentCode = '';
+      this.customerFirebaseIdToken = '';
+      this.firebasePhoneAuth.clearFlow('customer-login');
     }
     this.view = 'cart';
     this.error = '';
@@ -1995,7 +2049,7 @@ export class AppComponent implements OnInit, OnDestroy {
   placeOrder(): void {
     if (!this.selectedRestaurant || !this.cartItems.length) return;
     if (!this.isCustomer) {
-      this.error = 'Verify your WhatsApp number before placing an order.';
+      this.error = 'Verify your phone number with Firebase before placing your order.';
       return;
     }
     if (!this.customerTerms || this.customerTermsLoading) {
@@ -2213,12 +2267,9 @@ export class AppComponent implements OnInit, OnDestroy {
   }
 
   startRestaurantRecovery(flow: 'request-id' | 'request-password'): void {
+    this.clearRestaurantRecoveryPhoneVerification();
     this.restaurantRecoveryView = flow;
     this.restaurantRecoveryPhone = '';
-    this.restaurantRecoveryIdentifier = '';
-    this.restaurantRecoveryChallengeId = '';
-    this.restaurantRecoveryCode = '';
-    this.restaurantRecoveryDevelopmentCode = '';
     this.restaurantRecoveryToken = '';
     this.restaurantRecoveryMessage = '';
     this.restaurantRecoveredLoginId = '';
@@ -2228,68 +2279,91 @@ export class AppComponent implements OnInit, OnDestroy {
     this.notice = '';
   }
 
-  requestRestaurantRecovery(purpose: 'RESTAURANT_LOGIN_ID_RECOVERY' | 'RESTAURANT_PASSWORD_RECOVERY'): void {
+  async requestRestaurantRecovery(purpose: 'RESTAURANT_LOGIN_ID_RECOVERY' | 'RESTAURANT_PASSWORD_RECOVERY'): Promise<void> {
     const isLoginId = purpose === 'RESTAURANT_LOGIN_ID_RECOVERY';
     const url = isLoginId
       ? `${this.api}/auth/restaurant-recovery/login-id/request`
       : `${this.api}/auth/restaurant-recovery/password/request`;
-    const body = isLoginId
-      ? { phone: this.restaurantRecoveryPhone }
-      : { identifier: this.restaurantRecoveryIdentifier };
     this.loading = true;
     this.error = '';
-    this.http.post<{ challengeId: string; message: string; developmentCode?: string; expiresInMinutes: number }>(url, body).pipe(finalize(() => {
+    this.restaurantRecoveryFirebaseIdToken = '';
+    const phone = this.phoneWithCountryCode(this.restaurantRecoveryPhone, this.restaurantRecoveryCountryCode);
+    try {
+      let result: { challengeId: string; message: string; expiresInMinutes: number };
+      if (this.restaurantRecoveryChallengeId &&
+          this.restaurantRecoveryChallengePurpose === purpose &&
+          this.restaurantRecoveryChallengePhone === phone &&
+          Date.now() < this.restaurantRecoveryChallengeExpiresAt) {
+        result = {
+          challengeId: this.restaurantRecoveryChallengeId,
+          message: 'Enter the Firebase verification code sent to your registered phone number.',
+          expiresInMinutes: this.restaurantRecoveryExpiryMinutes
+        };
+      } else {
+        this.restaurantRecoveryChallengeId = '';
+        result = await firstValueFrom(this.http.post<{
+          challengeId: string;
+          message: string;
+          expiresInMinutes: number;
+        }>(url, { phone }));
+        this.restaurantRecoveryChallengeId = result.challengeId;
+        this.restaurantRecoveryChallengePhone = phone;
+        this.restaurantRecoveryChallengePurpose = purpose;
+        this.restaurantRecoveryExpiryMinutes = result.expiresInMinutes;
+        this.restaurantRecoveryChallengeExpiresAt = Date.now() + result.expiresInMinutes * 60 * 1000;
+      }
+      await this.firebasePhoneAuth.requestCode(phone, 'restaurant-recovery');
+      this.restaurantRecoveryCode = '';
+      this.restaurantRecoveryView = isLoginId ? 'verify-id' : 'verify-password';
+      this.restaurantRecoveryMessage = result.message;
+    } catch (error) {
+      this.showError(error instanceof Error ? error : new Error('Could not send the Firebase verification SMS.'));
+    } finally {
       this.loading = false;
       this.changeDetector.markForCheck();
-    })).subscribe({
-      next: ({ challengeId, message, developmentCode, expiresInMinutes }) => {
-        this.restaurantRecoveryChallengeId = challengeId;
-        this.restaurantRecoveryCode = '';
-        this.restaurantRecoveryDevelopmentCode = developmentCode || '';
-        this.restaurantRecoveryExpiryMinutes = expiresInMinutes;
-        this.restaurantRecoveryView = isLoginId ? 'verify-id' : 'verify-password';
-        this.restaurantRecoveryMessage = message;
-      },
-      error: (error) => this.showError(error)
-    });
+    }
   }
 
-  verifyRestaurantRecovery(purpose: 'RESTAURANT_LOGIN_ID_RECOVERY' | 'RESTAURANT_PASSWORD_RECOVERY'): void {
+  async verifyRestaurantRecovery(purpose: 'RESTAURANT_LOGIN_ID_RECOVERY' | 'RESTAURANT_PASSWORD_RECOVERY'): Promise<void> {
     this.loading = true;
     this.error = '';
-    this.http.post<{
-      status: 'ACTIVE' | 'PENDING_APPROVAL' | 'ADMIN_ASSISTANCE';
-      challengeId?: string;
-      recoveryToken?: string;
-      loginId?: string;
-      message?: string;
-    }>(`${this.api}/auth/restaurant-recovery/verify`, {
-      challengeId: this.restaurantRecoveryChallengeId,
-      purpose,
-      code: this.restaurantRecoveryCode.trim()
-    }).pipe(finalize(() => {
+    try {
+      if (!this.restaurantRecoveryFirebaseIdToken) {
+        this.restaurantRecoveryFirebaseIdToken = await this.firebasePhoneAuth.verifyCode('restaurant-recovery', this.restaurantRecoveryCode.trim());
+      }
+      const result = await firstValueFrom(this.http.post<{
+        status: 'ACTIVE' | 'PENDING_APPROVAL' | 'ADMIN_ASSISTANCE';
+        challengeId?: string;
+        recoveryToken?: string;
+        loginId?: string;
+        message?: string;
+      }>(`${this.api}/auth/restaurant-recovery/verify`, {
+        challengeId: this.restaurantRecoveryChallengeId,
+        purpose,
+        idToken: this.restaurantRecoveryFirebaseIdToken
+      }));
+      this.restaurantRecoveryFirebaseIdToken = '';
+      this.restaurantRecoveryMessage = result.message || '';
+      if (result.status === 'PENDING_APPROVAL') {
+        this.restaurantRecoveryView = 'pending';
+      } else if (result.status === 'ADMIN_ASSISTANCE') {
+        this.restaurantRecoveryView = 'admin-help';
+      } else if (purpose === 'RESTAURANT_LOGIN_ID_RECOVERY' && result.loginId) {
+        this.restaurantRecoveredLoginId = result.loginId;
+        this.restaurantRecoveryView = 'id-found';
+      } else if (result.challengeId && result.recoveryToken) {
+        this.restaurantRecoveryChallengeId = result.challengeId;
+        this.restaurantRecoveryToken = result.recoveryToken;
+        this.restaurantRecoveryView = 'set-password';
+      } else {
+        this.error = 'We could not complete account recovery. Start again or contact KABHI Support.';
+      }
+    } catch (error) {
+      this.showError(error instanceof Error ? error : new Error('Could not verify the Firebase phone-authentication session.'));
+    } finally {
       this.loading = false;
       this.changeDetector.markForCheck();
-    })).subscribe({
-      next: (result) => {
-        this.restaurantRecoveryMessage = result.message || '';
-        if (result.status === 'PENDING_APPROVAL') {
-          this.restaurantRecoveryView = 'pending';
-        } else if (result.status === 'ADMIN_ASSISTANCE') {
-          this.restaurantRecoveryView = 'admin-help';
-        } else if (purpose === 'RESTAURANT_LOGIN_ID_RECOVERY' && result.loginId) {
-          this.restaurantRecoveredLoginId = result.loginId;
-          this.restaurantRecoveryView = 'id-found';
-        } else if (result.challengeId && result.recoveryToken) {
-          this.restaurantRecoveryChallengeId = result.challengeId;
-          this.restaurantRecoveryToken = result.recoveryToken;
-          this.restaurantRecoveryView = 'set-password';
-        } else {
-          this.error = 'We could not complete account recovery. Start again or contact KABHI Support.';
-        }
-      },
-      error: (error) => this.showError(error)
-    });
+    }
   }
 
   resetRestaurantPassword(): void {
@@ -2327,9 +2401,7 @@ export class AppComponent implements OnInit, OnDestroy {
 
   returnToRestaurantLogin(): void {
     this.restaurantRecoveryView = 'login';
-    this.restaurantRecoveryChallengeId = '';
-    this.restaurantRecoveryCode = '';
-    this.restaurantRecoveryDevelopmentCode = '';
+    this.clearRestaurantRecoveryPhoneVerification();
     this.restaurantRecoveryToken = '';
     this.restaurantRecoveryMessage = '';
     this.restaurantRecoveredLoginId = '';
@@ -2339,66 +2411,69 @@ export class AppComponent implements OnInit, OnDestroy {
     this.notice = '';
   }
 
-  requestCustomerOtp(purpose: 'LOGIN' | 'ORDER'): void {
-    const phone = purpose === 'ORDER' ? this.guestPhone.trim() : this.customerAuthPhone.trim();
-    this.customerOtpDevelopmentCode = '';
+  async requestCustomerOtp(purpose: 'LOGIN' | 'ORDER'): Promise<void> {
+    const phone = purpose === 'ORDER'
+      ? this.phoneWithCountryCode(this.guestPhone, this.guestCountryCode)
+      : this.phoneWithCountryCode(this.customerAuthPhone, this.customerAuthCountryCode);
     this.loading = true;
     this.error = '';
-    this.http.post<{ challengeId: string; message: string; deliveryMode: 'WHATSAPP' | 'DEVELOPMENT'; developmentCode?: string }>(`${this.api}/auth/customer-otp/request`, {
-      phone,
-      purpose
-    }).pipe(finalize(() => {
+    this.customerFirebaseIdToken = '';
+    try {
+      await this.firebasePhoneAuth.requestCode(phone, `customer-${purpose.toLowerCase()}`);
+      this.customerOtpChallengeId = 'firebase';
+      this.customerOtpPurpose = purpose;
+      this.customerOtpCode = '';
+      this.notice = `Firebase sent a verification code to ${phone}. Enter it before it expires.`;
+    } catch (error) {
+      this.showError(error instanceof Error ? error : new Error('Could not send the Firebase verification SMS.'));
+    } finally {
       this.loading = false;
       this.changeDetector.markForCheck();
-    })).subscribe({
-      next: ({ challengeId, message, developmentCode }) => {
-        this.customerOtpChallengeId = challengeId;
-        this.customerOtpPurpose = purpose;
-        this.customerOtpCode = '';
-        this.customerOtpDevelopmentCode = developmentCode || '';
-        this.notice = message;
-      },
-      error: (error) => this.showError(error)
-    });
+    }
   }
 
-  verifyCustomerOtp(purpose: 'LOGIN' | 'ORDER'): void {
-    const phone = purpose === 'ORDER' ? this.guestPhone.trim() : this.customerAuthPhone.trim();
+  async verifyCustomerOtp(purpose: 'LOGIN' | 'ORDER'): Promise<void> {
     this.loading = true;
     this.error = '';
-    this.http.post<{ token: string; user: User; purpose: 'LOGIN' | 'ORDER' }>(`${this.api}/auth/customer-otp/verify`, {
-      challengeId: this.customerOtpChallengeId,
-      phone,
-      code: this.customerOtpCode.trim()
-    }).pipe(finalize(() => {
+    try {
+      if (!this.customerFirebaseIdToken) {
+        this.customerFirebaseIdToken = await this.firebasePhoneAuth.verifyCode(
+          `customer-${purpose.toLowerCase()}`,
+          this.customerOtpCode.trim()
+        );
+      }
+      const { token, user } = await firstValueFrom(this.http.post<{
+        token: string;
+        user: User;
+        purpose: 'LOGIN' | 'ORDER';
+      }>(`${this.api}/auth/customer-phone/verify`, { idToken: this.customerFirebaseIdToken, purpose }));
+      this.customerFirebaseIdToken = '';
+      localStorage.setItem(this.tokenKey, token);
+      this.user = user;
+      this.customerOtpChallengeId = '';
+      this.customerOtpCode = '';
+      this.error = '';
+      if (purpose === 'ORDER') {
+        this.notice = 'Your phone number is verified. Your account is ready; you can now place your order.';
+        this.authModalOpen = false;
+        this.view = 'cart';
+        this.loadCustomerCart(() => this.refreshOrderQuote());
+        this.loadCustomerTerms();
+      } else {
+        this.notice = 'Your phone number is verified. Welcome to KABHI.';
+        this.loadRoleLanding();
+      }
+    } catch (error) {
+      this.showError(error instanceof Error ? error : new Error('Could not verify your Firebase phone-authentication session.'));
+    } finally {
       this.loading = false;
       this.changeDetector.markForCheck();
-    })).subscribe({
-      next: ({ token, user }) => {
-        localStorage.setItem(this.tokenKey, token);
-        this.user = user;
-        this.customerOtpChallengeId = '';
-        this.customerOtpCode = '';
-        this.customerOtpDevelopmentCode = '';
-        this.error = '';
-        if (purpose === 'ORDER') {
-          this.notice = 'WhatsApp number verified. Your account is ready; you can now place your order.';
-          this.authModalOpen = false;
-          this.view = 'cart';
-          this.loadCustomerCart(() => this.refreshOrderQuote());
-          this.loadCustomerTerms();
-        } else {
-          this.notice = 'Your WhatsApp number is verified. Welcome to KABHI.';
-          this.loadRoleLanding();
-        }
-      },
-      error: (error) => this.showError(error)
-    });
+    }
   }
 
   signUp(): void {
     if (!this.signupRestaurant) {
-      this.error = 'Customer accounts are created after WhatsApp verification.';
+      this.error = 'Customer accounts are created after Firebase phone verification.';
       return;
     }
     if (this.signupRestaurant && (
@@ -2442,7 +2517,9 @@ export class AppComponent implements OnInit, OnDestroy {
     this.loginPortal = 'CUSTOMER';
     this.customerOtpChallengeId = '';
     this.customerOtpCode = '';
-    this.customerOtpDevelopmentCode = '';
+    this.customerFirebaseIdToken = '';
+    this.firebasePhoneAuth.clearFlow('customer-login');
+    this.firebasePhoneAuth.clearFlow('customer-order');
     window.history.replaceState(null, '', '/');
     this.loadRestaurants();
     this.notice = 'You have been signed out.';
@@ -2819,6 +2896,149 @@ export class AppComponent implements OnInit, OnDestroy {
     this.bulkMenuErrorReport = '';
   }
 
+  async selectBulkMenuPhotos(event: Event): Promise<void> {
+    const input = event.target as HTMLInputElement;
+    const selectedFiles = Array.from(input.files || []);
+    input.value = '';
+    if (!selectedFiles.length) return;
+
+    if (this.bulkMenuPhotoFiles.length + selectedFiles.length > this.maxMenuPhotoFiles) {
+      this.error = `Choose no more than ${this.maxMenuPhotoFiles} menu photos per batch.`;
+      return;
+    }
+    const nextFiles = [...this.bulkMenuPhotoFiles, ...selectedFiles];
+    if (nextFiles.some((file) => file.size > this.maxSourceImageBytes) ||
+        nextFiles.reduce((total, file) => total + file.size, 0) > this.maxMenuPhotoBatchBytes) {
+      this.error = 'Each menu photo must be 10 MB or smaller, and the combined batch must be 20 MB or smaller.';
+      return;
+    }
+    for (const file of selectedFiles) {
+      if (!await this.isSupportedMenuPhoto(file)) {
+        this.error = `${file.name} is not a valid JPEG or PNG image.`;
+        return;
+      }
+    }
+
+    this.bulkMenuPhotoFiles = nextFiles;
+    this.bulkMenuRows = [];
+    this.bulkMenuSummary = null;
+    this.bulkMenuErrorReport = '';
+    this.bulkMenuPhotoStatus = `${nextFiles.length} photo${nextFiles.length === 1 ? '' : 's'} ready to scan.`;
+  }
+
+  removeBulkMenuPhoto(index: number): void {
+    this.bulkMenuPhotoFiles = this.bulkMenuPhotoFiles.filter((_, fileIndex) => fileIndex !== index);
+    this.bulkMenuPhotoStatus = this.bulkMenuPhotoFiles.length
+      ? `${this.bulkMenuPhotoFiles.length} photo${this.bulkMenuPhotoFiles.length === 1 ? '' : 's'} ready to scan.`
+      : '';
+  }
+
+  async extractBulkMenuPhotos(): Promise<void> {
+    if (!this.bulkMenuPhotoFiles.length || this.bulkMenuPhotoLoading) return;
+    if (!this.selectedRestaurant) {
+      this.error = 'Sign in to your restaurant account before importing menu photos.';
+      return;
+    }
+
+    this.bulkMenuPhotoLoading = true;
+    this.bulkMenuPhotoStatus = 'Starting on-device text recognition…';
+    this.bulkMenuRows = [];
+    this.bulkMenuSummary = null;
+    this.bulkMenuErrorReport = '';
+    this.bulkMenuMode = 'ADD_NEW';
+    this.bulkMenuReplaceConfirmed = false;
+    let worker: Awaited<ReturnType<typeof createWorker>> | null = null;
+    try {
+      worker = await createWorker('eng', 1, {
+        logger: (message) => {
+          if (message.status === 'recognizing text') {
+            this.bulkMenuPhotoStatus = `Reading menu photo (${Math.round(message.progress * 100)}%)…`;
+            this.changeDetector.markForCheck();
+          }
+        }
+      });
+
+      const extractedRows: BulkMenuRow[] = [];
+      for (const [fileIndex, file] of this.bulkMenuPhotoFiles.entries()) {
+        this.bulkMenuPhotoStatus = `Scanning photo ${fileIndex + 1} of ${this.bulkMenuPhotoFiles.length}: ${file.name}`;
+        this.changeDetector.markForCheck();
+        let bitmap: ImageBitmap;
+        try {
+          bitmap = await createImageBitmap(file);
+        } catch {
+          throw new Error(`${file.name} could not be decoded as an image.`);
+        }
+        const pixelCount = bitmap.width * bitmap.height;
+        bitmap.close();
+        if (pixelCount > this.maxImagePixels) {
+          throw new Error(`${file.name} is too large to scan safely. Choose an image with fewer than 40 million pixels.`);
+        }
+
+        const { data } = await worker.recognize(file);
+        const lines = data.text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+        for (const line of lines) {
+          const priceMatch = line.match(/^(.*?)\s+(?:(?:QAR|QR)\s*)?([0-9]{1,5}(?:[.,][0-9]{1,2})?)\s*(?:QAR|QR)?$/i);
+          const name = (priceMatch?.[1] || line).replace(/[|•·]+$/g, '').trim();
+          if (!name) continue;
+          const price = priceMatch ? Number(priceMatch[2].replace(',', '.')) : '';
+          extractedRows.push({
+            rowNumber: extractedRows.length + 2,
+            restaurantId: this.selectedRestaurant._id,
+            itemId: '',
+            category: 'Menu',
+            name,
+            description: '',
+            price,
+            discountPrice: null,
+            foodType: '',
+            preparationMinutes: null,
+            availability: 'AVAILABLE',
+            availabilityStart: '',
+            availabilityEnd: '',
+            imageUrl: '',
+            customizationOptions: '',
+            errors: [],
+            extractionWarnings: [
+              `Read from ${file.name}; check this text against the original photo.`,
+              `OCR confidence: ${Math.round(data.confidence)}%.`,
+              'Category was not reliably detected; edit it before import.',
+              ...(!priceMatch ? ['No clear price was detected; enter the price or remove this line.'] : [])
+            ]
+          });
+          if (extractedRows.length > 500) {
+            throw new Error('More than 500 text lines were detected. Split the photos into smaller batches so no menu items are omitted.');
+          }
+        }
+      }
+
+      if (!extractedRows.length) {
+        throw new Error('No menu text was found. Try a sharper, well-lit photo or use the CSV template.');
+      }
+      this.bulkMenuRows = extractedRows;
+      this.validateBulkMenuRows();
+      this.bulkMenuPhotoStatus = `Scanned ${this.bulkMenuPhotoFiles.length} photo${this.bulkMenuPhotoFiles.length === 1 ? '' : 's'}. Review and correct every item before importing.`;
+    } catch (error) {
+      this.error = error instanceof Error
+        ? error.message
+        : 'The menu photo could not be scanned. You can still enter items manually or use the CSV template.';
+      this.bulkMenuPhotoStatus = 'Photo scan did not finish. The manual menu and spreadsheet options are still available.';
+    } finally {
+      if (worker) await worker.terminate();
+      this.bulkMenuPhotoLoading = false;
+      this.changeDetector.markForCheck();
+    }
+  }
+
+  private async isSupportedMenuPhoto(file: File): Promise<boolean> {
+    if (!['image/jpeg', 'image/png'].includes(file.type) || !/\.(jpe?g|png)$/i.test(file.name)) return false;
+    const signature = new Uint8Array(await file.slice(0, 8).arrayBuffer());
+    const isJpeg = signature.length >= 3 && signature[0] === 0xff && signature[1] === 0xd8 && signature[2] === 0xff;
+    const isPng = signature.length >= 8 &&
+      signature[0] === 0x89 && signature[1] === 0x50 && signature[2] === 0x4e && signature[3] === 0x47 &&
+      signature[4] === 0x0d && signature[5] === 0x0a && signature[6] === 0x1a && signature[7] === 0x0a;
+    return isJpeg || isPng;
+  }
+
   previewBulkMenu(): void {
     if (!this.bulkMenuFile || this.bulkMenuPreviewLoading) return;
     const form = new FormData();
@@ -2893,6 +3113,35 @@ export class AppComponent implements OnInit, OnDestroy {
 
   get bulkMenuInvalidCount(): number {
     return this.bulkMenuRows.length - this.bulkMenuValidCount;
+  }
+
+  addBulkMenuRow(): void {
+    if (!this.selectedRestaurant || this.bulkMenuRows.length >= 500) return;
+    this.bulkMenuRows.push({
+      rowNumber: this.bulkMenuRows.length + 2,
+      restaurantId: this.selectedRestaurant._id,
+      itemId: '',
+      category: '',
+      name: '',
+      description: '',
+      price: '',
+      discountPrice: null,
+      foodType: '',
+      preparationMinutes: null,
+      availability: 'AVAILABLE',
+      availabilityStart: '',
+      availabilityEnd: '',
+      imageUrl: '',
+      customizationOptions: '',
+      errors: [],
+      extractionWarnings: []
+    });
+    this.validateBulkMenuRows();
+  }
+
+  removeBulkMenuRow(index: number): void {
+    this.bulkMenuRows.splice(index, 1);
+    this.validateBulkMenuRows();
   }
 
   importBulkMenu(): void {
@@ -3002,7 +3251,6 @@ export class AppComponent implements OnInit, OnDestroy {
 
   loadAdmin(): void {
     this.view = 'adminPortal';
-    this.loadAdminWhatsappConfig();
     this.loadAdminPartnerRegistrations();
     this.loadAdminBrandLogo();
     this.loadAdminCustomerTerms();
@@ -3047,74 +3295,6 @@ export class AppComponent implements OnInit, OnDestroy {
         this.advertisements = data.advertisements;
       },
       error: (error) => this.showError(error)
-    });
-  }
-
-  loadAdminWhatsappConfig(): void {
-    this.http.get<WhatsappConfigStatus>(`${this.api}/admin/whatsapp-config`, { headers: this.headers() }).subscribe({
-      next: (status) => {
-        this.adminWhatsappStatus = status;
-        this.whatsappOtpDeliveryEnabled = status.otpDeliveryEnabled;
-        this.whatsappTemplateName = status.templateName;
-        this.whatsappLanguage = status.language;
-        this.whatsappGraphVersion = status.graphVersion;
-      },
-      error: (error) => this.showError(error)
-    });
-  }
-
-  saveAdminWhatsappConfig(): void {
-    if (!this.whatsappAccessToken.trim() && !this.adminWhatsappStatus?.accessTokenConfigured) {
-      this.error = 'Enter the WhatsApp Cloud API access token.';
-      return;
-    }
-    if (!this.whatsappPhoneNumberId.trim() && !this.adminWhatsappStatus?.phoneNumberIdConfigured) {
-      this.error = 'Enter the WhatsApp Phone Number ID from Meta API Setup.';
-      return;
-    }
-    this.loading = true;
-    this.error = '';
-    this.http.put<{ message: string }>(`${this.api}/admin/whatsapp-config`, {
-      accessToken: this.whatsappAccessToken,
-      phoneNumberId: this.whatsappPhoneNumberId,
-      templateName: this.whatsappTemplateName,
-      language: this.whatsappLanguage,
-      graphVersion: this.whatsappGraphVersion
-    }, { headers: this.headers() }).pipe(finalize(() => {
-      this.loading = false;
-      this.changeDetector.markForCheck();
-    })).subscribe({
-      next: ({ message }) => {
-        this.whatsappAccessToken = '';
-        this.whatsappPhoneNumberId = '';
-        this.notice = message;
-        this.loadAdminWhatsappConfig();
-      },
-      error: (error) => this.showError(error)
-    });
-  }
-
-  setWhatsappOtpDelivery(event: Event): void {
-    const enabled = (event.currentTarget as HTMLInputElement).checked;
-    this.loading = true;
-    this.error = '';
-    this.http.put<{ deliveryEnabled: boolean; message: string }>(`${this.api}/admin/whatsapp-config/otp-delivery`, {
-      enabled
-    }, { headers: this.headers() }).pipe(finalize(() => {
-      this.loading = false;
-      this.changeDetector.markForCheck();
-    })).subscribe({
-      next: ({ deliveryEnabled, message }) => {
-        this.whatsappOtpDeliveryEnabled = deliveryEnabled;
-        if (this.adminWhatsappStatus) {
-          this.adminWhatsappStatus = { ...this.adminWhatsappStatus, otpDeliveryEnabled: deliveryEnabled };
-        }
-        this.notice = message;
-      },
-      error: (error) => {
-        this.whatsappOtpDeliveryEnabled = this.adminWhatsappStatus?.otpDeliveryEnabled ?? true;
-        this.showError(error);
-      }
     });
   }
 

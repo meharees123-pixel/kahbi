@@ -286,6 +286,9 @@ h1 em, h2 em { color: #cde08e; font-weight: 500; }
 .form-field { display: flex; flex-direction: column; gap: 7px; margin-bottom: 14px; }
 .form-field label { color: #5e6d63; font-size: 10px; font-weight: 600; }
 .form-field input, .form-field textarea, .form-field select, .add-menu-form input { width: 100%; min-width: 0; padding: 11px 12px; border: 1px solid #e3e7de; border-radius: 8px; outline: 0; color: var(--ink); background: #fffefa; font-size: 11px; }
+.phone-input-row { display: grid; grid-template-columns: minmax(118px, 42%) minmax(0, 1fr); gap: 8px; }
+.phone-input-row input, .phone-input-row select { min-width: 0; padding: 11px 9px; }
+.phone-input-row select { font-size: 10px; }
 .form-field input:focus, .form-field textarea:focus { border-color: #7a9b7e; box-shadow: 0 0 0 3px #789e781c; }
 .form-field textarea { resize: vertical; }
 .optional { color: #9ba49b; font-weight: 400; }
@@ -465,6 +468,17 @@ h1 em, h2 em { color: #cde08e; font-weight: 500; }
 .bulk-menu-file-controls { padding: 10px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); }
 .bulk-menu-filename { flex: 1; min-width: 140px; overflow-wrap: anywhere; }
 .bulk-menu-help { margin: 0; }
+.bulk-menu-photo { display: grid; gap: 10px; padding: 12px; border: 1px solid #dce6d5; border-radius: 8px; background: #f5f8ef; }
+.bulk-menu-photo > div:first-child { display: grid; gap: 5px; }
+.bulk-menu-photo > div:first-child strong { color: var(--green); font-size: 11px; }
+.bulk-menu-photo p { margin: 0; color: var(--muted); font-size: 9px; line-height: 1.5; }
+.bulk-menu-photo-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.bulk-menu-photo-list { display: grid; gap: 5px; margin: 0; padding: 0; list-style: none; }
+.bulk-menu-photo-list li { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 7px 9px; border-radius: 6px; background: white; color: var(--muted); font-size: 9px; }
+.bulk-menu-photo-list li span { overflow-wrap: anywhere; }
+.bulk-menu-photo-list button { flex: 0 0 auto; }
+.bulk-menu-photo-status { color: var(--green); font-size: 9px; line-height: 1.5; }
+.bulk-menu-photo-note { color: var(--muted); font-size: 8px; line-height: 1.5; }
 .bulk-image-zip { padding: 10px; border: 1px dashed var(--line); border-radius: 8px; }
 .bulk-image-zip > strong { margin-right: auto; }
 .bulk-menu-preview { display: grid; gap: 10px; }
@@ -484,13 +498,14 @@ h1 em, h2 em { color: #cde08e; font-weight: 500; }
 .bulk-menu-fields { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
 .bulk-menu-fields label { display: grid; min-width: 0; gap: 4px; color: var(--muted); font-size: 9px; }
 .bulk-row-errors { display: grid; gap: 3px; margin: 0; padding-left: 17px; color: #a84e3c; font-size: 9px; }
+.bulk-row-warnings { display: grid; gap: 3px; margin: 0; padding-left: 17px; color: #866629; font-size: 9px; }
 .bulk-menu-result { display: flex; align-items: center; flex-wrap: wrap; gap: 10px 16px; padding: 11px; border-radius: 8px; background: #eef4e9; color: var(--muted); font-size: 9px; }
 .menu-copy del { margin-left: 5px; color: var(--muted); font-size: 10px; font-weight: 400; }
 .menu-copy > small { display: block; margin-top: 5px; color: var(--muted); font-size: 9px; }
 @media (max-width: 600px) {
   .bulk-menu-panel { padding: 10px; }
-  .bulk-menu-toolbar, .bulk-menu-file-controls, .bulk-image-zip, .bulk-menu-strategy { align-items: stretch; flex-direction: column; }
-  .bulk-menu-toolbar .button, .bulk-menu-file-controls .button, .bulk-image-zip .button, .bulk-menu-strategy .button { width: 100%; }
+  .bulk-menu-toolbar, .bulk-menu-file-controls, .bulk-image-zip, .bulk-menu-strategy, .bulk-menu-photo-controls { align-items: stretch; flex-direction: column; }
+  .bulk-menu-toolbar .button, .bulk-menu-file-controls .button, .bulk-image-zip .button, .bulk-menu-strategy .button, .bulk-menu-photo-controls .button { width: 100%; }
   .bulk-menu-fields { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .restaurant-image-manager { grid-template-columns: minmax(0, 1fr); justify-items: start; }
   .restaurant-image-preview, .restaurant-image-placeholder { max-width: 100%; }
