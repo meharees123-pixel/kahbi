@@ -18,8 +18,7 @@
             "polyfills": ["zone.js"],
             "tsConfig": "tsconfig.app.json",
             "assets": [],
-            "styles": ["node_modules/leaflet/dist/leaflet.css", "src/styles.css"],
-            "allowedCommonJsDependencies": ["leaflet"]
+            "styles": ["src/styles.css"]
           },
           "configurations": {
             "production": {
