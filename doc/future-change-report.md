@@ -51,7 +51,7 @@ This report is intended as a reusable working document for planned changes to th
 
 ## 3. Dependency map
 
-- customer login -> OTP -> `WhatsappOtp` -> `User`
+- customer login -> Firebase Phone Authentication -> verified Firebase ID token -> `User`
 - restaurant onboarding -> `Restaurant` + `User`
 - order creation -> `Restaurant` + `MenuItem` + `Promotion` + `User` + `Order`
 - order status updates -> `Order` + `AuditLog` + `BillingTransaction`

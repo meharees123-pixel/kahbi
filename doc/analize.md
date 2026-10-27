@@ -8,7 +8,7 @@ KABHI is a Qatari food-ordering MVP for a multi-restaurant marketplace. The prod
 - restaurant onboarding and approval
 - order lifecycle management
 - admin management and billing
-- WhatsApp OTP-based customer sign-in
+- Firebase Phone Authentication for customer sign-in and phone verification
 - delivery radius checks using map coordinates
 - demo/default data for local development
 
@@ -78,7 +78,7 @@ Authentication is enforced via a `auth(required = true)` helper that:
 - verifies the JWT with the app secret
 - loads the user from MongoDB
 - rejects suspended or inactive accounts
-- enforces `whatsapp_otp` auth for customers
+- requires Firebase phone verification before the API issues customer sessions
 
 Role-based access is enforced by `roles(...allowed)` and is used heavily across restaurant and admin routes.
 
@@ -89,8 +89,7 @@ The app is a single Express server with route grouping, not a separate router mo
 ### Public/guest surfaces
 
 - `GET /api/health`
-- `POST /api/auth/customer-otp/request`
-- `POST /api/auth/customer-otp/verify`
+- `POST /api/auth/customer-phone/verify`
 - `GET /api/restaurants`
 - `GET /api/restaurants/:id/menu`
 - `POST /api/orders/track`
@@ -135,18 +134,9 @@ The app is a single Express server with route grouping, not a separate router mo
 
 ## 5. Business rules and workflow behavior
 
-### Customer OTP login
+### Customer phone authentication
 
-The customer onboarding flow is passwordless and uses WhatsApp OTP verification. The app:
-
-- normalizes phone numbers
-- throttles repeated OTP requests
-- stores a hashed challenge in `WhatsappOtp`
-- validates an OTP against the challenge + signing secret
-- creates or reuses a `CUSTOMER` user account when valid
-- issues an 8-hour JWT with `amr = whatsapp_otp`
-
-The app explicitly supports a development-only fallback for `NODE_ENV=development` where OTP delivery can be disabled and the code is returned to the client UI for testing. Production mode disallows this.
+The customer onboarding flow is passwordless and uses Firebase Phone Authentication. The Angular app sends SMS through the Firebase Web SDK, verifies the code with Firebase, and submits the resulting ID token to the API. The API verifies the token with Firebase Admin, requires the phone sign-in provider and a fresh authentication time, then creates or reuses the customer account and issues an 8-hour KABHI JWT with `amr = firebase_phone`. Restaurant Login ID recovery and password reset follow the same Firebase verification path; recovery challenges are short-lived, server-generated records that bind the verified phone to the requested action.
 
 ### Restaurant and location flow
 
@@ -196,15 +186,14 @@ The key collections are defined in [server/src/models.js](../server/src/models.j
 - `Rating` — restaurant rating aggregates
 - `AuditLog` — operational history
 - `MessageLog` — outbound message status
-- `WhatsappOtp` — OTP challenge storage
-- `WhatsappSettings` and `WhatsappOtpControl` — encrypted WhatsApp configuration and delivery toggles
+- `PhoneAuthChallenge` — short-lived restaurant recovery challenge, bound to the Firebase-verified phone
 
 Important schema characteristics:
 
 - unique order references and idempotency keys are enforced
 - restaurant and customer identities are strongly scoped by `restaurantId` and `role`
 - order state transitions are tracked in `statusHistory`
-- `deleteAt` on `WhatsappOtp` supports TTL cleanup
+- `deleteAt` on `PhoneAuthChallenge` supports TTL cleanup
 
 ## 7. Docker and deployment notes
 
@@ -275,7 +264,7 @@ These tests validate the core business logic around order progression and delive
 The project is a working MVP with clear boundaries between guest, customer, restaurant, and admin flows. The backend is the true authority for rules and authorization, while the frontend mostly mirrors those workflows. The most important implementation constraints for future work are:
 
 - server-side validation is mandatory
-- customer auth relies on WhatsApp OTP
+- customer auth relies on Firebase Phone Authentication and server-verified ID tokens
 - order state transitions and delivery radius checks are business-critical
 - all billing and operational state updates must preserve auditability
 

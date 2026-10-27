@@ -16,27 +16,34 @@ By default the API and seeder use the local MongoDB container and the `kabhi` da
 
 For a deployed server, configure `MONGODB_URI` as a private server-side environment variable on both the API service and any seed/migration job; do not put it in the frontend or source code. Use the same Atlas database path and confirm the deployed server's IP/network access is allowed in Atlas.
 
-Customer accounts sign in with a WhatsApp one-time code; customer passwords are no longer used. When your Meta WhatsApp account is ready, sign in to the **Admin** portal and enter the Cloud API access token, Phone Number ID, and approved template details in the **WhatsApp Cloud API** settings panel. The access token and ID are encrypted before being stored in MongoDB; the token is never sent back to the browser. Use an authorized test recipient while developing. Before saving credentials, add both signing/encryption secrets to the root `.env` and restart the stack. Generate each secret independently with `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`. Keep `.env` private and do not commit it. Preserve `WHATSAPP_CONFIG_ENCRYPTION_KEY`: changing it makes already-saved credentials unreadable. When delivery is enabled, missing credentials or an unapproved template cause an explicit error; verification codes are never logged or returned.
+Customer sign-in, checkout verification, and restaurant Login ID/password recovery use Firebase Phone Authentication and SMS; customer passwords are not used. WhatsApp OTP delivery and its Admin settings have been removed. Restaurant recovery codes are verified by Firebase, expire after five minutes by default, can be configured with `RECOVERY_OTP_TTL_MINUTES` (1–15 minutes), and are limited to five requests per phone per hour. Password reset requires a 10–200 character password containing a letter and a number, stores it using the existing bcrypt password hasher, and invalidates previously issued sessions. Recovery requests and successful/failed recovery events are written to the audit log. Recovery responses do not disclose account details. Pending, inactive, or suspended partners are directed to Contact KABHI; when a registered phone is inaccessible, Support must verify the partner's identity using independently verified business records before helping update the registered contact method. Admins cannot read password hashes or retrieve passwords.
 
-Restaurant partners can sign in with their Login ID (the account email) or registered WhatsApp number. Forgot Login ID and Forgot Password send a one-time code to the registered WhatsApp number; recovery codes expire after five minutes by default, can be configured with `RECOVERY_OTP_TTL_MINUTES` (1–15 minutes), and are limited to five requests per number per hour and five OTP attempts per code. Password reset requires a 10–200 character password containing a letter and a number, stores it using the existing bcrypt password hasher, and invalidates previously issued sessions. Recovery requests and successful/failed recovery events are written to the audit log. Recovery responses do not disclose whether an account exists. Pending, inactive, or suspended partners are directed to Contact KABHI; when a registered WhatsApp number is inaccessible, Support must verify the partner's identity using independently verified business records before helping update the registered contact method. Admins cannot read password hashes or retrieve passwords.
+## Firebase Console setup
 
-The Admin dashboard also has a WhatsApp OTP delivery switch. In local development, turning delivery off shows the generated code in the customer app so the flow can be tested before Meta setup is ready. This bypasses possession verification and is allowed only when `NODE_ENV=development`; other environments reject disabling delivery and never return the code. The local Compose setup defaults `NODE_ENV` to `development`; set it to `production` when deploying. In local development, if no `OTP_SIGNING_SECRET` is set, the API creates a random temporary key on startup; outstanding codes expire when the API restarts. Production requires an explicit persistent signing secret. Keep code-display mode for local development only.
+Do this once per Firebase project. Firebase's web configuration (including its API key) is public client configuration. The API uses Firebase Admin SDK to verify Firebase ID token signatures against Google's public signing certificates; it needs the Firebase project ID, but does not need a service-account key or Firebase Authentication Admin IAM role for token verification.
 
-```env
-WHATSAPP_OTP_TEMPLATE=kahbi_customer_otp
-WHATSAPP_OTP_LANGUAGE=en_US
-WHATSAPP_GRAPH_API_VERSION=v23.0
-OTP_SIGNING_SECRET=generate-a-private-random-secret-at-least-32-characters
-WHATSAPP_CONFIG_ENCRYPTION_KEY=generate-a-different-private-random-secret-at-least-32-characters
-```
+1. Open the [Firebase Console](https://console.firebase.google.com/), create a project (or select the project you want KABHI to use), and note its **Project ID**.
+2. In **Project settings → General → Your apps**, register a **Web app**. Copy its Firebase configuration values (`apiKey`, `authDomain`, `projectId`, and `appId`) into `client/src/app/firebase-config.ts`. This file is used by the browser app; do not put a service-account key or other private credential here.
+3. In **Build → Authentication → Sign-in method**, enable **Phone** and save. In **Authentication → Settings → Authorized domains**, make sure `localhost` and your deployed frontend hostname are listed. Review the SMS region policy and allow the countries where your customers and restaurant partners receive codes (for example, Qatar).
+4. For local development, use **Authentication → Sign-in method → Phone numbers for testing** to add test numbers and fixed verification codes. Otherwise Firebase sends real SMS messages and project SMS quotas/billing rules apply. Never use a production user's number as a test account.
+5. Configure the API with the same **Project ID** in the ignored root `.env`:
 
-For Docker, `MONGODB_URI` in `.env` must be `mongodb://mongodb:27017/kabhi` when using the local container (not `localhost` from inside the API container). Put the generated secrets into `.env`, then run `npm run local` again. Sign in at [http://localhost:4200/login/admin](http://localhost:4200/login/admin), open the **WhatsApp Cloud API** panel, and save your Meta access token, numeric Phone Number ID, template name, language, and Graph API version. Customer login and checkout verification require only an international-format WhatsApp number; a new customer account is created after the code is verified. Every subsequent customer sign-in also requires an OTP.
+   ```env
+   FIREBASE_PROJECT_ID=kabhiofficial
+   ```
 
-The first startup seeds a clearly labeled demo restaurant, menu, promotion, and accounts. Seeding is safe to repeat. Restaurant and admin demo passwords are `Demo123!`; the demo customer's number is `+97450000002` and needs to be able to receive a code through your configured WhatsApp test/sender setup:
+   The local Docker Compose configuration defaults to `kabhiofficial`; set `FIREBASE_PROJECT_ID` explicitly if your Firebase project has a different ID. No downloaded service-account key or extra IAM permission is required for Firebase token verification.
+6. Keep `RECOVERY_OTP_TTL_MINUTES=5` (or choose a whole number from 1 to 15). For the local MongoDB container, `MONGODB_URI` must be `mongodb://mongodb:27017/kabhi`, not `localhost`.
+7. Save the `.env` values, enter the web configuration in `firebase-config.ts`, then run `npm run local` (Docker rebuilds both services). For non-Docker development, install dependencies with `npm run install:all`, then run `npm run dev`.
+8. Open [Customer sign-in](http://localhost:4200/login/customer), select the phone country code (Qatar `+974` is selected by default), enter the national number without the calling code, request an SMS code, and sign in. Verify a new customer can also request a code during checkout. Test **Forgot Login ID** and **Forgot Password** from the restaurant portal; both now require the registered phone number. Firebase verifies the ID token on the API before it creates a customer session or grants account recovery.
+
+For production, add the deployed frontend hostname to Firebase's Authorized domains, configure `FIREBASE_PROJECT_ID` in the API environment, and rebuild/redeploy the frontend after updating `firebase-config.ts`. The API verifies ID token signatures and claims but does not call Firebase to check immediate token revocation; customer and recovery flows separately require a recent phone authentication. If you previously stored a Meta WhatsApp access token for OTP delivery, revoke it in Meta because this app no longer uses it.
+
+The first startup seeds a clearly labeled demo restaurant, menu, promotion, and accounts. Seeding is safe to repeat. Restaurant and admin demo passwords are `Demo123!`; for the demo customer number `+97450000002`, add a Firebase test phone number or use a number that can receive Firebase SMS:
 
 | Portal | Sign-in URL | Demo identity |
 | --- | --- | --- |
-| Customer | [http://localhost:4200/login/customer](http://localhost:4200/login/customer) | WhatsApp `+97450000002` |
+| Customer | [http://localhost:4200/login/customer](http://localhost:4200/login/customer) | Phone `+97450000002` |
 | Restaurant owner — KABHI Demo Hotel | [http://localhost:4200/login/restaurant](http://localhost:4200/login/restaurant) | `restaurant@kahbi.demo` |
 | Restaurant owner — Pearl Garden Kitchen | [http://localhost:4200/login/restaurant](http://localhost:4200/login/restaurant) | `owner.pearl@kahbi.demo` |
 | Restaurant owner — Souq Flame Grill | [http://localhost:4200/login/restaurant](http://localhost:4200/login/restaurant) | `owner.souq@kahbi.demo` |
@@ -44,7 +51,7 @@ The first startup seeds a clearly labeled demo restaurant, menu, promotion, and 
 | Restaurant owner — Lusail Spice House | [http://localhost:4200/login/restaurant](http://localhost:4200/login/restaurant) | `owner.lusail@kahbi.demo` |
 | Admin | [http://localhost:4200/login/admin](http://localhost:4200/login/admin) | `admin@kahbi.demo` |
 
-Use `Demo123!` for all demo accounts. Each restaurant-owner account is scoped to its own restaurant; the admin account can manage all restaurants. The login API also enforces the selected portal, so a restaurant or admin account cannot sign in through the customer portal. Customer accounts are created after WhatsApp verification. Restaurant partners apply publicly and can create a login only after Admin approval; admin signup is disabled.
+Use `Demo123!` for all demo accounts. Each restaurant-owner account is scoped to its own restaurant; the admin account can manage all restaurants. The login API also enforces the selected portal, so a restaurant or admin account cannot sign in through the customer portal. Customer accounts are created after Firebase phone verification. Restaurant partners apply publicly and can create a login only after Admin approval; admin signup is disabled.
 
 ## Run without Docker
 
@@ -74,7 +81,7 @@ The public OpenStreetMap tile and Nominatim services have usage policies and are
 ## Working MVP flow
 
 - Browse approved restaurants and menus as a guest, search and filter by cuisine/status, and add menu items to a single-restaurant cart.
-- Customer sign-in is passwordless and requires a WhatsApp OTP every time. Before the first checkout order on a new customer session, verify the WhatsApp number; this creates the customer account and links that order to it. The API validates restaurant and item availability, quantities, service radius, promotion and all amounts before creating an order. An idempotency key prevents duplicate submissions.
+- Customer sign-in is passwordless and requires Firebase phone verification every time. Before the first checkout order on a new customer session, verify the phone number; this creates the customer account and links that order to it. The API verifies Firebase ID tokens and validates restaurant and item availability, quantities, service radius, promotion and all amounts before creating an order. An idempotency key prevents duplicate submissions.
 - Track a guest order by its order reference and phone number; signed-in customers have private order history and may rate completed orders.
 - Sign in as the restaurant owner to view only that restaurant's orders and advance valid order states through accept, prepare, ready, delivery, and completion. Menu availability can be changed from the restaurant view.
 - Sign in as admin to view live database metrics, manage restaurants from a searchable card directory with a separate profile/menu editor, approve/reject/suspend restaurants, and accept/reject or advance orders through their valid lifecycle. Billing snapshots and audit events are recorded for completed orders and administrative decisions.
