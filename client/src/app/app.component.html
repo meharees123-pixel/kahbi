@@ -531,7 +531,7 @@
       <section class="auth-modal" role="dialog" aria-modal="true" aria-labelledby="auth-dialog-title" (click)="$event.stopPropagation()">
         <button class="auth-modal-close" type="button" aria-label="Close sign in" (click)="closeLogin()">×</button>
         <div class="auth-wrap">
-      <div class="auth-aside"><span class="brand-mark">K</span><span class="eyebrow">{{ loginPortal === 'ADMIN' ? 'KABHI ADMIN' : loginPortal === 'RESTAURANT' ? 'RESTAURANT PORTAL' : 'WELCOME TO KABHI' }}</span><h2>{{ loginPortal === 'ADMIN' ? 'Platform oversight.' : loginPortal === 'RESTAURANT' ? 'Your kitchen, managed.' : 'Made for good moments.' }}</h2><p>{{ loginPortal === 'ADMIN' ? 'Manage restaurants, menus, and orders across KABHI.' : loginPortal === 'RESTAURANT' ? 'After signing in, open your Restaurant Dashboard and choose Import Menu to upload photos or take a menu picture.' : 'Discover the kitchens worth knowing in Qatar.' }}</p></div>
+      <div class="auth-aside"><span class="brand-mark">K</span><span class="eyebrow">{{ loginPortal === 'ADMIN' ? 'KABHI ADMIN' : loginPortal === 'RESTAURANT' ? 'RESTAURANT PORTAL' : 'WELCOME TO KABHI' }}</span><h2>{{ loginPortal === 'ADMIN' ? 'Platform oversight.' : loginPortal === 'RESTAURANT' ? 'Your kitchen, managed.' : 'Made for good moments.' }}</h2><p>{{ loginPortal === 'ADMIN' ? 'Manage restaurants, menus, and orders across KABHI.' : loginPortal === 'RESTAURANT' ? 'After signing in, open your Restaurant Dashboard and choose Import Menu to upload a menu file for review.' : 'Discover the kitchens worth knowing in Qatar.' }}</p></div>
       <div class="auth-card">
         <span class="eyebrow">{{ authModalView === 'login' ? loginPortal + ' SIGN IN' : 'JOIN KABHI' }}</span><h1 id="auth-dialog-title">{{ authModalView === 'login' ? (loginPortal === 'CUSTOMER' ? 'Sign in with your phone.' : 'Sign in to your portal.') : (signupRestaurant ? 'List your restaurant.' : 'Create an account.') }}</h1>
         <div class="form-field" *ngIf="authModalView === 'signup'"><label>{{ signupRestaurant ? 'Owner name' : 'Full name' }}</label><input [(ngModel)]="signupName" placeholder="Your name"></div>
@@ -720,18 +720,33 @@
           <section class="bulk-menu-panel" *ngIf="bulkMenuOpen">
             <div class="bulk-menu-toolbar"><div><strong>Import a menu in one operation</strong><small>Review every extracted item before importing. New items follow KABHI's Admin menu-approval process.</small></div><button class="button button-quiet button-small" (click)="downloadMenuTemplate()">Download CSV template</button></div>
             <div class="bulk-menu-photo">
-              <div><strong>Import from menu photos</strong><p>Choose photos from your device or take a new picture. English text is scanned on your device; check the results and correct them before importing.</p></div>
+              <div><strong>Upload menu files</strong><p>Select menu photos or a document. Gemini extracts editable item drafts; review and correct each one before adding it to your menu.</p></div>
               <div class="bulk-menu-photo-controls">
-                <label class="button button-quiet button-small image-file-button">Choose photos<input type="file" accept="image/jpeg,image/png,.jpg,.jpeg,.png" multiple (change)="selectBulkMenuPhotos($event)"></label>
-                <label class="button button-quiet button-small image-file-button">Take a photo<input type="file" accept="image/jpeg,image/png" capture="environment" (change)="selectBulkMenuPhotos($event)"></label>
-                <button class="button button-accent button-small" [disabled]="!bulkMenuPhotoFiles.length || bulkMenuPhotoLoading" (click)="extractBulkMenuPhotos()">{{ bulkMenuPhotoLoading ? 'Scanning photos…' : 'Scan and review menu' }}</button>
+                <label class="button button-quiet button-small image-file-button">Choose menu files<input type="file" accept=".jpg,.jpeg,.png,.pdf,.docx,.xlsx,.csv,image/jpeg,image/png,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,text/csv" multiple (change)="selectMenuImportFiles($event)"></label>
+                <button class="button button-accent button-small" [disabled]="!menuImportFiles.length || menuUploadLoading" (click)="extractMenuSource()">{{ menuUploadLoading ? 'Extracting…' : 'Extract and review' }}</button>
               </div>
-              <ul class="bulk-menu-photo-list" *ngIf="bulkMenuPhotoFiles.length">
-                <li *ngFor="let file of bulkMenuPhotoFiles; let fileIndex = index"><span>{{ file.name }}</span><button type="button" class="text-button" [disabled]="bulkMenuPhotoLoading" (click)="removeBulkMenuPhoto(fileIndex)">Remove</button></li>
+              <ul class="bulk-menu-photo-list" *ngIf="menuImportFiles.length">
+                <li *ngFor="let file of menuImportFiles; let fileIndex = index"><span>{{ file.name }}</span><button type="button" class="text-button" [disabled]="menuUploadLoading" (click)="removeMenuImportFile(fileIndex)">Remove</button></li>
               </ul>
-              <small class="bulk-menu-photo-status" *ngIf="bulkMenuPhotoStatus" aria-live="polite">{{ bulkMenuPhotoStatus }}</small>
-              <small class="bulk-menu-photo-note">JPEG or PNG · up to 10 photos · 10 MB per photo · 20 MB total. First use downloads the English OCR model; images stay in your browser.</small>
+              <small class="bulk-menu-photo-status" *ngIf="menuUploadStatus" aria-live="polite">{{ menuUploadStatus }}</small>
+              <small class="bulk-menu-photo-note">JPG, PNG, PDF, DOCX, XLSX, or CSV · up to 10 files · 10 MB per file · 20 MB total. Files are sent to Gemini for extraction and are not saved unless you add the reviewed items.</small>
             </div>
+            <section class="menu-upload-review" *ngIf="menuUploadDrafts.length">
+              <div class="menu-upload-heading"><div><strong>Review extracted menu items</strong><small>Edit extracted details before adding them to your menu.</small></div></div>
+              <article class="menu-upload-draft" *ngFor="let draft of menuUploadDrafts; let draftIndex = index">
+                <div class="bulk-menu-fields">
+                  <label>Item Name<input [(ngModel)]="draft.name" maxlength="120" [disabled]="draft.status !== 'READY'"></label>
+                  <label>Size/portion<input [(ngModel)]="draft.sizeOrPortion" maxlength="80" [disabled]="draft.status !== 'READY'"></label>
+                  <label>Category<input [(ngModel)]="draft.category" maxlength="80" [disabled]="draft.status !== 'READY'"></label>
+                  <label>Price (QAR)<input [(ngModel)]="draft.price" type="text" inputmode="decimal" [disabled]="draft.status !== 'READY'"></label>
+                  <label>Description<input [(ngModel)]="draft.description" maxlength="1000" [disabled]="draft.status !== 'READY'"></label>
+                </div>
+                <ul class="bulk-row-warnings" *ngIf="draft.warnings.length"><li *ngFor="let warning of draft.warnings">{{ warning }}</li></ul>
+                <small class="menu-upload-draft-result" *ngIf="draft.error" [class.menu-upload-draft-error]="draft.status === 'READY'">{{ draft.error }}</small>
+                <div class="menu-upload-draft-actions"><button type="button" class="button button-accent button-small" [disabled]="draft.status !== 'READY' || menuUploadLoading" (click)="saveMenuUploadDraft(draft)">{{ draft.status === 'SAVING' ? 'Adding…' : draft.status === 'SAVED' ? 'Added' : 'Add to menu' }}</button><button type="button" class="text-button" [disabled]="draft.status === 'SAVING'" (click)="removeMenuUploadDraft(draftIndex)">Remove</button></div>
+              </article>
+              <button type="button" class="button button-dark button-small" *ngIf="menuUploadReadyCount > 0" [disabled]="menuUploadLoading" (click)="saveAllMenuUploadDrafts()">Add all remaining items</button>
+            </section>
             <div class="bulk-menu-file-controls">
               <label class="button button-quiet button-small image-file-button">Choose CSV or Excel file<input type="file" accept=".csv,.xlsx,text/csv,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" (change)="selectBulkMenuFile($event)"></label>
               <span class="bulk-menu-filename">{{ bulkMenuFile?.name || 'No menu file selected' }}</span>
@@ -765,7 +780,8 @@
                   <label>Category<input [(ngModel)]="row.category" (ngModelChange)="validateBulkMenuRows()"></label>
                   <label>Item Name<input [(ngModel)]="row.name" (ngModelChange)="validateBulkMenuRows()"></label>
                   <label>Description<input [(ngModel)]="row.description" (ngModelChange)="validateBulkMenuRows()"></label>
-                  <label>Price (QAR)<input [(ngModel)]="row.price" (ngModelChange)="validateBulkMenuRows()" type="number" min="0" step="0.01"></label>
+                  <label>Price (QAR)<input [(ngModel)]="row.price" (ngModelChange)="validateBulkMenuRows()" type="text" inputmode="decimal"></label>
+                  <label>Size/portion<input [(ngModel)]="row.customizationOptions" (ngModelChange)="validateBulkMenuRows()" placeholder="e.g. Small, Large, Full"></label>
                   <label>Availability Start (HH:MM)<input [(ngModel)]="row.availabilityStart" (ngModelChange)="validateBulkMenuRows()" placeholder="e.g. 09:00"></label>
                   <label>Availability End (HH:MM)<input [(ngModel)]="row.availabilityEnd" (ngModelChange)="validateBulkMenuRows()" placeholder="e.g. 22:00"></label>
                   <label>Image URL (Optional)<input [(ngModel)]="row.imageUrl" (ngModelChange)="validateBulkMenuRows()" type="url" placeholder="https://…"></label>
@@ -788,7 +804,10 @@
             <div><strong>{{ item.name }}</strong><small>{{ money(menuPrice(item)) }}{{ item.discountPrice !== null && item.discountPrice !== undefined ? ' (regular ' + money(item.price) + ')' : '' }} · {{ item.category }}</small><small *ngIf="item.availabilityStart && item.availabilityEnd">Scheduled {{ item.availabilityStart }}–{{ item.availabilityEnd }} Qatar time</small><small *ngIf="item.foodType">{{ item.foodType === 'NON_VEGETARIAN' ? 'Non-Vegetarian' : (item.foodType | titlecase) }}</small><small class="menu-review-label" *ngIf="item.approvalStatus === 'PENDING_REVIEW'">Pending Admin approval — hidden from customers</small><small class="inactive-item-label" *ngIf="item.approvalStatus === 'REJECTED'">Rejected — hidden from customers</small><label class="image-file-button">Choose photo<input type="file" accept="image/jpeg,image/png,image/webp" (change)="chooseMenuImage(item._id, $event)"></label><button class="text-button image-action" *ngIf="menuImageDrafts[item._id] !== undefined" (click)="saveMenuImage(item)">Save photo</button><button class="text-button image-action" *ngIf="item.imageData && menuImageDrafts[item._id] === undefined" (click)="removeMenuImage(item)">Remove photo</button></div>
             <select [ngModel]="item.availability" (ngModelChange)="changeItemAvailability(item, $event)"><option value="AVAILABLE">Available</option><option value="UNAVAILABLE">Unavailable</option><option value="TEMPORARILY_UNAVAILABLE">Temporarily unavailable</option></select>
           </div>
-          <div class="add-menu-form"><strong>Add an item</strong><input [(ngModel)]="newItemName" placeholder="Item name"><input [(ngModel)]="newItemCategory" placeholder="Category"><input [(ngModel)]="newItemPrice" type="number" min="0" placeholder="Price (QAR)"><input [(ngModel)]="newItemDescription" placeholder="Description"><label class="image-file-button">Choose item photo<input type="file" accept="image/jpeg,image/png,image/webp" (change)="chooseNewItemImage($event)"></label><img *ngIf="newItemImageData" class="menu-management-image new-item-image" [src]="newItemImageData" alt="New item photo preview"><button class="button button-accent" (click)="addMenuItem()">Add to menu</button></div>
+          <div class="add-menu-form">
+            <div class="add-menu-heading"><strong>Add an item</strong></div>
+            <input [(ngModel)]="newItemName" placeholder="Item name"><input [(ngModel)]="newItemCategory" placeholder="Category"><input [(ngModel)]="newItemPrice" type="number" min="0" placeholder="Price (QAR)"><input [(ngModel)]="newItemDescription" placeholder="Description"><button class="button button-accent" (click)="addMenuItem()">Add to menu</button>
+          </div>
         </div>
       </div>
       <div class="portal-panel wide-panel"><div class="panel-heading"><div><span class="eyebrow">STATEMENTS</span><h2>Recent completed-order billing</h2></div></div><div class="admin-order-row" *ngFor="let transaction of restaurantBilling"><div><strong>{{ transaction.createdAt | date:'short' }}</strong><small>Gross {{ money(transaction.grossAmount, transaction.currency) }}</small></div><span>Commission {{ money(transaction.commissionAmount, transaction.currency) }}</span><strong>Net {{ money(transaction.netRestaurantAmount, transaction.currency) }}</strong></div><p class="muted" *ngIf="!restaurantBilling.length">Completed orders will appear here when billing is recorded.</p></div>
