@@ -32,6 +32,7 @@ const {
 } = require("./whatsapp");
 const { recoveryOtpTtlMs, validNewPassword, restaurantRecoveryStatus } = require("./restaurant-recovery");
 const { verifyFirebasePhoneToken } = require("./firebase-auth");
+const { createMenuExtractor } = require("./menu-extractor");
 
 const app = express();
 const secret = process.env.JWT_SECRET || "local-development-secret-change-before-deploy";
@@ -50,7 +51,9 @@ const partnerRegistrationRateLimit = rateLimit({ windowMs: 60 * 60 * 1000, limit
 const orderQuoteRateLimit = rateLimit({ windowMs: 15 * 60 * 1000, limit: 60, standardHeaders: true, legacyHeaders: false });
 const menuImportRateLimit = rateLimit({ windowMs: 60 * 60 * 1000, limit: 12, standardHeaders: true, legacyHeaders: false });
 const menuFileUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 2 * 1024 * 1024, files: 1 } });
+const menuExtractionUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024, files: 1 } });
 const menuImageArchiveUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024, files: 1 } });
+const extractMenu = createMenuExtractor();
 
 async function currentCustomerTerms() {
   const setting = await PlatformSetting.findOne({ key: "customerTerms" }).select("value").lean();
@@ -1786,6 +1789,8 @@ app.post("/api/restaurant/menu", auth(), roles("RESTAURANT_OWNER", "RESTAURANT_M
   const restaurant = await restaurantForUser(req.user);
   const { name, category, price, description } = req.body;
   if (!name || !category || !Number.isFinite(Number(price)) || Number(price) <= 0) return res.status(400).json({ error: "Item name, category and a positive price are required." });
+  const customizationOptions = String(req.body.customizationOptions || "").trim();
+  if (customizationOptions.length > 1000) return res.status(400).json({ error: "Customization Options must be 1,000 characters or fewer." });
   const image = Object.hasOwn(req.body, "imageData") ? validateImageDataUrl(req.body.imageData) : null;
   if (image?.error) return res.status(400).json({ error: image.error });
   const partnerRegistration = await RestaurantRegistration.exists({ restaurantId: restaurant._id, status: "APPROVED" });
@@ -1794,6 +1799,7 @@ app.post("/api/restaurant/menu", auth(), roles("RESTAURANT_OWNER", "RESTAURANT_M
     name: String(name).trim(),
     category: String(category).trim(),
     description: String(description || ""),
+    customizationOptions,
     price: roundMoney(Number(price)),
     currency,
     imageData: image?.imageData || "",
@@ -1830,6 +1836,19 @@ app.get("/api/restaurant/menu/bulk/template", auth(), roles(...restaurantRoles),
   res.setHeader("Content-Disposition", 'attachment; filename="kahbi-menu-template.csv"');
   res.send(`\uFEFF${rowsToCsv([], MENU_HEADERS)}`);
 }));
+
+app.post(
+  "/api/restaurant/menu/extract",
+  auth(),
+  roles("RESTAURANT_OWNER", "RESTAURANT_MANAGER"),
+  menuImportRateLimit,
+  menuExtractionUpload.single("file"),
+  asyncRoute(async (req, res) => {
+    await restaurantForUser(req.user);
+    if (!req.file) return res.status(400).json({ error: "Choose a menu file to extract." });
+    res.json(await extractMenu(req.file));
+  })
+);
 
 app.post(
   "/api/restaurant/menu/bulk/preview",

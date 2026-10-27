@@ -53,6 +53,7 @@ jobs:
       JWT_SECRET: ${{ vars.GCP_JWT_SECRET }}
       OTP_SIGNING_SECRET: ${{ vars.GCP_OTP_SIGNING_SECRET }}
       WHATSAPP_ENCRYPTION_SECRET: ${{ vars.GCP_WHATSAPP_ENCRYPTION_SECRET }}
+      GEMINI_API_KEY_SECRET: ${{ vars.GCP_GEMINI_API_KEY_SECRET }}
       CLIENT_ORIGIN: ${{ vars.GCP_CLIENT_ORIGIN }}
       API_SERVICE: ${{ vars.GCP_API_SERVICE || 'kahbi-api' }}
       WEB_SERVICE: ${{ vars.GCP_WEB_SERVICE || 'kahbi-web' }}
@@ -63,7 +64,7 @@ jobs:
       - name: Validate deployment configuration
         shell: bash
         run: |
-          required=(GCP_PROJECT_ID GCP_REGION GAR_REPOSITORY RUNTIME_SERVICE_ACCOUNT MONGODB_SECRET JWT_SECRET OTP_SIGNING_SECRET WHATSAPP_ENCRYPTION_SECRET CLIENT_ORIGIN)
+          required=(GCP_PROJECT_ID GCP_REGION GAR_REPOSITORY RUNTIME_SERVICE_ACCOUNT MONGODB_SECRET JWT_SECRET OTP_SIGNING_SECRET WHATSAPP_ENCRYPTION_SECRET GEMINI_API_KEY_SECRET CLIENT_ORIGIN)
           missing=()
           for key in "${required[@]}"; do
             if [[ -z "${!key}" ]]; then missing+=("$key"); fi
@@ -114,11 +115,13 @@ jobs:
             NODE_ENV=production
             CURRENCY=QAR
             CLIENT_ORIGIN=${{ env.CLIENT_ORIGIN }}
+            GEMINI_MODEL=gemini-2.5-flash
           secrets: |-
             MONGODB_URI=${{ env.MONGODB_SECRET }}:latest
             JWT_SECRET=${{ env.JWT_SECRET }}:latest
             OTP_SIGNING_SECRET=${{ env.OTP_SIGNING_SECRET }}:latest
             WHATSAPP_CONFIG_ENCRYPTION_KEY=${{ env.WHATSAPP_ENCRYPTION_SECRET }}:latest
+            GEMINI_API_KEY=${{ env.GEMINI_API_KEY_SECRET }}:latest
           flags: >-
             --service-account=${{ env.RUNTIME_SERVICE_ACCOUNT }}
             --port=8080

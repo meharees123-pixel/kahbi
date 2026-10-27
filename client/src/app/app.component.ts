@@ -3,7 +3,6 @@ import { HttpClient, HttpErrorResponse, HttpHeaders } from '@angular/common/http
 import { ChangeDetectorRef, Component, OnDestroy, OnInit } from '@angular/core';
 import { FormsModule } from '@angular/forms';
 import * as L from 'leaflet';
-import { createWorker } from 'tesseract.js';
 import { finalize, firstValueFrom, switchMap } from 'rxjs';
 import { LoadingIndicatorService } from './loading-indicator.service';
 import { FirebasePhoneAuthService } from './firebase-phone-auth.service';
@@ -113,6 +112,17 @@ interface BulkMenuRow {
   extractionWarnings?: string[];
   existingItemId?: string;
   existingItemName?: string;
+}
+
+interface MenuUploadDraft {
+  category: string;
+  name: string;
+  sizeOrPortion: string;
+  description: string;
+  price: number | string;
+  warnings: string[];
+  status: 'READY' | 'SAVING' | 'SAVED';
+  error?: string;
 }
 
 interface OrderItem {
@@ -311,7 +321,7 @@ export class AppComponent implements OnInit, OnDestroy {
   private readonly maxImageBytes = 256 * 1024;
   private readonly maxSourceImageBytes = 10 * 1024 * 1024;
   private readonly maxImagePixels = 40_000_000;
-  private readonly maxMenuPhotoFiles = 10;
+  private readonly maxMenuImportFiles = 10;
   private readonly maxMenuPhotoBatchBytes = 20 * 1024 * 1024;
   private readonly api = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
     ? 'http://localhost:3000/api'
@@ -557,6 +567,10 @@ export class AppComponent implements OnInit, OnDestroy {
   newItemCategory = '';
   newItemPrice = 0;
   newItemDescription = '';
+  menuUploadLoading = false;
+  menuUploadStatus = '';
+  menuUploadDrafts: MenuUploadDraft[] = [];
+  menuImportFiles: File[] = [];
   bulkMenuOpen = false;
   bulkMenuFile: File | null = null;
   bulkMenuRows: BulkMenuRow[] = [];
@@ -566,9 +580,6 @@ export class AppComponent implements OnInit, OnDestroy {
   bulkMenuReplaceConfirmed = false;
   bulkMenuSummary: { totalRows: number; imported: number; updated: number; failed: number; mode: string } | null = null;
   bulkMenuErrorReport = '';
-  bulkMenuPhotoFiles: File[] = [];
-  bulkMenuPhotoLoading = false;
-  bulkMenuPhotoStatus = '';
   bulkImageZipFile: File | null = null;
   bulkImageUploading = false;
   bulkImageResult = '';
@@ -585,7 +596,6 @@ export class AppComponent implements OnInit, OnDestroy {
   newAdvertisementDescription = '';
   restaurantImageDraft: string | null = null;
   menuImageDrafts: Record<string, string> = {};
-  newItemImageData = '';
   newAdminRestaurantName = '';
   newAdminRestaurantCuisine = '';
   newAdminRestaurantAddress = '';
@@ -2691,21 +2701,6 @@ export class AppComponent implements OnInit, OnDestroy {
     }
   }
 
-  async chooseNewItemImage(event: Event): Promise<void> {
-    const input = event.currentTarget as HTMLInputElement;
-    const file = input.files?.[0];
-    if (!file) return;
-    try {
-      this.newItemImageData = await this.optimizeImage(file);
-      this.error = '';
-    } catch (error) {
-      this.showError({ error: { error: error instanceof Error ? error.message : 'Could not process this image.' } });
-    } finally {
-      input.value = '';
-      this.changeDetector.markForCheck();
-    }
-  }
-
   async chooseAdminRestaurantImage(event: Event): Promise<void> {
     const input = event.currentTarget as HTMLInputElement;
     const file = input.files?.[0];
@@ -2849,20 +2844,211 @@ export class AppComponent implements OnInit, OnDestroy {
     });
   }
 
+  async selectMenuImportFiles(event: Event): Promise<void> {
+    const input = event.currentTarget as HTMLInputElement;
+    const selectedFiles = Array.from(input.files || []);
+    input.value = '';
+    if (!selectedFiles.length || this.menuUploadLoading) return;
+    const files = [...this.menuImportFiles, ...selectedFiles];
+    const supportedExtensions = new Set(['jpg', 'jpeg', 'png', 'pdf', 'docx', 'xlsx', 'csv']);
+    if (files.length > this.maxMenuImportFiles || files.some((file) => {
+      const extension = file.name.toLowerCase().split('.').pop() || '';
+      return !supportedExtensions.has(extension) || file.size > this.maxSourceImageBytes;
+    }) ||
+        files.reduce((total, file) => total + file.size, 0) > this.maxMenuPhotoBatchBytes) {
+      this.error = `Choose up to ${this.maxMenuImportFiles} JPG, PNG, PDF, DOCX, XLSX, or CSV files. Each file may be up to 10 MB and the combined size limit is 20 MB.`;
+      return;
+    }
+    for (const file of selectedFiles) {
+      if (['jpg', 'jpeg', 'png'].includes(file.name.toLowerCase().split('.').pop() || '') &&
+          !await this.isSupportedMenuPhoto(file)) {
+        this.error = `${file.name} is not a valid JPEG or PNG image.`;
+        return;
+      }
+    }
+
+    this.menuImportFiles = files;
+    this.menuUploadStatus = `${files.length} file${files.length === 1 ? '' : 's'} ready to extract.`;
+    this.error = '';
+  }
+
+  removeMenuImportFile(index: number): void {
+    this.menuImportFiles = this.menuImportFiles.filter((_, fileIndex) => fileIndex !== index);
+    this.menuUploadStatus = this.menuImportFiles.length
+      ? `${this.menuImportFiles.length} file${this.menuImportFiles.length === 1 ? '' : 's'} ready to extract.`
+      : '';
+  }
+
+  async extractMenuSource(): Promise<void> {
+    if (!this.menuImportFiles.length || this.menuUploadLoading) return;
+    this.menuUploadLoading = true;
+    this.menuUploadStatus = 'Reading your menu files…';
+    this.error = '';
+    try {
+      for (const [fileIndex, file] of this.menuImportFiles.entries()) {
+        this.menuUploadStatus = `Extracting file ${fileIndex + 1} of ${this.menuImportFiles.length}: ${file.name}`;
+        this.changeDetector.markForCheck();
+        const body = new FormData();
+        body.append('file', file);
+        const result = await firstValueFrom(this.http.post<{
+          extracted_items: Array<{ item_name: string; size_or_portion: string | null; price: number | string | null }>;
+        }>(`${this.api}/restaurant/menu/extract`, body, { headers: this.headers() }));
+        this.addMenuUploadDrafts(result.extracted_items.map((item) => ({
+          category: '',
+          name: item.item_name,
+          sizeOrPortion: item.size_or_portion || '',
+          description: '',
+          price: item.price ?? '',
+          warnings: [
+            `Extracted from ${file.name}; check all fields against the original file.`,
+            'Category was not extracted; enter a category.',
+            ...(item.price === null ? ['No price was extracted; enter a price.'] : []),
+            ...(typeof item.price === 'string' && !Number.isFinite(Number(item.price))
+              ? ['This is a text price placeholder; enter a numeric QAR price before adding the item.']
+              : [])
+          ]
+        })));
+      }
+
+      this.menuUploadStatus = `${this.menuUploadDrafts.length} extracted item${this.menuUploadDrafts.length === 1 ? '' : 's'}. Review and correct each item, then add it to your menu.`;
+      if (!this.menuUploadDrafts.length) {
+        this.menuUploadStatus = 'No menu items were extracted. Try a clearer file or add the item manually.';
+      }
+      this.menuImportFiles = [];
+    } catch (error) {
+      const message = this.menuUploadErrorMessage(error, 'The menu file could not be read.');
+      this.menuUploadStatus = `Extraction failed: ${message}`;
+      this.showError(error);
+    } finally {
+      this.menuUploadLoading = false;
+      this.changeDetector.markForCheck();
+    }
+  }
+
+  private addMenuUploadDrafts(rows: Array<{
+    category: string;
+    name: string;
+    sizeOrPortion?: string;
+    description: string;
+    price: number | string;
+    warnings?: string[];
+  }>): void {
+    const remaining = Math.max(0, 500 - this.menuUploadDrafts.length);
+    if (!remaining) throw new Error('You can review up to 500 extracted items at a time.');
+    const acceptedRows = rows.slice(0, remaining);
+    this.menuUploadDrafts.push(...acceptedRows.map((row) => ({
+      category: row.category || '',
+      name: row.name || '',
+      sizeOrPortion: row.sizeOrPortion || '',
+      description: row.description || '',
+      price: row.price ?? '',
+      warnings: row.warnings || [],
+      status: 'READY' as const
+    })));
+    if (acceptedRows.length < rows.length) {
+      throw new Error('The review is limited to 500 items. Split the remaining menu into another upload.');
+    }
+  }
+
+  removeMenuUploadDraft(index: number): void {
+    if (this.menuUploadDrafts[index]?.status === 'SAVING') return;
+    this.menuUploadDrafts.splice(index, 1);
+  }
+
+  get menuUploadReadyCount(): number {
+    return this.menuUploadDrafts.filter((draft) => draft.status === 'READY').length;
+  }
+
+  private validateMenuUploadDraft(draft: MenuUploadDraft): string {
+    const price = Number(draft.price);
+    if (!draft.name.trim()) return 'Enter an item name.';
+    if (draft.name.trim().length > 120) return 'Item name must be 120 characters or fewer.';
+    if (!draft.category.trim()) return 'Enter a category.';
+    if (draft.category.trim().length > 80) return 'Category must be 80 characters or fewer.';
+    if (!Number.isFinite(price) || price <= 0 || price > 100000) return 'Enter a price greater than 0 and no more than 100,000 QAR.';
+    if (draft.description.length > 1000) return 'Description must be 1,000 characters or fewer.';
+    return '';
+  }
+
+  private async createMenuItemFromDraft(draft: MenuUploadDraft): Promise<void> {
+    const validationError = this.validateMenuUploadDraft(draft);
+    if (validationError) throw new Error(validationError);
+    const result = await firstValueFrom(this.http.post<{ item: MenuItem }>(`${this.api}/restaurant/menu`, {
+      name: draft.name.trim(),
+      category: draft.category.trim(),
+      price: Number(draft.price),
+      description: draft.description.trim(),
+      customizationOptions: draft.sizeOrPortion.trim() ? `Size/portion: ${draft.sizeOrPortion.trim()}` : ''
+    }, { headers: this.headers() }));
+    draft.status = 'SAVED';
+    draft.error = result.item.approvalStatus === 'PENDING_REVIEW'
+      ? 'Added and submitted for Admin approval.'
+      : 'Added to the menu.';
+  }
+
+  private menuUploadErrorMessage(error: unknown, fallback: string): string {
+    if (error && typeof error === 'object' && 'error' in error) {
+      const body = error.error;
+      if (body && typeof body === 'object' && 'error' in body && typeof body.error === 'string') {
+        return body.error;
+      }
+    }
+    if (error instanceof Error && error.message) return error.message;
+    return fallback;
+  }
+
+  async saveMenuUploadDraft(draft: MenuUploadDraft): Promise<void> {
+    if (draft.status !== 'READY') return;
+    draft.status = 'SAVING';
+    draft.error = '';
+    try {
+      await this.createMenuItemFromDraft(draft);
+      this.notice = draft.error;
+      this.loadRestaurantPortal();
+    } catch (error) {
+      draft.status = 'READY';
+      draft.error = this.menuUploadErrorMessage(error, 'Could not add this item. Try again.');
+    }
+  }
+
+  async saveAllMenuUploadDrafts(): Promise<void> {
+    if (this.menuUploadLoading || this.menuUploadDrafts.some((draft) => draft.status === 'SAVING')) return;
+    const readyDrafts = this.menuUploadDrafts.filter((draft) => draft.status === 'READY');
+    if (!readyDrafts.length) return;
+    this.menuUploadLoading = true;
+    let saved = 0;
+    for (const draft of readyDrafts) {
+      draft.error = this.validateMenuUploadDraft(draft);
+      if (draft.error) continue;
+      draft.status = 'SAVING';
+      try {
+        await this.createMenuItemFromDraft(draft);
+        saved += 1;
+      } catch (error) {
+        draft.status = 'READY';
+        draft.error = this.menuUploadErrorMessage(error, 'Could not add this item. Try again.');
+      }
+    }
+    this.menuUploadLoading = false;
+    if (saved) {
+      this.notice = `${saved} menu item${saved === 1 ? '' : 's'} added.`;
+      this.loadRestaurantPortal();
+    }
+    this.changeDetector.markForCheck();
+  }
+
   addMenuItem(): void {
     this.http.post<{ item: MenuItem }>(`${this.api}/restaurant/menu`, {
       name: this.newItemName,
       category: this.newItemCategory,
       price: this.newItemPrice,
-      description: this.newItemDescription,
-      imageData: this.newItemImageData
+      description: this.newItemDescription
     }, { headers: this.headers() }).subscribe({
       next: ({ item }) => {
         this.newItemName = '';
         this.newItemCategory = '';
         this.newItemPrice = 0;
         this.newItemDescription = '';
-        this.newItemImageData = '';
         this.notice = item.approvalStatus === 'PENDING_REVIEW'
           ? `${item.name} was submitted and is hidden from customers until Admin approval.`
           : `${item.name} was added to the menu.`;
@@ -2894,139 +3080,6 @@ export class AppComponent implements OnInit, OnDestroy {
     this.bulkMenuRows = [];
     this.bulkMenuSummary = null;
     this.bulkMenuErrorReport = '';
-  }
-
-  async selectBulkMenuPhotos(event: Event): Promise<void> {
-    const input = event.target as HTMLInputElement;
-    const selectedFiles = Array.from(input.files || []);
-    input.value = '';
-    if (!selectedFiles.length) return;
-
-    if (this.bulkMenuPhotoFiles.length + selectedFiles.length > this.maxMenuPhotoFiles) {
-      this.error = `Choose no more than ${this.maxMenuPhotoFiles} menu photos per batch.`;
-      return;
-    }
-    const nextFiles = [...this.bulkMenuPhotoFiles, ...selectedFiles];
-    if (nextFiles.some((file) => file.size > this.maxSourceImageBytes) ||
-        nextFiles.reduce((total, file) => total + file.size, 0) > this.maxMenuPhotoBatchBytes) {
-      this.error = 'Each menu photo must be 10 MB or smaller, and the combined batch must be 20 MB or smaller.';
-      return;
-    }
-    for (const file of selectedFiles) {
-      if (!await this.isSupportedMenuPhoto(file)) {
-        this.error = `${file.name} is not a valid JPEG or PNG image.`;
-        return;
-      }
-    }
-
-    this.bulkMenuPhotoFiles = nextFiles;
-    this.bulkMenuRows = [];
-    this.bulkMenuSummary = null;
-    this.bulkMenuErrorReport = '';
-    this.bulkMenuPhotoStatus = `${nextFiles.length} photo${nextFiles.length === 1 ? '' : 's'} ready to scan.`;
-  }
-
-  removeBulkMenuPhoto(index: number): void {
-    this.bulkMenuPhotoFiles = this.bulkMenuPhotoFiles.filter((_, fileIndex) => fileIndex !== index);
-    this.bulkMenuPhotoStatus = this.bulkMenuPhotoFiles.length
-      ? `${this.bulkMenuPhotoFiles.length} photo${this.bulkMenuPhotoFiles.length === 1 ? '' : 's'} ready to scan.`
-      : '';
-  }
-
-  async extractBulkMenuPhotos(): Promise<void> {
-    if (!this.bulkMenuPhotoFiles.length || this.bulkMenuPhotoLoading) return;
-    if (!this.selectedRestaurant) {
-      this.error = 'Sign in to your restaurant account before importing menu photos.';
-      return;
-    }
-
-    this.bulkMenuPhotoLoading = true;
-    this.bulkMenuPhotoStatus = 'Starting on-device text recognition…';
-    this.bulkMenuRows = [];
-    this.bulkMenuSummary = null;
-    this.bulkMenuErrorReport = '';
-    this.bulkMenuMode = 'ADD_NEW';
-    this.bulkMenuReplaceConfirmed = false;
-    let worker: Awaited<ReturnType<typeof createWorker>> | null = null;
-    try {
-      worker = await createWorker('eng', 1, {
-        logger: (message) => {
-          if (message.status === 'recognizing text') {
-            this.bulkMenuPhotoStatus = `Reading menu photo (${Math.round(message.progress * 100)}%)…`;
-            this.changeDetector.markForCheck();
-          }
-        }
-      });
-
-      const extractedRows: BulkMenuRow[] = [];
-      for (const [fileIndex, file] of this.bulkMenuPhotoFiles.entries()) {
-        this.bulkMenuPhotoStatus = `Scanning photo ${fileIndex + 1} of ${this.bulkMenuPhotoFiles.length}: ${file.name}`;
-        this.changeDetector.markForCheck();
-        let bitmap: ImageBitmap;
-        try {
-          bitmap = await createImageBitmap(file);
-        } catch {
-          throw new Error(`${file.name} could not be decoded as an image.`);
-        }
-        const pixelCount = bitmap.width * bitmap.height;
-        bitmap.close();
-        if (pixelCount > this.maxImagePixels) {
-          throw new Error(`${file.name} is too large to scan safely. Choose an image with fewer than 40 million pixels.`);
-        }
-
-        const { data } = await worker.recognize(file);
-        const lines = data.text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
-        for (const line of lines) {
-          const priceMatch = line.match(/^(.*?)\s+(?:(?:QAR|QR)\s*)?([0-9]{1,5}(?:[.,][0-9]{1,2})?)\s*(?:QAR|QR)?$/i);
-          const name = (priceMatch?.[1] || line).replace(/[|•·]+$/g, '').trim();
-          if (!name) continue;
-          const price = priceMatch ? Number(priceMatch[2].replace(',', '.')) : '';
-          extractedRows.push({
-            rowNumber: extractedRows.length + 2,
-            restaurantId: this.selectedRestaurant._id,
-            itemId: '',
-            category: 'Menu',
-            name,
-            description: '',
-            price,
-            discountPrice: null,
-            foodType: '',
-            preparationMinutes: null,
-            availability: 'AVAILABLE',
-            availabilityStart: '',
-            availabilityEnd: '',
-            imageUrl: '',
-            customizationOptions: '',
-            errors: [],
-            extractionWarnings: [
-              `Read from ${file.name}; check this text against the original photo.`,
-              `OCR confidence: ${Math.round(data.confidence)}%.`,
-              'Category was not reliably detected; edit it before import.',
-              ...(!priceMatch ? ['No clear price was detected; enter the price or remove this line.'] : [])
-            ]
-          });
-          if (extractedRows.length > 500) {
-            throw new Error('More than 500 text lines were detected. Split the photos into smaller batches so no menu items are omitted.');
-          }
-        }
-      }
-
-      if (!extractedRows.length) {
-        throw new Error('No menu text was found. Try a sharper, well-lit photo or use the CSV template.');
-      }
-      this.bulkMenuRows = extractedRows;
-      this.validateBulkMenuRows();
-      this.bulkMenuPhotoStatus = `Scanned ${this.bulkMenuPhotoFiles.length} photo${this.bulkMenuPhotoFiles.length === 1 ? '' : 's'}. Review and correct every item before importing.`;
-    } catch (error) {
-      this.error = error instanceof Error
-        ? error.message
-        : 'The menu photo could not be scanned. You can still enter items manually or use the CSV template.';
-      this.bulkMenuPhotoStatus = 'Photo scan did not finish. The manual menu and spreadsheet options are still available.';
-    } finally {
-      if (worker) await worker.terminate();
-      this.bulkMenuPhotoLoading = false;
-      this.changeDetector.markForCheck();
-    }
   }
 
   private async isSupportedMenuPhoto(file: File): Promise<boolean> {

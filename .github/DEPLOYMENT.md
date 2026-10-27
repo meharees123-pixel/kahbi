@@ -23,6 +23,7 @@ Create these secrets in Secret Manager and add a version to each. Do not put the
 | JWT secret | Long, random, persistent signing secret |
 | OTP signing secret | Independent random secret of at least 32 characters |
 | WhatsApp config encryption key | Independent random key; keep stable so saved credentials remain decryptable |
+| Gemini API key | Private Google AI Studio API key for menu extraction |
 
 The workflow references each secret's `latest` version. Production database connectivity and network allow-listing must be configured in the MongoDB provider. Do not point production at the local/demo database.
 
@@ -41,6 +42,7 @@ In **Settings > Secrets and variables > Actions > Variables**, add:
 | `GCP_JWT_SECRET` | Secret Manager secret ID holding the JWT secret | Yes |
 | `GCP_OTP_SIGNING_SECRET` | Secret Manager secret ID holding the OTP signing secret | Yes |
 | `GCP_WHATSAPP_ENCRYPTION_SECRET` | Secret Manager secret ID holding the WhatsApp encryption key | Yes |
+| `GCP_GEMINI_API_KEY_SECRET` | Secret Manager secret ID holding the Gemini API key | Yes |
 | `GCP_CLIENT_ORIGIN` | Public HTTPS origin of the KABHI web app (for example, `https://kahbi.example.com`) | Yes |
 | `GCP_API_SERVICE` | Cloud Run API service name; defaults to `kahbi-api` | No |
 | `GCP_WEB_SERVICE` | Cloud Run frontend service name; defaults to `kahbi-web` | No |
