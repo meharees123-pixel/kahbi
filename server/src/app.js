@@ -1,3 +1,9 @@
+const path = require("path");
+const dotenv = require("dotenv");
+dotenv.config({ path: path.resolve(__dirname, "../../.env") });
+if (!process.env.SMTP_HOST || !process.env.SMTP_USER) {
+  dotenv.config({ path: path.resolve(__dirname, "../../.env.example") });
+}
 const express = require("express");
 const cors = require("cors");
 const helmet = require("helmet");
@@ -21,6 +27,7 @@ const {
   validateOrderTermsAcknowledgement
 } = require("./customer-terms");
 const { writeAudit, logNotification, changeOrderStatus, restaurantAcceptanceSlaMs } = require("./services");
+const { emailNotifications } = require("./email-notifications");
 const { PAYMENT_METHODS, validatePartnerRegistration } = require("./partner-registration");
 const {
   MENU_HEADERS, parseMenuFile, parseImageArchive, validateMenuRows,
@@ -39,6 +46,41 @@ const secret = process.env.JWT_SECRET || "local-development-secret-change-before
 const currency = process.env.CURRENCY || "QAR";
 const apiOrigin = process.env.CLIENT_ORIGIN || "http://localhost:4200";
 const partnerTermsVersion = "2026-10-v1";
+const adminNotificationEmail = () => process.env.ADMIN_NOTIFICATION_EMAIL || "kabhioffical92@gmail.com";
+
+const RESTAURANT_FIELD_LABELS = {
+  name: "Restaurant name",
+  hotelName: "Hotel name",
+  cuisine: "Cuisine",
+  description: "Description",
+  address: "Address",
+  latitude: "Latitude",
+  longitude: "Longitude",
+  serviceRadiusKm: "Delivery radius (km)",
+  phone: "Phone number",
+  whatsapp: "WhatsApp number",
+  email: "Email address",
+  preparationMinutes: "Preparation time (mins)",
+  minOrder: "Minimum order (QAR)",
+  maxOrder: "Maximum order (QAR)",
+  category: "Category",
+  paymentMethods: "Payment methods",
+  availability: "Availability",
+  status: "Status",
+  imageData: "Restaurant image"
+};
+
+const MENU_FIELD_LABELS = {
+  name: "Item name",
+  category: "Category",
+  description: "Description",
+  price: "Price (QAR)",
+  availability: "Availability",
+  imageData: "Menu item photo",
+  approvalStatus: "Approval status",
+  active: "Active status",
+  customizationOptions: "Customization options"
+};
 
 app.use(helmet());
 app.use(cors({ origin: apiOrigin }));
@@ -62,6 +104,42 @@ async function currentCustomerTerms() {
 
 function asyncRoute(handler) {
   return (req, res, next) => Promise.resolve(handler(req, res, next)).catch(next);
+}
+
+function emailValue(value) {
+  if (value === undefined || value === null) return null;
+  if (Array.isArray(value)) return value.map(emailValue);
+  if (value instanceof Date) return value.toISOString();
+  if (typeof value === "object" && typeof value.toObject === "function") return emailValue(value.toObject());
+  if (typeof value === "object") return Object.fromEntries(Object.entries(value).map(([key, entry]) => [key, emailValue(entry)]));
+  return value;
+}
+
+function changedEmailFields(before, after, fields, labels = {}) {
+  return fields.flatMap((field) => {
+    const previous = emailValue(before[field]);
+    const next = emailValue(after[field]);
+    return JSON.stringify(previous) === JSON.stringify(next)
+      ? []
+      : [{ label: labels[field] || field, previous, next }];
+  });
+}
+
+function emailEventKey(eventType, entityId, timestamp, data) {
+  const digest = crypto.createHash("sha256")
+    .update(JSON.stringify({ eventType, entityId: String(entityId), timestamp: emailValue(timestamp), data }))
+    .digest("hex");
+  return `${eventType}:${entityId}:${digest}`;
+}
+
+function queueRestaurantEmail({ eventType, eventId, timestamp, restaurantId, recipient, data }) {
+  return emailNotifications.enqueue({
+    eventKey: emailEventKey(eventType, eventId, timestamp, data),
+    eventType,
+    restaurantId,
+    recipient,
+    data
+  });
 }
 
 function auth(required = true) {
@@ -510,6 +588,21 @@ app.post("/api/partner-registrations", partnerRegistrationRateLimit, asyncRoute(
     entityId: registration.registrationId,
     details: { status: registration.status, termsVersion: registration.termsVersion, termsAcceptedAt: registration.termsAcceptedAt }
   });
+  await queueRestaurantEmail({
+    eventType: "PARTNER_REGISTRATION_SUBMITTED",
+    eventId: registration._id,
+    timestamp: registration.createdAt,
+    data: {
+      restaurantName: details.restaurantName,
+      ownerName: details.ownerName,
+      email: details.email,
+      date: registration.createdAt,
+      status: registration.status,
+      registrationId: registration.registrationId,
+      dashboardUrl: apiOrigin
+    },
+    recipient: adminNotificationEmail()
+  });
   res.status(201).json({ registration: publicRegistration(registration) });
 }));
 
@@ -552,6 +645,21 @@ app.patch("/api/partner-registrations/:registrationId", asyncRoute(async (req, r
     entity: "RestaurantRegistration",
     entityId: registration.registrationId,
     details: { status: registration.status, termsVersion: registration.termsVersion, changedFields }
+  });
+  await queueRestaurantEmail({
+    eventType: "PARTNER_REGISTRATION_SUBMITTED",
+    eventId: registration._id,
+    timestamp: registration.updatedAt || new Date(),
+    data: {
+      restaurantName: details.restaurantName,
+      ownerName: details.ownerName,
+      email: details.email,
+      date: registration.updatedAt || new Date(),
+      status: "RESUBMITTED",
+      registrationId: registration.registrationId,
+      dashboardUrl: apiOrigin
+    },
+    recipient: adminNotificationEmail()
   });
   res.json({ registration: publicRegistration(registration) });
 }));
@@ -1654,6 +1762,7 @@ app.patch("/api/restaurant/me", auth(), roles("RESTAURANT_OWNER", "RESTAURANT_MA
   if (typeof updates.phone !== "undefined" && updates.phone && !validatePhone(String(updates.phone))) return res.status(400).json({ error: "Enter a valid restaurant phone number." });
   if (typeof updates.whatsapp !== "undefined" && updates.whatsapp && !validatePhone(String(updates.whatsapp))) return res.status(400).json({ error: "Enter a valid WhatsApp number." });
   if (typeof updates.email !== "undefined" && updates.email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(updates.email))) return res.status(400).json({ error: "Enter a valid restaurant email." });
+  const previousValues = Object.fromEntries(Object.keys(updates).map((field) => [field, emailValue(restaurant[field])]));
   Object.assign(restaurant, updates);
   let registration;
   if (Object.hasOwn(updates, "paymentMethods")) {
@@ -1678,6 +1787,17 @@ app.patch("/api/restaurant/me", auth(), roles("RESTAURANT_OWNER", "RESTAURANT_MA
     entityId: restaurant._id,
     details: Object.hasOwn(updates, "paymentMethods") ? { paymentMethods: updates.paymentMethods } : {}
   });
+  const changes = changedEmailFields(previousValues, restaurant, Object.keys(updates), RESTAURANT_FIELD_LABELS);
+  if (changes.length) {
+    await queueRestaurantEmail({
+      eventType: "RESTAURANT_UPDATED",
+      eventId: restaurant._id,
+      timestamp: restaurant.updatedAt,
+      restaurantId: restaurant._id,
+      recipient: adminNotificationEmail(),
+      data: { restaurantName: restaurant.name, actor: req.user.name, date: restaurant.updatedAt, changes }
+    });
+  }
   res.json({ restaurant });
 }));
 
@@ -1744,9 +1864,25 @@ app.patch("/api/restaurant/availability", auth(), roles(...restaurantRoles), asy
   const restaurant = await restaurantForUser(req.user);
   const availability = String(req.body.availability || "");
   if (!["OPEN", "CLOSED", "TEMPORARILY_UNAVAILABLE", "PAUSED"].includes(availability)) return res.status(400).json({ error: "Choose a valid restaurant availability." });
+  const previous = restaurant.availability;
   restaurant.availability = availability;
   await restaurant.save();
   await writeAudit({ user: req.user, action: "RESTAURANT_AVAILABILITY_CHANGED", entity: "Restaurant", entityId: restaurant._id, details: { availability } });
+  if (previous !== restaurant.availability) {
+    await queueRestaurantEmail({
+      eventType: "RESTAURANT_UPDATED",
+      eventId: restaurant._id,
+      timestamp: restaurant.updatedAt,
+      restaurantId: restaurant._id,
+      recipient: adminNotificationEmail(),
+      data: {
+        restaurantName: restaurant.name,
+        actor: req.user.name,
+        date: restaurant.updatedAt,
+        changes: [{ label: "Availability", previous, next: restaurant.availability }]
+      }
+    });
+  }
   res.json({ restaurant });
 }));
 
@@ -1755,37 +1891,148 @@ app.patch("/api/restaurant/profile/image", auth(), roles(...restaurantRoles), as
   if (!Object.hasOwn(req.body, "imageData")) return res.status(400).json({ error: "Provide an image or an empty value to remove the current image." });
   const image = validateImageDataUrl(req.body.imageData);
   if (image?.error) return res.status(400).json({ error: image.error });
+  const previous = restaurant.imageData;
   restaurant.imageData = image?.imageData || "";
   await restaurant.save();
   await writeAudit({ user: req.user, action: "RESTAURANT_IMAGE_UPDATED", entity: "Restaurant", entityId: restaurant._id });
+  if (previous !== restaurant.imageData) {
+    await queueRestaurantEmail({
+      eventType: "RESTAURANT_UPDATED",
+      eventId: restaurant._id,
+      timestamp: restaurant.updatedAt,
+      restaurantId: restaurant._id,
+      recipient: adminNotificationEmail(),
+      data: {
+        restaurantName: restaurant.name,
+        actor: req.user.name,
+        date: restaurant.updatedAt,
+        changes: [{
+          label: "Restaurant image",
+          previous: previous ? "Set" : "Not set",
+          next: restaurant.imageData ? "Set" : "Removed"
+        }]
+      }
+    });
+  }
   res.json({ restaurant });
 }));
 
 app.patch("/api/restaurant/menu/:id", auth(), roles(...restaurantRoles), asyncRoute(async (req, res) => {
+  if (!mongoose.isValidObjectId(req.params.id)) return res.status(404).json({ error: "Menu item not found." });
   const restaurant = await restaurantForUser(req.user);
-  const hasAvailability = Object.hasOwn(req.body, "availability");
-  const hasImage = Object.hasOwn(req.body, "imageData");
-  if (!hasAvailability && !hasImage) return res.status(400).json({ error: "Provide an availability or image update." });
-  const availability = String(req.body.availability || "");
-  if (hasAvailability && !["AVAILABLE", "UNAVAILABLE", "TEMPORARILY_UNAVAILABLE"].includes(availability)) return res.status(400).json({ error: "Choose a valid menu item availability." });
-  const image = hasImage ? validateImageDataUrl(req.body.imageData) : null;
-  if (image?.error) return res.status(400).json({ error: image.error });
   const item = await MenuItem.findOne({ _id: req.params.id, restaurantId: restaurant._id });
   if (!item) return res.status(404).json({ error: "Menu item not found." });
-  if (hasAvailability) item.availability = availability;
-  if (hasImage) {
-    item.imageData = image?.imageData || "";
-    if (await RestaurantRegistration.exists({ restaurantId: restaurant._id, status: "APPROVED" })) {
-      item.approvalStatus = "PENDING_REVIEW";
-    }
+
+  const updates = {};
+  for (const field of ["name", "category", "description", "customizationOptions"]) {
+    if (Object.hasOwn(req.body, field)) updates[field] = String(req.body[field] || "").trim();
   }
+  if (Object.hasOwn(updates, "name") && !updates.name) {
+    return res.status(400).json({ error: "Menu item name cannot be empty." });
+  }
+  if (Object.hasOwn(updates, "category") && !updates.category) {
+    return res.status(400).json({ error: "Menu item category cannot be empty." });
+  }
+  if (Object.hasOwn(updates, "customizationOptions") && updates.customizationOptions.length > 1000) {
+    return res.status(400).json({ error: "Customization Options must be 1,000 characters or fewer." });
+  }
+  if (Object.hasOwn(req.body, "price")) {
+    const price = Number(req.body.price);
+    if (!Number.isFinite(price) || price <= 0) return res.status(400).json({ error: "Enter a positive menu item price." });
+    updates.price = roundMoney(price);
+  }
+  if (Object.hasOwn(req.body, "availability")) {
+    const availability = String(req.body.availability || "");
+    if (!["AVAILABLE", "UNAVAILABLE", "TEMPORARILY_UNAVAILABLE"].includes(availability)) {
+      return res.status(400).json({ error: "Choose a valid menu item availability." });
+    }
+    updates.availability = availability;
+  }
+  if (Object.hasOwn(req.body, "active")) {
+    if (typeof req.body.active !== "boolean") return res.status(400).json({ error: "An active true/false value is required." });
+    updates.active = req.body.active;
+  }
+  if (Object.hasOwn(req.body, "imageData")) {
+    const image = validateImageDataUrl(req.body.imageData);
+    if (image?.error) return res.status(400).json({ error: image.error });
+    updates.imageData = image?.imageData || "";
+  }
+  if (!Object.keys(updates).length) {
+    return res.status(400).json({ error: "Provide at least one menu item update." });
+  }
+
+  const partnerRegistration = await RestaurantRegistration.exists({ restaurantId: restaurant._id, status: "APPROVED" });
+  if (partnerRegistration && (Object.hasOwn(updates, "name") || Object.hasOwn(updates, "price") || Object.hasOwn(updates, "imageData"))) {
+    updates.approvalStatus = "PENDING_REVIEW";
+  }
+
+  const previousValues = Object.fromEntries(Object.keys(updates).map((field) => [field, emailValue(item[field])]));
+  Object.assign(item, updates);
   await item.save();
+
   await writeAudit({
     user: req.user,
-    action: hasImage ? "MENU_ITEM_UPDATED" : "MENU_AVAILABILITY_CHANGED",
+    action: Object.hasOwn(updates, "imageData") ? "MENU_ITEM_UPDATED" : (Object.hasOwn(updates, "availability") && Object.keys(updates).length === 1 ? "MENU_AVAILABILITY_CHANGED" : "MENU_ITEM_UPDATED"),
     entity: "MenuItem",
     entityId: item._id,
-    details: hasAvailability ? { availability } : {}
+    details: { fields: Object.keys(updates) }
+  });
+
+  const changes = changedEmailFields(previousValues, item, Object.keys(updates), MENU_FIELD_LABELS).map((change) =>
+    change.label === "Menu item photo"
+      ? { ...change, previous: change.previous ? "Set" : "Not set", next: change.next ? "Set" : "Removed" }
+      : change
+  );
+
+  if (changes.length) {
+    await queueRestaurantEmail({
+      eventType: "MENU_UPDATED",
+      eventId: item._id,
+      timestamp: item.updatedAt,
+      restaurantId: restaurant._id,
+      recipient: adminNotificationEmail(),
+      data: {
+        restaurantName: restaurant.name,
+        actor: req.user.name,
+        date: item.updatedAt,
+        action: updates.active === false ? "Deactivated" : "Updated",
+        itemName: item.name,
+        changes
+      }
+    });
+  }
+  res.json({ item });
+}));
+
+app.delete("/api/restaurant/menu/:id", auth(), roles("RESTAURANT_OWNER", "RESTAURANT_MANAGER"), asyncRoute(async (req, res) => {
+  if (!mongoose.isValidObjectId(req.params.id)) return res.status(404).json({ error: "Menu item not found." });
+  const restaurant = await restaurantForUser(req.user);
+  const item = await MenuItem.findOneAndUpdate(
+    { _id: req.params.id, restaurantId: restaurant._id, active: true },
+    { $set: { active: false } },
+    { new: true }
+  );
+  if (!item) return res.status(404).json({ error: "Menu item not found." });
+  await writeAudit({
+    user: req.user,
+    action: "MENU_ITEM_REMOVED",
+    entity: "MenuItem",
+    entityId: item._id,
+    details: { restaurantId: restaurant._id, name: item.name }
+  });
+  await queueRestaurantEmail({
+    eventType: "MENU_UPDATED",
+    eventId: item._id,
+    timestamp: item.updatedAt,
+    restaurantId: restaurant._id,
+    recipient: adminNotificationEmail(),
+    data: {
+      restaurantName: restaurant.name,
+      actor: req.user.name,
+      date: item.updatedAt,
+      action: "Removed",
+      itemName: item.name
+    }
   });
   res.json({ item });
 }));
@@ -1811,6 +2058,20 @@ app.post("/api/restaurant/menu", auth(), roles("RESTAURANT_OWNER", "RESTAURANT_M
     approvalStatus: partnerRegistration ? "PENDING_REVIEW" : "APPROVED"
   });
   await writeAudit({ user: req.user, action: "MENU_ITEM_CREATED", entity: "MenuItem", entityId: item._id, details: { name: item.name, price: item.price } });
+  await queueRestaurantEmail({
+    eventType: "MENU_UPDATED",
+    eventId: item._id,
+    timestamp: item.createdAt,
+    restaurantId: restaurant._id,
+    recipient: adminNotificationEmail(),
+    data: {
+      restaurantName: restaurant.name,
+      actor: req.user.name,
+      date: item.createdAt,
+      action: "Added",
+      itemName: item.name
+    }
+  });
   res.status(201).json({ item });
 }));
 
@@ -1868,7 +2129,9 @@ app.post(
     if (parsed.error) return res.status(400).json({ error: parsed.error });
     const checked = validateMenuRows(parsed.rows.map(({ rowNumber, values }) => ({ ...values, rowNumber })), restaurant._id);
     if (checked.error) return res.status(400).json({ error: checked.error });
-    const existingItems = await MenuItem.find({ restaurantId: restaurant._id }).select("_id itemCode name category approvalStatus").lean();
+    const existingItems = await MenuItem.find({ restaurantId: restaurant._id })
+      .select("_id itemCode name category approvalStatus active description price discountPrice foodType preparationMinutes availability availabilityStart availabilityEnd imageUrl customizationOptions")
+      .lean();
     const rows = checked.rows.map((row) => {
       const match = row.errors.length ? null : findBulkMenuMatch(existingItems, row);
       return { ...row, existingItemId: match ? String(match._id) : "", existingItemName: match?.name || "" };
@@ -1910,6 +2173,7 @@ app.post("/api/restaurant/menu/bulk/import", auth(), roles("RESTAURANT_OWNER", "
   let updated = 0;
   let failed = 0;
   const importedIds = [];
+  const menuChanges = [];
   const partnerRegistration = await RestaurantRegistration.exists({ restaurantId: restaurant._id, status: "APPROVED" });
 
   for (const row of rows) {
@@ -1959,14 +2223,33 @@ app.post("/api/restaurant/menu/bulk/import", auth(), roles("RESTAURANT_OWNER", "
     importedIds.push(item._id);
     if (match) updated += 1;
     else imported += 1;
+    const changedFields = match
+      ? Object.keys(values).filter((field) => JSON.stringify(emailValue(match[field])) !== JSON.stringify(emailValue(values[field])))
+      : [];
+    if (!match || changedFields.length) {
+      menuChanges.push({
+        action: match ? "Updated" : "Added",
+        name: values.name,
+        changes: changedFields.map((field) => ({
+          label: field,
+          previous: emailValue(match?.[field]),
+          next: emailValue(values[field])
+        }))
+      });
+    }
     row.existingItemId = String(item._id);
   }
 
+  const removedMenuNames = [];
   if (mode === "REPLACE" && importedIds.length) {
+    removedMenuNames.push(...existingItems
+      .filter((item) => item.active && !importedIds.some((id) => String(id) === String(item._id)))
+      .map((item) => item.name));
     await MenuItem.updateMany(
       { restaurantId: restaurant._id, active: true, _id: { $nin: importedIds } },
       { $set: { active: false } }
     );
+    menuChanges.push(...removedMenuNames.map((name) => ({ action: "Removed", name })));
   }
 
   const totalRows = rows.length;
@@ -1979,6 +2262,23 @@ app.post("/api/restaurant/menu/bulk/import", auth(), roles("RESTAURANT_OWNER", "
     entityId: restaurant._id,
     details: summary
   });
+  if (menuChanges.length) {
+    const eventDate = new Date();
+    await queueRestaurantEmail({
+      eventType: "MENU_UPDATED",
+      eventId: restaurant._id,
+      timestamp: eventDate,
+      restaurantId: restaurant._id,
+      recipient: adminNotificationEmail(),
+      data: {
+        restaurantName: restaurant.name,
+        actor: req.user.name,
+        date: eventDate,
+        items: menuChanges,
+        summary: { added: imported, updated, removed: removedMenuNames.length }
+      }
+    });
+  }
   res.json({
     summary,
     rows,
@@ -2018,6 +2318,7 @@ app.post(
     }
     const failedFiles = [];
     const uploadedItemIds = new Set();
+    const changedMenuItems = [];
     let uploaded = 0;
     for (const image of archive.images) {
       const filenameKey = keyFor(image.fileName.replace(/\.[^.]+$/, ""));
@@ -2047,6 +2348,7 @@ app.post(
       }
       uploadedItemIds.add(matchedItemId);
       uploaded += 1;
+      if (matches[0].imageData !== validation.imageData) changedMenuItems.push(matches[0].name);
     }
     await writeAudit({
       user: req.user,
@@ -2055,6 +2357,22 @@ app.post(
       entityId: restaurant._id,
       details: { uploaded, failed: failedFiles.length }
     });
+    if (changedMenuItems.length) {
+      const eventDate = new Date();
+      await queueRestaurantEmail({
+        eventType: "MENU_UPDATED",
+        eventId: restaurant._id,
+        timestamp: eventDate,
+        restaurantId: restaurant._id,
+        recipient: adminNotificationEmail(),
+        data: {
+          restaurantName: restaurant.name,
+          actor: req.user.name,
+          date: eventDate,
+          items: changedMenuItems.map((name) => ({ action: "Updated image", name }))
+        }
+      });
+    }
     res.json({ uploaded, failed: failedFiles.length, failedFiles });
   })
 );
@@ -2165,6 +2483,8 @@ app.patch("/api/admin/restaurants/:id", auth(), roles("ADMIN", "SUPER_ADMIN"), a
   if (!mongoose.isValidObjectId(req.params.id)) return res.status(404).json({ error: "Restaurant not found." });
   const restaurant = await Restaurant.findById(req.params.id);
   if (!restaurant) return res.status(404).json({ error: "Restaurant not found." });
+  const previousStatus = restaurant.status;
+  const previousEmail = restaurant.email;
   const updates = {};
   for (const field of ["name", "description", "address", "phone", "email", "category"]) {
     if (Object.hasOwn(req.body, field)) updates[field] = String(req.body[field] || "").trim();
@@ -2221,9 +2541,41 @@ app.patch("/api/admin/restaurants/:id", auth(), roles("ADMIN", "SUPER_ADMIN"), a
     updates.longitude = longitude;
     updates.serviceRadiusKm = serviceRadiusKm;
   }
+  const previousValues = Object.fromEntries(Object.keys(updates).map((field) => [field, emailValue(restaurant[field])]));
   Object.assign(restaurant, updates);
   await restaurant.save();
   await writeAudit({ user: req.user, action: "ADMIN_RESTAURANT_UPDATED", entity: "Restaurant", entityId: restaurant._id, details: { fields: Object.keys(updates) } });
+  const changedFields = changedEmailFields(previousValues, restaurant, Object.keys(updates), RESTAURANT_FIELD_LABELS);
+  const statusChanged = previousStatus !== restaurant.status;
+  const changes = changedFields.map((change) => change.label === "imageData"
+    ? { ...change, label: "Restaurant image", previous: change.previous ? "Set" : "Not set", next: change.next ? "Set" : "Removed" }
+    : change);
+  const recipient = restaurant.email || previousEmail;
+  if (statusChanged) {
+    await queueRestaurantEmail({
+      eventType: "RESTAURANT_STATUS_CHANGED",
+      eventId: restaurant._id,
+      timestamp: restaurant.updatedAt,
+      restaurantId: restaurant._id,
+      recipient,
+      data: {
+        restaurantName: restaurant.name,
+        previousStatus,
+        status: restaurant.status,
+        date: restaurant.updatedAt,
+        changes: changes.filter((change) => change.label !== "status" && change.label !== "Status")
+      }
+    });
+  } else if (changes.length) {
+    await queueRestaurantEmail({
+      eventType: "RESTAURANT_UPDATED",
+      eventId: restaurant._id,
+      timestamp: restaurant.updatedAt,
+      restaurantId: restaurant._id,
+      recipient,
+      data: { restaurantName: restaurant.name, actor: req.user.name, date: restaurant.updatedAt, changes }
+    });
+  }
   res.json({ restaurant });
 }));
 
@@ -2237,7 +2589,7 @@ app.get("/api/admin/restaurants/:id/menu", auth(), roles("ADMIN", "SUPER_ADMIN")
 
 app.post("/api/admin/restaurants/:id/menu", auth(), roles("ADMIN", "SUPER_ADMIN"), asyncRoute(async (req, res) => {
   if (!mongoose.isValidObjectId(req.params.id)) return res.status(404).json({ error: "Restaurant not found." });
-  const restaurant = await Restaurant.findById(req.params.id).select("_id").lean();
+  const restaurant = await Restaurant.findById(req.params.id);
   if (!restaurant) return res.status(404).json({ error: "Restaurant not found." });
   const name = String(req.body.name || "").trim();
   const category = String(req.body.category || "").trim();
@@ -2257,6 +2609,20 @@ app.post("/api/admin/restaurants/:id/menu", auth(), roles("ADMIN", "SUPER_ADMIN"
     imageData: image?.imageData || ""
   });
   await writeAudit({ user: req.user, action: "ADMIN_MENU_ITEM_CREATED", entity: "MenuItem", entityId: item._id, details: { restaurantId: restaurant._id, name } });
+  await queueRestaurantEmail({
+    eventType: "MENU_UPDATED",
+    eventId: item._id,
+    timestamp: item.createdAt,
+    restaurantId: restaurant._id,
+    recipient: restaurant.email,
+    data: {
+      restaurantName: restaurant.name,
+      actor: req.user.name,
+      date: item.createdAt,
+      action: "Added",
+      itemName: item.name
+    }
+  });
   res.status(201).json({ item });
 }));
 
@@ -2264,6 +2630,7 @@ app.patch("/api/admin/menu/:id", auth(), roles("ADMIN", "SUPER_ADMIN"), asyncRou
   if (!mongoose.isValidObjectId(req.params.id)) return res.status(404).json({ error: "Menu item not found." });
   const item = await MenuItem.findById(req.params.id);
   if (!item) return res.status(404).json({ error: "Menu item not found." });
+  const restaurant = await Restaurant.findById(item.restaurantId);
   const updates = {};
   for (const field of ["name", "category", "description"]) {
     if (Object.hasOwn(req.body, field)) updates[field] = String(req.body[field] || "").trim();
@@ -2298,9 +2665,30 @@ app.patch("/api/admin/menu/:id", auth(), roles("ADMIN", "SUPER_ADMIN"), asyncRou
     updates.imageData = image?.imageData || "";
   }
   if (!Object.keys(updates).length) return res.status(400).json({ error: "Provide at least one menu item update." });
+  const previousValues = Object.fromEntries(Object.keys(updates).map((field) => [field, emailValue(item[field])]));
   Object.assign(item, updates);
   await item.save();
   await writeAudit({ user: req.user, action: "ADMIN_MENU_ITEM_UPDATED", entity: "MenuItem", entityId: item._id, details: { fields: Object.keys(updates) } });
+  const changes = changedEmailFields(previousValues, item, Object.keys(updates)).map((change) => change.label === "imageData"
+    ? { ...change, label: "Menu item image", previous: change.previous ? "Set" : "Not set", next: change.next ? "Set" : "Removed" }
+    : change);
+  if (restaurant && changes.length) {
+    await queueRestaurantEmail({
+      eventType: "MENU_UPDATED",
+      eventId: item._id,
+      timestamp: item.updatedAt,
+      restaurantId: restaurant._id,
+      recipient: restaurant.email,
+      data: {
+        restaurantName: restaurant.name,
+        actor: req.user.name,
+        date: item.updatedAt,
+        action: "Updated",
+        itemName: item.name,
+        changes
+      }
+    });
+  }
   res.json({ item });
 }));
 
@@ -2308,7 +2696,24 @@ app.delete("/api/admin/menu/:id", auth(), roles("ADMIN", "SUPER_ADMIN"), asyncRo
   if (!mongoose.isValidObjectId(req.params.id)) return res.status(404).json({ error: "Menu item not found." });
   const item = await MenuItem.findOneAndUpdate({ _id: req.params.id, active: true }, { $set: { active: false } }, { new: true });
   if (!item) return res.status(404).json({ error: "Menu item not found." });
+  const restaurant = await Restaurant.findById(item.restaurantId);
   await writeAudit({ user: req.user, action: "ADMIN_MENU_ITEM_DEACTIVATED", entity: "MenuItem", entityId: item._id, details: { restaurantId: item.restaurantId } });
+  if (restaurant) {
+    await queueRestaurantEmail({
+      eventType: "MENU_UPDATED",
+      eventId: item._id,
+      timestamp: item.updatedAt,
+      restaurantId: restaurant._id,
+      recipient: restaurant.email,
+      data: {
+        restaurantName: restaurant.name,
+        actor: req.user.name,
+        date: item.updatedAt,
+        action: "Removed",
+        itemName: item.name
+      }
+    });
+  }
   res.json({ item });
 }));
 
@@ -2344,10 +2749,26 @@ app.patch("/api/admin/restaurants/:id/status", auth(), roles("ADMIN", "SUPER_ADM
     if (!approvedMenuItems) return res.status(409).json({ error: "Approve at least one menu item before making this partner restaurant customer-visible." });
   }
   const previousStatus = restaurant.status;
+  const recipient = restaurant.email;
   restaurant.status = status;
   if (status !== "APPROVED") restaurant.availability = "CLOSED";
   await restaurant.save();
   await writeAudit({ user: req.user, action: "RESTAURANT_REVIEWED", entity: "Restaurant", entityId: restaurant._id, details: { previousStatus, status } });
+  if (previousStatus !== restaurant.status) {
+    await queueRestaurantEmail({
+      eventType: "RESTAURANT_STATUS_CHANGED",
+      eventId: restaurant._id,
+      timestamp: restaurant.updatedAt,
+      restaurantId: restaurant._id,
+      recipient,
+      data: {
+        restaurantName: restaurant.name,
+        previousStatus,
+        status: restaurant.status,
+        date: restaurant.updatedAt
+      }
+    });
+  }
   res.json({ restaurant });
 }));
 
@@ -2362,9 +2783,25 @@ app.patch("/api/admin/restaurants/:id/availability", auth(), roles("ADMIN", "SUP
     return res.status(409).json({ error: "Approve the restaurant before setting it open." });
   }
   const previous = restaurant.availability;
+  const recipient = restaurant.email;
   restaurant.availability = availability;
   await restaurant.save();
   await writeAudit({ user: req.user, action: "ADMIN_RESTAURANT_AVAILABILITY_CHANGED", entity: "Restaurant", entityId: restaurant._id, details: { previous, availability } });
+  if (previous !== restaurant.availability) {
+    await queueRestaurantEmail({
+      eventType: "RESTAURANT_UPDATED",
+      eventId: restaurant._id,
+      timestamp: restaurant.updatedAt,
+      restaurantId: restaurant._id,
+      recipient,
+      data: {
+        restaurantName: restaurant.name,
+        actor: req.user.name,
+        date: restaurant.updatedAt,
+        changes: [{ label: "Availability", previous, next: restaurant.availability }]
+      }
+    });
+  }
   res.json({ restaurant });
 }));
 
@@ -2451,6 +2888,7 @@ app.patch("/api/admin/partner-registrations/:registrationId", auth(), roles("ADM
   const reason = String(req.body.reason || "").trim().slice(0, 1000);
   let activationUrl = "";
   let actionName = "";
+  let approvedRestaurant = null;
 
   if (action === "UNDER_REVIEW" && registration.status === "PENDING_VERIFICATION") {
     registration.status = "UNDER_REVIEW";
@@ -2513,6 +2951,7 @@ app.patch("/api/admin/partner-registrations/:registrationId", auth(), roles("ADM
         if (!restaurant) throw error;
       }
     }
+    approvedRestaurant = restaurant;
     registration.restaurantId = restaurant._id;
     registration.status = "APPROVED";
     registration.correctionAllowed = false;
@@ -2547,8 +2986,49 @@ app.patch("/api/admin/partner-registrations/:registrationId", auth(), roles("ADM
     details: { status: registration.status, restaurantId: registration.restaurantId, reason }
   });
   if (action === "APPROVED") {
-    const recipient = registration.details.whatsapp || registration.details.email || registration.details.phone;
-    await logNotification(null, "PARTNER_REGISTRATION_APPROVED_ACTIVATION_LINK", recipient);
+    await queueRestaurantEmail({
+      eventType: "PARTNER_REGISTRATION_APPROVED",
+      eventId: registration._id,
+      timestamp: registration.reviewedAt,
+      restaurantId: registration.restaurantId,
+      recipient: registration.details.email,
+      data: {
+        restaurantName: approvedRestaurant?.name || registration.details.restaurantName,
+        status: registration.status,
+        restaurantStatus: approvedRestaurant?.status || "PENDING_REVIEW",
+        date: registration.reviewedAt
+      }
+    });
+  } else if (action === "REJECTED" || action === "REQUEST_CHANGES") {
+    await queueRestaurantEmail({
+      eventType: "PARTNER_REGISTRATION_REJECTED",
+      eventId: registration._id,
+      timestamp: registration.reviewedAt,
+      restaurantId: registration.restaurantId,
+      recipient: registration.details.email,
+      data: {
+        restaurantName: registration.details.restaurantName,
+        status: action === "REQUEST_CHANGES" ? "CHANGES_REQUESTED" : registration.status,
+        reason: registration.reviewReason,
+        correctionAllowed: registration.correctionAllowed,
+        date: registration.reviewedAt
+      }
+    });
+  } else if (action === "SUSPENDED") {
+    await queueRestaurantEmail({
+      eventType: "RESTAURANT_STATUS_CHANGED",
+      eventId: registration._id,
+      timestamp: registration.reviewedAt,
+      restaurantId: registration.restaurantId,
+      recipient: registration.details.email,
+      data: {
+        restaurantName: registration.details.restaurantName,
+        previousStatus: "APPROVED",
+        status: "SUSPENDED",
+        reason: registration.reviewReason,
+        date: registration.reviewedAt
+      }
+    });
   }
   res.json({ registration: publicRegistration(registration, true), activationUrl });
 }));
@@ -2650,5 +3130,12 @@ app.use((error, _req, res, _next) => {
   if (status >= 500) console.error("API request failed:", error.message);
   res.status(status).json({ error: status >= 500 && !error.expose ? "Something went wrong. Please try again." : error.message });
 });
+
+app.queueRestaurantEmail = queueRestaurantEmail;
+app.changedEmailFields = changedEmailFields;
+app.emailEventKey = emailEventKey;
+app.adminNotificationEmail = adminNotificationEmail;
+app.RESTAURANT_FIELD_LABELS = RESTAURANT_FIELD_LABELS;
+app.MENU_FIELD_LABELS = MENU_FIELD_LABELS;
 
 module.exports = app;
