@@ -1015,7 +1015,17 @@
       <div class="map-loading" *ngIf="mapLoading"><span class="global-loader-spinner"></span><span>Loading map…</span></div>
       <div class="map-error" *ngIf="mapError" role="alert">{{ mapError }}</div>
       <div class="map-notice" *ngIf="mapNotice" role="status">{{ mapNotice }}</div>
-      <div id="location-picker-map" class="location-picker-map" [class.map-hidden]="mapLoading || !!mapError"></div>
+      <div class="map-search" role="search">
+        <input type="search" [(ngModel)]="mapSearch" aria-label="Search map locations" placeholder="Search an address, area, or landmark" (keydown.enter)="$event.preventDefault(); searchMapLocation()">
+        <button class="button button-dark button-small" type="button" [disabled]="mapLoading || mapSearchLoading || !!mapError" (click)="searchMapLocation()">{{ mapSearchLoading ? 'Searching…' : 'Search' }}</button>
+      </div>
+      <div class="location-picker-map-wrap" [class.map-hidden]="mapLoading || !!mapError">
+        <div id="location-picker-map" class="location-picker-map"></div>
+        <div class="map-zoom-controls" *ngIf="!mapLoading && !mapError" aria-label="Map zoom controls">
+          <button type="button" aria-label="Zoom in" (click)="zoomMap(1)">+</button>
+          <button type="button" aria-label="Zoom out" (click)="zoomMap(-1)">−</button>
+        </div>
+      </div>
       <div class="map-selection-details"><div><strong>{{ mapSelection ? 'Selected location' : 'No location selected' }}</strong><span>{{ mapSelectionAddress || 'Click the map to place a pin.' }}</span></div><button class="button button-quiet button-small" *ngIf="!mapError" (click)="useCurrentLocationInPicker()">Use current location</button></div>
       <div class="map-modal-actions"><button class="button button-quiet" (click)="closeMapPicker()">Cancel</button><button class="button button-dark" [disabled]="!mapSelection || mapLoading || !!mapError" (click)="confirmMapSelection()">Use this location</button></div>
     </section>
