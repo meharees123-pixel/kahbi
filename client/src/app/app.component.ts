@@ -352,6 +352,7 @@ export class AppComponent implements OnInit, OnDestroy {
   private mapGeocoder: google.maps.Geocoder | null = null;
   private mapGeocodeTimer: ReturnType<typeof setTimeout> | null = null;
   private mapSelectionRequest = 0;
+  private mapSearchRequest = 0;
   private mapInitializationRequest = 0;
   private restaurantListRequest = 0;
   private mapSelectionTouched = false;
@@ -472,6 +473,8 @@ export class AppComponent implements OnInit, OnDestroy {
   mapLoading = false;
   mapError = '';
   mapNotice = '';
+  mapSearch = '';
+  mapSearchLoading = false;
   mapLanguage = 'en';
   private activeMapLanguage = 'en';
   promotionCode = '';
@@ -1483,6 +1486,8 @@ export class AppComponent implements OnInit, OnDestroy {
                 : this.adminRestaurant?.address || ''
       : '';
     this.mapError = '';
+    this.mapSearch = '';
+    this.mapSearchLoading = false;
     this.mapNotice = this.locationPermissionDenied
       ? 'Location permission was not granted. Click the map or drag the pin to choose a location manually.'
       : '';
@@ -1542,6 +1547,60 @@ export class AppComponent implements OnInit, OnDestroy {
       },
       { timeout: 10000 }
     );
+  }
+
+  async searchMapLocation(): Promise<void> {
+    const query = this.mapSearch.trim();
+    if (!query) {
+      this.mapNotice = 'Enter an address, area, or landmark to search.';
+      return;
+    }
+    if (!this.mapGeocoder || !this.mapPicker) {
+      this.mapNotice = 'The map is not ready yet. Please try your search again.';
+      return;
+    }
+
+    const requestId = ++this.mapSearchRequest;
+    this.mapSelectionRequest += 1;
+    if (this.mapGeocodeTimer) {
+      clearTimeout(this.mapGeocodeTimer);
+      this.mapGeocodeTimer = null;
+    }
+    this.mapSearchLoading = true;
+    this.mapNotice = '';
+    try {
+      const { results } = await this.mapGeocoder.geocode({ address: query });
+      if (requestId !== this.mapSearchRequest || !this.mapPickerOpen) return;
+      const result = results[0];
+      if (!result?.geometry?.location) {
+        this.mapNotice = 'No matching location found. Try a nearby street, area, or landmark.';
+        return;
+      }
+
+      const point = { lat: result.geometry.location.lat(), lng: result.geometry.location.lng() };
+      this.mapSelection = point;
+      this.selectedLocation = point;
+      this.mapSelectionTouched = true;
+      this.mapSelectionAddress = result.formatted_address;
+      this.mapPicker.setCenter(point);
+      this.mapPicker.setZoom(15);
+      this.setMapMarker(point);
+    } catch {
+      if (requestId === this.mapSearchRequest) {
+        this.mapNotice = 'Could not search for that location. Check your connection and try again.';
+      }
+    } finally {
+      if (requestId === this.mapSearchRequest) {
+        this.mapSearchLoading = false;
+        this.changeDetector.markForCheck();
+      }
+    }
+  }
+
+  zoomMap(amount: number): void {
+    if (!this.mapPicker) return;
+    const currentZoom = this.mapPicker.getZoom() ?? 11;
+    this.mapPicker.setZoom(Math.max(3, Math.min(21, currentZoom + amount)));
   }
 
   confirmMapSelection(): void {
@@ -1651,6 +1710,7 @@ export class AppComponent implements OnInit, OnDestroy {
       this.mapPicker = new google.maps.Map(element, {
         center,
         zoom: this.mapSelectionTouched || this.currentLocation ? 15 : 11,
+        zoomControl: false,
         mapTypeControl: false,
         streetViewControl: false,
         fullscreenControl: false,
@@ -1714,6 +1774,8 @@ export class AppComponent implements OnInit, OnDestroy {
   private destroyMapPicker(): void {
     this.mapInitializationRequest += 1;
     this.mapSelectionRequest += 1;
+    this.mapSearchRequest += 1;
+    this.mapSearchLoading = false;
     if (this.mapGeocodeTimer) {
       clearTimeout(this.mapGeocodeTimer);
       this.mapGeocodeTimer = null;
@@ -1754,6 +1816,8 @@ export class AppComponent implements OnInit, OnDestroy {
   }
 
   private setMapSelection(point: MapPoint, userInitiated = true): void {
+    this.mapSearchRequest += 1;
+    this.mapSearchLoading = false;
     this.mapSelection = point;
     this.selectedLocation = point;
     if (userInitiated) this.mapSelectionTouched = true;
