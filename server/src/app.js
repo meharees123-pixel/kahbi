@@ -40,6 +40,7 @@ const {
 const { recoveryOtpTtlMs, validNewPassword, restaurantRecoveryStatus } = require("./restaurant-recovery");
 const { verifyFirebasePhoneToken } = require("./firebase-auth");
 const { createMenuExtractor } = require("./menu-extractor");
+const { publishOrderStatusEvent, subscribeToOrderStatus } = require("./order-status-events");
 
 const app = express();
 const secret = process.env.JWT_SECRET || "local-development-secret-change-before-deploy";
@@ -509,6 +510,56 @@ function requestedPage(value) {
 }
 
 app.get("/api/health", (_req, res) => res.json({ status: "ok", service: "kahbi-api", currency }));
+
+const activeOrderStatusStreams = new Set();
+let orderStatusHeartbeat = null;
+
+function openOrderStatusStream(req, res, scope, id) {
+  res.status(200).set({
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache, no-transform",
+    Connection: "keep-alive",
+    "X-Accel-Buffering": "no"
+  });
+  res.flushHeaders();
+  const unsubscribe = subscribeToOrderStatus(scope, id, (event) => {
+    if (event.type === "SYNC_REQUIRED") return writeOrderStatusStream(res, "event: sync-required\ndata: {}\n\n");
+    writeOrderStatusStream(res, `id: ${event.id}\nevent: order-status\ndata: ${JSON.stringify(event)}\n\n`);
+  });
+  activeOrderStatusStreams.add(res);
+  if (!orderStatusHeartbeat) {
+    orderStatusHeartbeat = setInterval(() => {
+      for (const stream of activeOrderStatusStreams) {
+        if (stream.writableEnded || stream.destroyed) continue;
+        writeOrderStatusStream(stream, ": keep-alive\n\n");
+      }
+    }, 25_000);
+    orderStatusHeartbeat.unref();
+  }
+  res.on("close", () => {
+    activeOrderStatusStreams.delete(res);
+    if (!activeOrderStatusStreams.size && orderStatusHeartbeat) {
+      clearInterval(orderStatusHeartbeat);
+      orderStatusHeartbeat = null;
+    }
+    unsubscribe();
+  });
+}
+
+function writeOrderStatusStream(res, message) {
+  if (!res.writableEnded && !res.destroyed && !res.write(message)) res.destroy();
+}
+
+app.get("/api/events/order-status", auth(), asyncRoute(async (req, res) => {
+  if (req.user.role === "CUSTOMER") {
+    return openOrderStatusStream(req, res, "customer", req.user._id);
+  }
+  if (req.user.role.startsWith("RESTAURANT_")) {
+    const restaurant = await restaurantForUser(req.user);
+    return openOrderStatusStream(req, res, "restaurant", restaurant._id);
+  }
+  return res.status(403).json({ error: "Order status updates are available to customers and restaurant accounts." });
+}));
 
 app.get("/api/config", (_req, res) => {
   res.set("Cache-Control", "no-store");
@@ -1252,6 +1303,20 @@ app.post("/api/orders/track", asyncRoute(async (req, res) => {
   res.json({ order: await orderWithRestaurantDetails(order) });
 }));
 
+app.post("/api/orders/track/events", auth(false), asyncRoute(async (req, res) => {
+  if (req.user) return res.status(403).json({ error: "Signed-in customers should use their authenticated order status stream." });
+  const reference = String(req.body.reference || "").trim().toUpperCase();
+  const submittedPhone = String(req.body.phone || "").trim();
+  const phone = submittedPhone.replace(/[^\d+]/g, "");
+  const order = await Order.findOne({
+    reference,
+    customerId: null,
+    "guest.phone": { $in: [phone, submittedPhone] }
+  }).select("_id").lean();
+  if (!order) return res.status(404).json({ error: "We couldn't find an order matching that reference and phone number." });
+  return openOrderStatusStream(req, res, "order", order._id);
+}));
+
 async function customerAddressList(userId) {
   const user = await User.findById(userId).lean();
   const addresses = Array.isArray(user?.addresses) ? user.addresses : [];
@@ -1623,6 +1688,7 @@ app.post("/api/orders", auth(false), asyncRoute(async (req, res) => {
   await writeAudit({ user: signedCustomer, action: "ORDER_CREATED", entity: "Order", entityId: order._id, details: { reference, restaurantId: restaurant._id, total } });
   await logNotification(order, "NEW_ORDER_RESTAURANT", restaurant.whatsapp || restaurant.phone);
   await logNotification(order, "ORDER_CREATED_CUSTOMER", signedCustomer.phone);
+  publishOrderStatusEvent(order, "", "ORDER_CREATED");
   res.status(201).json({ order: await orderWithRestaurantDetails(order) });
 }));
 

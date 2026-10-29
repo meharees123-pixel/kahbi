@@ -1,4 +1,13 @@
 services:
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
   mongodb:
     image: mongo:7
     restart: unless-stopped
@@ -21,6 +30,7 @@ services:
       PORT: 3000
       NODE_ENV: ${NODE_ENV:-development}
       MONGODB_URI: "${MONGODB_URI:-mongodb://mongodb:27017/kabhi}"
+      REDIS_URL: redis://redis:6379
       JWT_SECRET: ${JWT_SECRET:-local-development-secret-change-before-deploy}
       CLIENT_ORIGIN: http://localhost:4200
       CURRENCY: QAR
@@ -46,6 +56,8 @@ services:
     ports:
       - "3000:3000"
     depends_on:
+      redis:
+        condition: service_healthy
       seed:
         condition: service_completed_successfully
 

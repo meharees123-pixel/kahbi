@@ -1,5 +1,6 @@
 const { Order, Restaurant, AuditLog, MessageLog, BillingTransaction } = require("./models");
 const { canTransition } = require("./rules");
+const { publishOrderStatusEvent } = require("./order-status-events");
 
 async function writeAudit({ user, action, entity, entityId, details = {} }) {
   await AuditLog.create({
@@ -86,6 +87,7 @@ async function changeOrderStatus(order, nextStatus, user, reason = "") {
   }
   await writeAudit({ user, action: "ORDER_STATUS_CHANGED", entity: "Order", entityId: updatedOrder._id, details: { previousStatus, nextStatus, reason } });
   await logNotification(updatedOrder, `ORDER_${nextStatus}`, updatedOrder.guest.phone || "");
+  publishOrderStatusEvent(updatedOrder, previousStatus);
   return updatedOrder;
 }
 

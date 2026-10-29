@@ -177,6 +177,34 @@ interface Order {
   feedback?: FeedbackEntry | null;
 }
 
+interface OrderStatusEvent {
+  id: string;
+  type: 'ORDER_CREATED' | 'ORDER_STATUS_CHANGED';
+  orderId: string;
+  reference: string;
+  customerId: string | null;
+  restaurantId: string;
+  previousStatus: string;
+  status: string;
+  changedAt: string;
+  changedBy?: string;
+  role?: string;
+  reason?: string;
+}
+
+function isOrderStatusEvent(value: unknown): value is OrderStatusEvent {
+  return typeof value === 'object' && value !== null &&
+    'id' in value && typeof value.id === 'string' &&
+    'type' in value && (value.type === 'ORDER_CREATED' || value.type === 'ORDER_STATUS_CHANGED') &&
+    'orderId' in value && typeof value.orderId === 'string' &&
+    'reference' in value && typeof value.reference === 'string' &&
+    'customerId' in value && (typeof value.customerId === 'string' || value.customerId === null) &&
+    'restaurantId' in value && typeof value.restaurantId === 'string' &&
+    'previousStatus' in value && typeof value.previousStatus === 'string' &&
+    'status' in value && typeof value.status === 'string' &&
+    'changedAt' in value && typeof value.changedAt === 'string';
+}
+
 interface OrderQuote {
   subtotal: number;
   discount: number;
@@ -358,6 +386,12 @@ export class AppComponent implements OnInit, OnDestroy {
   private mapSelectionTouched = false;
   private currentLocation: MapPoint | null = null;
   private locationPermissionDenied = false;
+  private orderStatusStreamKey = '';
+  private orderStatusStreamController: AbortController | null = null;
+  private orderStatusStreamRetryAttempt = 0;
+  private orderStatusStreamErrorReported = false;
+  private orderStatusStreamNeedsReconcile = false;
+  private lastOrderStatusReconcileAt = 0;
   view = 'home';
   authModalOpen = false;
   authModalView: 'login' | 'signup' = 'login';
@@ -396,7 +430,6 @@ export class AppComponent implements OnInit, OnDestroy {
   restaurantPaymentMethodsSaving = false;
   countdownNow = Date.now();
   private acceptanceCountdownTimer: number | null = null;
-  private nextExpiredOrderRefreshAt = 0;
   pendingRestaurants: Restaurant[] = [];
   adminRestaurants: Restaurant[] = [];
   adminRestaurant: Restaurant | null = null;
@@ -670,16 +703,10 @@ export class AppComponent implements OnInit, OnDestroy {
       this.countdownNow = Date.now();
       if (this.view === 'restaurantPortal') {
         this.changeDetector.markForCheck();
-        const hasExpiredPendingOrder = this.restaurantOrders.some((order) =>
-          order.status === 'RESTAURANT_PENDING' && order.acceptanceDeadlineAt &&
-          Date.parse(order.acceptanceDeadlineAt) <= this.countdownNow
-        );
-        if (hasExpiredPendingOrder && this.countdownNow >= this.nextExpiredOrderRefreshAt) {
-          this.nextExpiredOrderRefreshAt = this.countdownNow + 15_000;
-          this.loadRestaurantOrders();
-        }
       }
+      this.syncOrderStatusStream();
     }, 1000);
+    document.addEventListener('visibilitychange', this.handleOrderStatusVisibilityChange);
     this.applyLocationRoute();
     this.mapLanguage = this.readMapLanguage();
     this.activeMapLanguage = this.mapLanguage;
@@ -726,6 +753,8 @@ export class AppComponent implements OnInit, OnDestroy {
   ngOnDestroy(): void {
     if (this.acceptanceCountdownTimer !== null) window.clearInterval(this.acceptanceCountdownTimer);
     if (this.errorDismissTimer) window.clearTimeout(this.errorDismissTimer);
+    document.removeEventListener('visibilitychange', this.handleOrderStatusVisibilityChange);
+    this.stopOrderStatusStream();
     this.destroyMapPicker();
   }
 
@@ -1296,6 +1325,11 @@ export class AppComponent implements OnInit, OnDestroy {
     this.http.get<{ orders: Order[] }>(`${this.api}/orders/mine`, { headers: this.headers() }).subscribe({
       next: ({ orders }) => {
         this.orders = orders;
+        const trackedOrder = orders.find((order) => order._id === this.trackedOrder?._id);
+        if (trackedOrder) {
+          this.trackedOrder = trackedOrder;
+          if (this.feedbackModalOrder?._id === trackedOrder._id) this.feedbackModalOrder = trackedOrder;
+        }
         this.feedbackSubmitted = Object.fromEntries(
           orders.filter((order) => order.feedbackSubmitted).map((order) => [order._id, true])
         );
@@ -2804,6 +2838,215 @@ export class AppComponent implements OnInit, OnDestroy {
     this.loadFeedbackOrders(true);
   }
 
+  private handleOrderStatusVisibilityChange = (): void => {
+    if (document.visibilityState === 'hidden' && this.orderStatusStreamController) {
+      this.orderStatusStreamNeedsReconcile = true;
+    }
+    this.syncOrderStatusStream();
+    if (document.visibilityState !== 'hidden' && this.orderStatusStreamNeedsReconcile) {
+      this.orderStatusStreamNeedsReconcile = false;
+      this.reconcileOrderStatusView();
+    }
+  };
+
+  private syncOrderStatusStream(): void {
+    let streamKey = '';
+    if (document.visibilityState !== 'hidden' && this.view === 'restaurantPortal' && this.isRestaurantUser) {
+      streamKey = 'restaurant';
+    } else if (document.visibilityState !== 'hidden' && this.isCustomer &&
+        (this.view === 'orders' || (['track', 'confirmation'].includes(this.view) && !!this.trackedOrder))) {
+      streamKey = 'customer';
+    } else if (document.visibilityState !== 'hidden' && !this.user && this.trackedOrder &&
+        ['track', 'confirmation'].includes(this.view)) {
+      streamKey = `guest:${this.trackedOrder._id}`;
+    }
+
+    if (streamKey === this.orderStatusStreamKey) return;
+    this.stopOrderStatusStream();
+    if (!streamKey) return;
+
+    this.orderStatusStreamKey = streamKey;
+    this.orderStatusStreamRetryAttempt = 0;
+    this.orderStatusStreamErrorReported = false;
+    this.orderStatusStreamController = new AbortController();
+    void this.consumeOrderStatusStream(streamKey, this.orderStatusStreamController);
+  }
+
+  private stopOrderStatusStream(): void {
+    this.orderStatusStreamController?.abort();
+    this.orderStatusStreamController = null;
+    this.orderStatusStreamKey = '';
+  }
+
+  private async consumeOrderStatusStream(streamKey: string, controller: AbortController): Promise<void> {
+    let hasConnected = false;
+    let connectedAt = 0;
+    while (!controller.signal.aborted && this.orderStatusStreamKey === streamKey) {
+      try {
+        const isGuest = streamKey.startsWith('guest:');
+        const token = localStorage.getItem(this.tokenKey);
+        const response = await fetch(
+          isGuest ? `${this.api}/orders/track/events` : `${this.api}/events/order-status`,
+          {
+            method: isGuest ? 'POST' : 'GET',
+            headers: {
+              Accept: 'text/event-stream',
+              ...(token && !isGuest ? { Authorization: `Bearer ${token}` } : {}),
+              ...(isGuest ? { 'Content-Type': 'application/json' } : {})
+            },
+            body: isGuest ? JSON.stringify({ reference: this.trackedOrder?.reference, phone: this.trackPhone }) : undefined,
+            cache: 'no-store',
+            signal: controller.signal
+          }
+        );
+        if (!response.ok) throw new Error(`Order status updates could not connect (${response.status}).`);
+        if (!response.headers.get('content-type')?.includes('text/event-stream')) {
+          throw new Error('The server returned an invalid order status stream.');
+        }
+        if (hasConnected) this.reconcileOrderStatusView();
+        hasConnected = true;
+        connectedAt = Date.now();
+        await this.readOrderStatusStream(response, controller.signal);
+        if (!controller.signal.aborted) throw new Error('The order status stream disconnected.');
+      } catch (error) {
+        if (controller.signal.aborted) return;
+        if (connectedAt && Date.now() - connectedAt >= 60_000) {
+          this.orderStatusStreamErrorReported = false;
+          this.orderStatusStreamRetryAttempt = 0;
+        }
+        if (!this.orderStatusStreamErrorReported) {
+          this.orderStatusStreamErrorReported = true;
+          this.showError(error);
+        }
+      }
+
+      this.orderStatusStreamRetryAttempt += 1;
+      const baseDelay = Math.min(30_000, 1000 * 2 ** Math.min(this.orderStatusStreamRetryAttempt, 5));
+      const delay = Math.round(baseDelay * (0.75 + Math.random() * 0.5));
+      await new Promise<void>((resolve) => {
+        let timer = 0;
+        const onAbort = (): void => {
+          window.clearTimeout(timer);
+          controller.signal.removeEventListener('abort', onAbort);
+          resolve();
+        };
+        timer = window.setTimeout(() => {
+          controller.signal.removeEventListener('abort', onAbort);
+          resolve();
+        }, delay);
+        controller.signal.addEventListener('abort', onAbort, { once: true });
+      });
+    }
+  }
+
+  private reconcileOrderStatusView(): void {
+    if (Date.now() - this.lastOrderStatusReconcileAt < 3000) return;
+    this.lastOrderStatusReconcileAt = Date.now();
+    if (this.view === 'restaurantPortal') {
+      if (this.restaurantOrderTab === 'active') this.loadRestaurantOrders();
+      else this.loadCompletedRestaurantOrders(this.completedRestaurantOrdersPage);
+    } else if (this.isCustomer) {
+      this.loadFeedbackOrders(false);
+    } else if (this.trackedOrder) {
+      this.http.post<{ order: Order }>(`${this.api}/orders/track`, {
+        reference: this.trackedOrder.reference,
+        phone: this.trackPhone
+      }).subscribe({
+        next: ({ order }) => {
+          if (this.trackedOrder?._id === order._id) this.trackedOrder = order;
+          this.changeDetector.markForCheck();
+        },
+        error: (error) => this.showError(error)
+      });
+    }
+  }
+
+  private async readOrderStatusStream(response: Response, signal: AbortSignal): Promise<void> {
+    if (!response.body) throw new Error('The browser cannot read the order status stream.');
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    while (!signal.aborted) {
+      const { done, value } = await reader.read();
+      if (done) return;
+      buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, '\n');
+      let boundary = buffer.indexOf('\n\n');
+      while (boundary !== -1) {
+        const message = buffer.slice(0, boundary);
+        buffer = buffer.slice(boundary + 2);
+        const eventType = message.split('\n')
+          .find((line) => line.startsWith('event:'))
+          ?.slice(6)
+          .trim();
+        if (eventType === 'sync-required') {
+          this.reconcileOrderStatusView();
+          boundary = buffer.indexOf('\n\n');
+          continue;
+        }
+        if (eventType && eventType !== 'order-status') {
+          boundary = buffer.indexOf('\n\n');
+          continue;
+        }
+        const data = message.split('\n')
+          .filter((line) => line.startsWith('data:'))
+          .map((line) => line.slice(5).trim())
+          .join('\n');
+        if (data) {
+          let event: unknown;
+          try {
+            event = JSON.parse(data);
+          } catch (error) {
+            if (error instanceof SyntaxError) throw new Error('The server sent an invalid order status event.');
+            throw error;
+          }
+          if (!isOrderStatusEvent(event)) throw new Error('The server sent an invalid order status event.');
+          this.applyOrderStatusEvent(event);
+        }
+        boundary = buffer.indexOf('\n\n');
+      }
+    }
+    await reader.cancel();
+  }
+
+  private applyOrderStatusEvent(event: OrderStatusEvent): void {
+    if (!event.orderId || !event.status) return;
+    const updateOrder = (order: Order): Order => {
+      if (order._id !== event.orderId || order.status === event.status) return order;
+      return {
+        ...order,
+        status: event.status,
+        updatedAt: event.changedAt,
+        acceptanceDeadlineAt: event.status === 'RESTAURANT_PENDING' ? order.acceptanceDeadlineAt : null,
+        statusHistory: [...order.statusHistory, {
+          status: event.status,
+          createdAt: event.changedAt,
+          ...(event.previousStatus ? { previousStatus: event.previousStatus } : {})
+        }]
+      };
+    };
+
+    const restaurantOrderExists = this.restaurantOrders.some((order) => order._id === event.orderId);
+    const customerOrderExists = this.orders.some((order) => order._id === event.orderId);
+    this.restaurantOrders = this.restaurantOrders.map(updateOrder);
+    this.completedRestaurantOrders = this.completedRestaurantOrders.map(updateOrder);
+    this.orders = this.orders.map(updateOrder);
+    if (this.trackedOrder?._id === event.orderId) this.trackedOrder = updateOrder(this.trackedOrder);
+    if (this.feedbackModalOrder?._id === event.orderId) this.feedbackModalOrder = updateOrder(this.feedbackModalOrder);
+
+    if (event.type === 'ORDER_CREATED' && this.view === 'restaurantPortal' && !restaurantOrderExists) {
+      this.loadRestaurantOrders();
+    }
+    if (event.type === 'ORDER_CREATED' && this.isCustomer && this.view === 'orders' && !customerOrderExists) {
+      this.loadFeedbackOrders(false);
+    }
+    if (event.status === 'CLOSED' && this.view === 'restaurantPortal' &&
+        this.restaurantOrderTab === 'completed' &&
+        !this.completedRestaurantOrders.some((order) => order._id === event.orderId)) {
+      this.loadCompletedRestaurantOrders(this.completedRestaurantOrdersPage);
+    }
+    this.changeDetector.markForCheck();
+  }
+
   loadRestaurantPortal(): void {
     this.view = 'restaurantPortal';
     this.http.get<{ restaurant: Restaurant }>(`${this.api}/restaurant/me`, { headers: this.headers() }).subscribe({
@@ -2882,9 +3125,12 @@ export class AppComponent implements OnInit, OnDestroy {
 
   restaurantAction(order: Order, status: string): void {
     this.http.patch<{ order: Order }>(`${this.api}/restaurant/orders/${order._id}/status`, { status }, { headers: this.headers() }).subscribe({
-      next: () => {
+      next: ({ order: updatedOrder }) => {
         this.notice = `${order.reference} updated.`;
-        this.loadRestaurantPortal();
+        this.restaurantOrders = this.restaurantOrders.map((entry) => entry._id === updatedOrder._id
+          ? { ...entry, ...updatedOrder, acceptanceDeadlineAt: null }
+          : entry);
+        this.changeDetector.markForCheck();
       },
       error: (error) => this.showError(error)
     });
