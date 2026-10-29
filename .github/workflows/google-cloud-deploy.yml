@@ -54,7 +54,15 @@ jobs:
       OTP_SIGNING_SECRET: ${{ vars.GCP_OTP_SIGNING_SECRET }}
       WHATSAPP_ENCRYPTION_SECRET: ${{ vars.GCP_WHATSAPP_ENCRYPTION_SECRET }}
       GEMINI_API_KEY_SECRET: ${{ vars.GCP_GEMINI_API_KEY_SECRET }}
+      SMTP_USER_SECRET: ${{ vars.GCP_SMTP_USER_SECRET }}
+      SMTP_PASS_SECRET: ${{ vars.GCP_SMTP_PASS_SECRET }}
       CLIENT_ORIGIN: ${{ vars.GCP_CLIENT_ORIGIN }}
+      ADMIN_NOTIFICATION_EMAIL: ${{ vars.GCP_ADMIN_NOTIFICATION_EMAIL || 'kabhioffical92@gmail.com' }}
+      SMTP_HOST: ${{ vars.GCP_SMTP_HOST }}
+      SMTP_PORT: ${{ vars.GCP_SMTP_PORT }}
+      SMTP_SECURE: ${{ vars.GCP_SMTP_SECURE }}
+      EMAIL_FROM: ${{ vars.GCP_EMAIL_FROM }}
+      EMAIL_FROM_NAME: ${{ vars.GCP_EMAIL_FROM_NAME || 'KABHI' }}
       API_SERVICE: ${{ vars.GCP_API_SERVICE || 'kahbi-api' }}
       WEB_SERVICE: ${{ vars.GCP_WEB_SERVICE || 'kahbi-web' }}
     steps:
@@ -64,7 +72,7 @@ jobs:
       - name: Validate deployment configuration
         shell: bash
         run: |
-          required=(GCP_PROJECT_ID GCP_REGION GAR_REPOSITORY RUNTIME_SERVICE_ACCOUNT MONGODB_SECRET JWT_SECRET OTP_SIGNING_SECRET WHATSAPP_ENCRYPTION_SECRET GEMINI_API_KEY_SECRET CLIENT_ORIGIN)
+          required=(GCP_PROJECT_ID GCP_REGION GAR_REPOSITORY RUNTIME_SERVICE_ACCOUNT MONGODB_SECRET JWT_SECRET OTP_SIGNING_SECRET WHATSAPP_ENCRYPTION_SECRET GEMINI_API_KEY_SECRET SMTP_USER_SECRET SMTP_PASS_SECRET SMTP_HOST SMTP_PORT SMTP_SECURE EMAIL_FROM CLIENT_ORIGIN)
           missing=()
           for key in "${required[@]}"; do
             if [[ -z "${!key}" ]]; then missing+=("$key"); fi
@@ -116,12 +124,20 @@ jobs:
             CURRENCY=QAR
             CLIENT_ORIGIN=${{ env.CLIENT_ORIGIN }}
             GEMINI_MODEL=gemini-2.5-flash
+            ADMIN_NOTIFICATION_EMAIL=${{ env.ADMIN_NOTIFICATION_EMAIL }}
+            SMTP_HOST=${{ env.SMTP_HOST }}
+            SMTP_PORT=${{ env.SMTP_PORT }}
+            SMTP_SECURE=${{ env.SMTP_SECURE }}
+            EMAIL_FROM=${{ env.EMAIL_FROM }}
+            EMAIL_FROM_NAME=${{ env.EMAIL_FROM_NAME }}
           secrets: |-
             MONGODB_URI=${{ env.MONGODB_SECRET }}:latest
             JWT_SECRET=${{ env.JWT_SECRET }}:latest
             OTP_SIGNING_SECRET=${{ env.OTP_SIGNING_SECRET }}:latest
             WHATSAPP_CONFIG_ENCRYPTION_KEY=${{ env.WHATSAPP_ENCRYPTION_SECRET }}:latest
             GEMINI_API_KEY=${{ env.GEMINI_API_KEY_SECRET }}:latest
+            SMTP_USER=${{ env.SMTP_USER_SECRET }}:latest
+            SMTP_PASS=${{ env.SMTP_PASS_SECRET }}:latest
           flags: >-
             --service-account=${{ env.RUNTIME_SERVICE_ACCOUNT }}
             --port=8080

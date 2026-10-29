@@ -24,6 +24,8 @@ Create these secrets in Secret Manager and add a version to each. Do not put the
 | OTP signing secret | Independent random secret of at least 32 characters |
 | WhatsApp config encryption key | Independent random key; keep stable so saved credentials remain decryptable |
 | Gemini API key | Private Google AI Studio API key for menu extraction |
+| SMTP username | Authenticated account authorized to send from the configured sender |
+| SMTP password | SMTP credential or provider app password |
 
 The workflow references each secret's `latest` version. Production database connectivity and network allow-listing must be configured in the MongoDB provider. Do not point production at the local/demo database.
 
@@ -43,6 +45,14 @@ In **Settings > Secrets and variables > Actions > Variables**, add:
 | `GCP_OTP_SIGNING_SECRET` | Secret Manager secret ID holding the OTP signing secret | Yes |
 | `GCP_WHATSAPP_ENCRYPTION_SECRET` | Secret Manager secret ID holding the WhatsApp encryption key | Yes |
 | `GCP_GEMINI_API_KEY_SECRET` | Secret Manager secret ID holding the Gemini API key | Yes |
+| `GCP_SMTP_USER_SECRET` | Secret Manager secret ID holding the SMTP username | Yes |
+| `GCP_SMTP_PASS_SECRET` | Secret Manager secret ID holding the SMTP password | Yes |
+| `GCP_SMTP_HOST` | SMTP hostname | Yes |
+| `GCP_SMTP_PORT` | SMTP port (typically `587` or `465`) | Yes |
+| `GCP_SMTP_SECURE` | `true` for implicit TLS (typically port `465`), otherwise `false` | Yes |
+| `GCP_EMAIL_FROM` | Verified sender email address authorized by the SMTP provider | Yes |
+| `GCP_EMAIL_FROM_NAME` | Sender display name; defaults to `KABHI` | No |
+| `GCP_ADMIN_NOTIFICATION_EMAIL` | Admin notification recipient; defaults to `kabhioffical92@gmail.com` | No |
 | `GCP_CLIENT_ORIGIN` | Public HTTPS origin of the KABHI web app (for example, `https://kahbi.example.com`) | Yes |
 | `GCP_API_SERVICE` | Cloud Run API service name; defaults to `kahbi-api` | No |
 | `GCP_WEB_SERVICE` | Cloud Run frontend service name; defaults to `kahbi-web` | No |
@@ -58,3 +68,9 @@ The API service is publicly reachable, with application authentication and role 
 The workflow deliberately does not run the demo seeder against production: seeding would create demo accounts and can reset their passwords. Provision production data and the first administrator using an approved, secure process before opening the service to users. Configure WhatsApp Cloud API settings from the admin portal after creating that administrator. The deployment workflow only builds and deploys; it does not create or change database records.
 
 Before enabling the deploy gate, configure the project ID, region, Artifact Registry repository, runtime service account, deployer JSON key secret, and Secret Manager secret IDs. Never send secret values or service-account key JSON in chat.
+
+## Email notifications
+
+For local Docker Compose, copy `.env.example` to `.env` and configure `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURE`, `SMTP_USER`, `SMTP_PASS`, and a provider-verified `EMAIL_FROM`. `ADMIN_NOTIFICATION_EMAIL` defaults to `kabhioffical92@gmail.com`. SMTP credentials are passed only to the API container.
+
+For Cloud Run, store `SMTP_USER` and `SMTP_PASS` in Secret Manager, then configure the SMTP host, port, secure mode, verified sender, and optional sender name as the repository variables listed above. The deployment workflow injects these settings into the API service only. Email notifications are persisted in MongoDB and retried with bounded backoff; if SMTP is unavailable or unconfigured, business operations still succeed and queued notifications are logged/retried.

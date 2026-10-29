@@ -267,6 +267,25 @@ const MessageLogSchema = new Schema({
   error: { type: String, default: "WhatsApp provider is not configured; demo mode only." }
 }, { timestamps: true });
 
+const EmailNotificationSchema = new Schema({
+  eventKey: { type: String, required: true, unique: true },
+  eventType: { type: String, required: true },
+  restaurantId: { type: Schema.Types.ObjectId, ref: "Restaurant", default: null, index: true },
+  recipient: { type: String, required: true },
+  subject: { type: String, required: true },
+  text: { type: String, required: true },
+  html: { type: String, required: true },
+  status: { type: String, enum: ["QUEUED", "SENDING", "SENT", "FAILED"], default: "QUEUED", index: true },
+  attempts: { type: Number, default: 0 },
+  nextAttemptAt: { type: Date, default: Date.now, index: true },
+  lockUntil: { type: Date, default: null },
+  sentAt: { type: Date, default: null },
+  providerMessageId: { type: String, default: "" },
+  lastError: { type: String, default: "" }
+}, { timestamps: true });
+
+EmailNotificationSchema.index({ status: 1, nextAttemptAt: 1, createdAt: 1 });
+
 const PhoneAuthChallengeSchema = new Schema({
   phone: { type: String, required: true, index: true },
   purpose: { type: String, enum: ["RESTAURANT_LOGIN_ID_RECOVERY", "RESTAURANT_PASSWORD_RECOVERY"], required: true },
@@ -325,6 +344,7 @@ module.exports = {
   Feedback: mongoose.model("Feedback", FeedbackSchema),
   AuditLog: mongoose.model("AuditLog", AuditSchema),
   MessageLog: mongoose.model("MessageLog", MessageLogSchema),
+  EmailNotification: mongoose.model("EmailNotification", EmailNotificationSchema),
   PhoneAuthChallenge: mongoose.model("PhoneAuthChallenge", PhoneAuthChallengeSchema),
   RestaurantRegistration: mongoose.model("RestaurantRegistration", RestaurantRegistrationSchema),
   PlatformSetting: mongoose.model("PlatformSetting", PlatformSettingSchema)
