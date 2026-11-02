@@ -1,17 +1,4 @@
 services:
-  mongodb:
-    image: mongo:7
-    restart: unless-stopped
-    ports:
-      - "27017:27017"
-    volumes:
-      - kahbi-mongo:/data/db
-    healthcheck:
-      test: ["CMD", "mongosh", "--quiet", "--eval", "db.adminCommand('ping').ok"]
-      interval: 5s
-      timeout: 5s
-      retries: 20
-
   api:
     build:
       context: ./server
@@ -20,7 +7,7 @@ services:
     environment:
       PORT: 3000
       NODE_ENV: ${NODE_ENV:-production}
-      MONGODB_URI: ${MONGODB_URI}
+      MONGODB_URI: ${MONGODB_URI:?Set MONGODB_URI in root .env}
       JWT_SECRET: ${JWT_SECRET}
       CLIENT_ORIGIN: ${CLIENT_ORIGIN}
       CURRENCY: QAR
@@ -50,10 +37,7 @@ services:
     image: kahbi-api
     command: ["npm", "run", "seed"]
     environment:
-      MONGODB_URI: ${MONGODB_URI}
-    depends_on:
-      mongodb:
-        condition: service_healthy
+      MONGODB_URI: ${MONGODB_URI:?Set MONGODB_URI in root .env}
 
   web:
     build:
@@ -63,6 +47,3 @@ services:
       - "4200:4200"
     depends_on:
       - api
-
-volumes:
-  kahbi-mongo:

@@ -4,9 +4,10 @@ const app = require("./app");
 const { expirePendingOrders } = require("./services");
 
 const port = Number(process.env.PORT || 3000);
-const mongoUri = process.env.MONGODB_URI || "mongodb://localhost:27017/kabhi";
+const mongoUri = process.env.MONGODB_URI;
 
 async function start() {
+  if (!mongoUri) throw new Error("MONGODB_URI must be set to the MongoDB connection string.");
   await mongoose.connect(mongoUri);
   app.listen(port, () => console.log(`KABHI API listening on ${port}`));
   const timer = setInterval(() => {
