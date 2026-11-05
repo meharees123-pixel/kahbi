@@ -10,9 +10,9 @@ Install and start Docker Desktop, then run this from the project directory:
 npm run local
 ```
 
-This starts MongoDB, seeds the demo data, and launches the API and web app. Open [http://localhost:4200](http://localhost:4200). The API health endpoint is [http://localhost:3000/api/health](http://localhost:3000/api/health). Stop the stack with `Ctrl+C`.
+This seeds the demo data in the configured MongoDB database and launches the API and web app. Open [http://localhost:4200](http://localhost:4200). The API health endpoint is [http://localhost:3000/api/health](http://localhost:3000/api/health). Stop the stack with `Ctrl+C`.
 
-By default the API and seeder use the local MongoDB container and the `kabhi` database. `.env.example` is only a template; Compose reads the ignored root `.env` file. To use MongoDB Atlas locally, set `MONGODB_URI` in root `.env` to your Atlas connection string; Compose passes the same value to both the API and seeder. Include the intended database path in the URI (this project uses `/kabhi`) so you do not accidentally use MongoDB's default database. Keep `.env` private and never commit it. Ensure the Atlas database user has read/write access, the machine's IP is permitted by the Atlas network access list, and any special characters in the password are percent-encoded. The Compose MongoDB container may still appear as running, but when root `.env` points to Atlas, neither the API nor seeder uses that local database.
+`.env.example` is only a template; Compose reads the ignored root `.env` file. Set `MONGODB_URI` there to your MongoDB Atlas connection string; Compose passes the same value to both the API and seeder, and does not start a local MongoDB service. Include the intended database path in the URI (this project uses `/kabhi`) so you do not accidentally use MongoDB's default database. Keep `.env` private and never commit it. Ensure the Atlas database user has read/write access, the machine's IP is permitted by the Atlas network access list, and any special characters in the password are percent-encoded.
 
 For a deployed server, configure `MONGODB_URI` as a private server-side environment variable on both the API service and any seed/migration job; do not put it in the frontend or source code. Use the same Atlas database path and confirm the deployed server's IP/network access is allowed in Atlas.
 
@@ -28,7 +28,7 @@ OTP_SIGNING_SECRET=generate-a-private-random-secret-at-least-32-characters
 WHATSAPP_CONFIG_ENCRYPTION_KEY=generate-a-different-private-random-secret-at-least-32-characters
 ```
 
-For Docker, `MONGODB_URI` in `.env` must be `mongodb://mongodb:27017/kabhi` when using the local container (not `localhost` from inside the API container). Put the generated secrets into `.env`, then run `npm run local` again. Sign in at [http://localhost:4200/login/admin](http://localhost:4200/login/admin), open the **WhatsApp Cloud API** panel, and save your Meta access token, numeric Phone Number ID, template name, language, and Graph API version. Customer login and checkout verification require only an international-format WhatsApp number; a new customer account is created after the code is verified. Every subsequent customer sign-in also requires an OTP.
+For Docker, set `MONGODB_URI` to your Atlas URI in root `.env`; the API and seeder both use this same database. Put the generated secrets into `.env`, then run `npm run local` again. Sign in at [http://localhost:4200/login/admin](http://localhost:4200/login/admin), open the **WhatsApp Cloud API** panel, and save your Meta access token, numeric Phone Number ID, template name, language, and Graph API version. Customer login and checkout verification require only an international-format WhatsApp number; a new customer account is created after the code is verified. Every subsequent customer sign-in also requires an OTP.
 
 The first startup seeds a clearly labeled demo restaurant, menu, promotion, and accounts. Seeding is safe to repeat. Restaurant and admin demo passwords are `Demo123!`; the demo customer's number is `+97450000002` and needs to be able to receive a code through your configured WhatsApp test/sender setup:
 
@@ -46,9 +46,9 @@ Use `Demo123!` for all demo accounts. Each restaurant-owner account is scoped to
 
 ## Run without Docker
 
-Requirements: Node.js 22.22.3+ (or 24.15.0+) and MongoDB 7+ running locally.
+Requirements: Node.js 22.22.3+ (or 24.15.0+) and a MongoDB Atlas connection string.
 
-1. Copy `.env.example` to `.env` (the server and seeder load this root file), set a private `JWT_SECRET`, and configure `MONGODB_URI` for local MongoDB or Atlas.
+1. Copy `.env.example` to `.env` (the server and seeder load this root file), set a private `JWT_SECRET`, and set `MONGODB_URI` to your MongoDB Atlas connection string.
 2. Run `npm run install:all` to install the root, API, and Angular dependencies.
 3. Run `npm run seed` once to create demo data.
 4. Run `npm run dev`; the Angular UI is at `http://localhost:4200` and API at `http://localhost:3000`.
