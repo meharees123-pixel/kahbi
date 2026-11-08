@@ -29,6 +29,11 @@ function emitToScope(scope, id, event) {
 }
 
 function dispatch(event) {
+  if (event.type === "NOTIFICATION_CREATED") {
+    if (event.recipientRole === "CUSTOMER") emitToScope("customer", event.recipientId, event);
+    if (event.recipientRole === "RESTAURANT") emitToScope("restaurant", event.recipientId, event);
+    return;
+  }
   emitToScope("customer", event.customerId, event);
   emitToScope("restaurant", event.restaurantId, event);
   emitToScope("order", event.orderId, event);
@@ -103,6 +108,22 @@ function publishOrderStatusEvent(order, previousStatus, eventType = "ORDER_STATU
       : new Date(order.updatedAt || Date.now()).toISOString()
   };
 
+  publishEvent(event);
+}
+
+function publishNotificationEvent({ notificationId, recipientId, recipientRole, createdAt }) {
+  if (!["CUSTOMER", "RESTAURANT"].includes(recipientRole) || !notificationId || !recipientId) return;
+  publishEvent({
+    id: randomUUID(),
+    type: "NOTIFICATION_CREATED",
+    notificationId,
+    recipientId,
+    recipientRole,
+    changedAt: createdAt
+  });
+}
+
+function publishEvent(event) {
   if (!publisher || !publisher.isReady) {
     if (publisher && !redisWarningLogged) {
       redisWarningLogged = true;
@@ -120,6 +141,7 @@ function publishOrderStatusEvent(order, previousStatus, eventType = "ORDER_STATU
 
 module.exports = {
   initializeOrderStatusEvents,
+  publishNotificationEvent,
   publishOrderStatusEvent,
   subscribeToOrderStatus
 };

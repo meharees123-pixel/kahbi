@@ -1,6 +1,7 @@
 const { Order, Restaurant, AuditLog, MessageLog, BillingTransaction } = require("./models");
 const { canTransition } = require("./rules");
 const { publishOrderStatusEvent } = require("./order-status-events");
+const { createOrderStatusOutboxEntry, notificationService } = require("./notifications");
 
 async function writeAudit({ user, action, entity, entityId, details = {} }) {
   await AuditLog.create({
@@ -48,9 +49,12 @@ async function changeOrderStatus(order, nextStatus, user, reason = "") {
     role: user ? user.role : "SYSTEM",
     reason
   };
+  const notificationOutboxEntry = createOrderStatusOutboxEntry(order, previousStatus, nextStatus, user);
+  const update = { $set: values, $push: { statusHistory: statusEvent } };
+  if (notificationOutboxEntry) update.$push.notificationOutbox = notificationOutboxEntry;
   const updatedOrder = await Order.findOneAndUpdate(
     { _id: order._id, status: previousStatus },
-    { $set: values, $push: { statusHistory: statusEvent } },
+    update,
     { new: true, runValidators: true }
   );
   if (!updatedOrder) {
@@ -58,6 +62,7 @@ async function changeOrderStatus(order, nextStatus, user, reason = "") {
     error.status = 409;
     throw error;
   }
+  await notificationService.attemptOrderNotifications(updatedOrder._id);
   if (nextStatus === "CLOSED") {
     await BillingTransaction.findOneAndUpdate(
       { orderId: updatedOrder._id },

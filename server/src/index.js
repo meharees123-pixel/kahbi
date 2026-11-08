@@ -9,11 +9,14 @@ const app = require("./app");
 const { expirePendingOrders } = require("./services");
 const { emailNotifications } = require("./email-notifications");
 const { initializeOrderStatusEvents } = require("./order-status-events");
+const { notificationService } = require("./notifications");
+const { assertCustomerOtpConfiguration } = require("./customer-auth");
 
 const port = Number(process.env.PORT || 3000);
 const mongoUri = process.env.MONGODB_URI || "mongodb://localhost:27017/kabhi";
 
 async function start() {
+  assertCustomerOtpConfiguration();
   await mongoose.connect(mongoUri);
   await initializeOrderStatusEvents({ required: process.env.NODE_ENV === "production" });
   app.listen(port, () => console.log(`KABHI API listening on ${port}`));
@@ -21,6 +24,15 @@ async function start() {
     console.error("Email notification processing failed:", error.name, error.code || "");
   });
   emailNotifications.startWorker();
+  notificationService.processPendingNotifications().catch((error) => {
+    console.error("In-app notification outbox processing failed:", error.message);
+  });
+  const notificationTimer = setInterval(() => {
+    notificationService.processPendingNotifications().catch((error) => {
+      console.error("In-app notification outbox processing failed:", error.message);
+    });
+  }, 5 * 1000);
+  notificationTimer.unref();
   const timer = setInterval(() => {
     expirePendingOrders().catch((error) => console.error("Order timeout processing failed:", error.message));
   }, 60 * 1000);

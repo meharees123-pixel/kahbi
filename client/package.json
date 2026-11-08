@@ -4,7 +4,8 @@
   "private": true,
   "scripts": {
     "start": "ng serve",
-    "build": "ng build"
+    "build": "ng build",
+    "test": "node --test"
   },
   "dependencies": {
     "@angular/common": "^22.2.2",
