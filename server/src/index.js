@@ -13,10 +13,11 @@ const { notificationService } = require("./notifications");
 const { assertCustomerOtpConfiguration } = require("./customer-auth");
 
 const port = Number(process.env.PORT || 3000);
-const mongoUri = process.env.MONGODB_URI || "mongodb://localhost:27017/kabhi";
+const mongoUri = process.env.MONGODB_URI;
 
 async function start() {
   assertCustomerOtpConfiguration();
+  if (!mongoUri) throw new Error("MONGODB_URI must be set to the MongoDB connection string.");
   await mongoose.connect(mongoUri);
   await initializeOrderStatusEvents({ required: process.env.NODE_ENV === "production" });
   app.listen(port, () => console.log(`KABHI API listening on ${port}`));

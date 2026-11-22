@@ -11,7 +11,9 @@ async function upsertUser({ name, email, phone, role, restaurantId = null }) {
 }
 
 async function seed() {
-  await mongoose.connect(process.env.MONGODB_URI || "mongodb://localhost:27017/kabhi");
+  const mongoUri = process.env.MONGODB_URI;
+  if (!mongoUri) throw new Error("MONGODB_URI must be set to the MongoDB connection string.");
+  await mongoose.connect(mongoUri);
   let restaurant = await Restaurant.findOne({ name: "KABHI Demo Hotel", demo: true });
   if (!restaurant) {
     restaurant = await Restaurant.create({
