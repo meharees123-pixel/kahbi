@@ -381,9 +381,9 @@ export class AppComponent implements OnInit, OnDestroy {
   private readonly maxImagePixels = 40_000_000;
   private readonly maxMenuImportFiles = 10;
   private readonly maxMenuPhotoBatchBytes = 20 * 1024 * 1024;
-  private readonly api = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
-    ? 'http://localhost:3000/api'
-    : '/api';
+ private readonly api = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
+  ? 'http://localhost:3000/api'
+  : '/api';
   private readonly tokenKey = 'kahbi.session';
   private readonly cartStorageKey = 'kahbi.guest-cart';
   private readonly deliveryLocationKeys = {
@@ -1008,6 +1008,14 @@ export class AppComponent implements OnInit, OnDestroy {
     if (this.loginPortal === 'CUSTOMER') return user.role === 'CUSTOMER';
     if (this.loginPortal === 'RESTAURANT') return user.role.startsWith('RESTAURANT_');
     return user.role === 'ADMIN' || user.role === 'SUPER_ADMIN';
+  }
+
+  private createIdempotencyKey(): string {
+    const bytes = crypto.getRandomValues(new Uint8Array(16));
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    const hex = Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
+    return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
   }
 
   get isSelectedRestaurantInDeliveryRange(): boolean {
@@ -2593,7 +2601,7 @@ export class AppComponent implements OnInit, OnDestroy {
     }
     this.loading = true;
     this.error = '';
-    const idempotencyKey = crypto.randomUUID();
+    const idempotencyKey = this.createIdempotencyKey();
     const body: { [key: string]: unknown } = {
       restaurantId: this.selectedRestaurant._id,
       items: this.cartItems.map(({ item, quantity }) => ({ menuItemId: item._id, quantity })),

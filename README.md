@@ -62,9 +62,9 @@ Use `Demo123!` for all demo accounts. Each restaurant-owner account is scoped to
 
 ## Run without Docker
 
-Requirements: Node.js 22.22.3+ (or 24.15.0+) and MongoDB 7+ running locally.
+Requirements: Node.js 22.22.3+ (or 24.15.0+) and a MongoDB Atlas connection string.
 
-1. Copy `.env.example` to `.env` (the server and seeder load this root file), set a private `JWT_SECRET`, and configure `MONGODB_URI` for local MongoDB or Atlas.
+1. Copy `.env.example` to `.env` (the server and seeder load this root file), set a private `JWT_SECRET`, and set `MONGODB_URI` to your MongoDB Atlas connection string.
 2. Run `npm run install:all` to install the root, API, and Angular dependencies.
 3. Run `npm run seed` once to create demo data.
 4. Run `npm run dev`; the Angular UI is at `http://localhost:4200` and API at `http://localhost:3000`.
