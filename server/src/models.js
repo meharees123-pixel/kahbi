@@ -123,6 +123,18 @@ const CustomerCartSchema = new Schema({
   }]
 }, { timestamps: true });
 
+const OrderNotificationOutboxSchema = new Schema({
+  eventKey: { type: String, required: true },
+  recipientId: { type: Schema.Types.ObjectId, required: true },
+  recipientRole: { type: String, enum: ["CUSTOMER", "RESTAURANT"], required: true },
+  notificationType: { type: String, enum: ["NEW_ORDER", "ORDER_STATUS_CHANGED"], required: true },
+  status: { type: String, default: "" },
+  createdAt: { type: Date, default: Date.now },
+  processedAt: { type: Date, default: null },
+  attempts: { type: Number, default: 0 },
+  lastError: { type: String, default: "" }
+});
+
 const OrderSchema = new Schema(
   {
     reference: { type: String, required: true, unique: true },
@@ -169,6 +181,7 @@ const OrderSchema = new Schema(
       reason: { type: String, default: "" },
       createdAt: { type: Date, default: Date.now }
     }],
+    notificationOutbox: { type: [OrderNotificationOutboxSchema], default: [], select: false },
     customerTermsVersion: { type: String, default: "" },
     customerTermsAcceptedAt: { type: Date, default: null },
     completedAt: { type: Date, default: null }
@@ -177,6 +190,22 @@ const OrderSchema = new Schema(
 );
 OrderSchema.index({ customerId: 1, createdAt: -1 });
 OrderSchema.index({ restaurantId: 1, status: 1, createdAt: -1 });
+OrderSchema.index({ "notificationOutbox.processedAt": 1, createdAt: 1 });
+
+const NotificationSchema = new Schema({
+  eventKey: { type: String, required: true, unique: true },
+  recipientId: { type: Schema.Types.ObjectId, required: true },
+  recipientRole: { type: String, enum: ["CUSTOMER", "RESTAURANT"], required: true },
+  notificationType: { type: String, enum: ["NEW_ORDER", "ORDER_STATUS_CHANGED"], required: true },
+  orderId: { type: Schema.Types.ObjectId, ref: "Order", required: true },
+  status: { type: String, default: "" },
+  title: { type: String, required: true, maxlength: 120 },
+  message: { type: String, required: true, maxlength: 300 },
+  isRead: { type: Boolean, default: false },
+  readAt: { type: Date, default: null }
+}, { timestamps: true });
+NotificationSchema.index({ recipientId: 1, recipientRole: 1, createdAt: -1 });
+NotificationSchema.index({ recipientId: 1, recipientRole: 1, isRead: 1, createdAt: -1 });
 
 const BillingTransactionSchema = new Schema({
   orderId: { type: Schema.Types.ObjectId, ref: "Order", required: true, unique: true },
@@ -263,7 +292,8 @@ const MessageLogSchema = new Schema({
   recipient: { type: String, required: true },
   direction: { type: String, default: "OUTBOUND" },
   template: { type: String, required: true },
-  status: { type: String, enum: ["NOT_CONFIGURED", "QUEUED", "SENT", "DELIVERED", "FAILED"], default: "NOT_CONFIGURED" },
+  status: { type: String, enum: ["NOT_CONFIGURED", "QUEUED", "SENT", "DELIVERED", "READ", "FAILED"], default: "NOT_CONFIGURED" },
+  providerMessageId: { type: String, default: "", index: true },
   error: { type: String, default: "WhatsApp provider is not configured; demo mode only." }
 }, { timestamps: true });
 
@@ -336,6 +366,7 @@ module.exports = {
   MenuItem: mongoose.model("MenuItem", MenuItemSchema),
   CustomerCart: mongoose.model("CustomerCart", CustomerCartSchema),
   Order: mongoose.model("Order", OrderSchema),
+  Notification: mongoose.model("Notification", NotificationSchema),
   BillingTransaction: mongoose.model("BillingTransaction", BillingTransactionSchema),
   Promotion: mongoose.model("Promotion", PromotionSchema),
   Advertisement: mongoose.model("Advertisement", AdvertisementSchema),

@@ -7,6 +7,7 @@ import { FormsModule } from '@angular/forms';
 import { finalize, firstValueFrom, switchMap } from 'rxjs';
 import { LoadingIndicatorService } from './loading-indicator.service';
 import { FirebasePhoneAuthService } from './firebase-phone-auth.service';
+import { isOrderStatusEvent, type NotificationEvent, type OrderStatusEvent } from './notification-events.mjs';
 
 declare global {
   interface Window {
@@ -24,6 +25,26 @@ interface User {
   restaurantId?: string;
   demo?: boolean;
   primaryAddressId?: string | null;
+}
+
+interface WhatsAppSetup {
+  phoneNumberId: string | null;
+  phoneNumber: string | null;
+  verifiedName?: string;
+  status: string;
+  platformType: string | null;
+  codeVerificationStatus?: string | null;
+  registrationComplete: boolean;
+}
+
+interface WhatsAppTestMessageResult {
+  success: true;
+  status: 'accepted';
+  messageId: string | null;
+  recipient: string;
+  timestamp: string;
+  providerResponse: unknown;
+  loggingWarning?: string;
 }
 
 interface CustomerAddress {
@@ -177,32 +198,27 @@ interface Order {
   feedback?: FeedbackEntry | null;
 }
 
-interface OrderStatusEvent {
-  id: string;
-  type: 'ORDER_CREATED' | 'ORDER_STATUS_CHANGED';
-  orderId: string;
+interface NotificationOrderSummary {
   reference: string;
-  customerId: string | null;
-  restaurantId: string;
-  previousStatus: string;
+  restaurantName: string;
+  customerName: string;
+  items: OrderItem[];
+  total: number;
+  currency: string;
   status: string;
-  changedAt: string;
-  changedBy?: string;
-  role?: string;
-  reason?: string;
+  createdAt: string;
 }
 
-function isOrderStatusEvent(value: unknown): value is OrderStatusEvent {
-  return typeof value === 'object' && value !== null &&
-    'id' in value && typeof value.id === 'string' &&
-    'type' in value && (value.type === 'ORDER_CREATED' || value.type === 'ORDER_STATUS_CHANGED') &&
-    'orderId' in value && typeof value.orderId === 'string' &&
-    'reference' in value && typeof value.reference === 'string' &&
-    'customerId' in value && (typeof value.customerId === 'string' || value.customerId === null) &&
-    'restaurantId' in value && typeof value.restaurantId === 'string' &&
-    'previousStatus' in value && typeof value.previousStatus === 'string' &&
-    'status' in value && typeof value.status === 'string' &&
-    'changedAt' in value && typeof value.changedAt === 'string';
+interface AppNotification {
+  id: string;
+  notificationType: 'NEW_ORDER' | 'ORDER_STATUS_CHANGED';
+  title: string;
+  message: string;
+  orderId: string;
+  status: string;
+  isRead: boolean;
+  createdAt: string;
+  orderSummary: NotificationOrderSummary | null;
 }
 
 interface OrderQuote {
@@ -397,6 +413,22 @@ export class AppComponent implements OnInit, OnDestroy {
   authModalView: 'login' | 'signup' = 'login';
   loginPortal: LoginPortal = 'CUSTOMER';
   user: User | null = null;
+  whatsappTestPopupOpen = false;
+  whatsappTestRecipient = '+974';
+  whatsappTestMessage = 'Hello! This is a test WhatsApp message from KABHI.\n\nYour WhatsApp Cloud API integration is working successfully.\n\nThank you,\nKABHI Team';
+  whatsappTestMessageType: 'text' | 'template' = 'text';
+  whatsappTestSending = false;
+  whatsappTestResult: WhatsAppTestMessageResult | null = null;
+  whatsappTestError = '';
+  whatsappTestProviderError = '';
+  whatsappTestTimestamp = '';
+  whatsappSetup: WhatsAppSetup | null = null;
+  whatsappSetupLoading = false;
+  whatsappSetupError = '';
+  whatsappRegistrationPin = '';
+  whatsappRegistrationLoading = false;
+  whatsappRegistrationResponse = '';
+  private whatsappPopupCheckStarted = false;
   restaurants: Restaurant[] = [];
   expandedRestaurantPhoneId = '';
   menu: MenuItem[] = [];
@@ -418,6 +450,13 @@ export class AppComponent implements OnInit, OnDestroy {
   adminCustomerTermsLoading = false;
   adminCustomerTermsSaving = false;
   orders: Order[] = [];
+  notifications: AppNotification[] = [];
+  notificationUnreadCount = 0;
+  notificationPanelOpen = false;
+  notificationsLoading = false;
+  notificationPage = 1;
+  notificationTotalPages = 1;
+  focusedNotificationOrder: Order | null = null;
   restaurantOrders: Order[] = [];
   completedRestaurantOrders: Order[] = [];
   restaurantOrderTab: 'active' | 'completed' = 'active';
@@ -522,6 +561,7 @@ export class AppComponent implements OnInit, OnDestroy {
   customerAuthPhone = '';
   guestCountryCode = '+974';
   customerAuthCountryCode = '+974';
+  customerOtpEnabled = true;
   restaurantRecoveryCountryCode = '+974';
   readonly phoneCountryCodes = [
     { country: 'Qatar', code: '+974' },
@@ -712,6 +752,7 @@ export class AppComponent implements OnInit, OnDestroy {
     this.activeMapLanguage = this.mapLanguage;
     this.requestBrowserLocation();
     this.loadBrandLogo();
+    this.loadCustomerOtpConfiguration();
     if (this.view === 'partnerRegistration') this.restorePartnerRegistration();
     window.addEventListener('popstate', () => {
       this.applyLocationRoute();
@@ -734,8 +775,13 @@ export class AppComponent implements OnInit, OnDestroy {
       this.http.get<{ user: User }>(`${this.api}/auth/me`, { headers: this.headers() }).subscribe({
         next: ({ user }) => {
           this.user = user;
+          this.maybeOpenWhatsAppTestPopup();
           if (user.role !== 'CUSTOMER') this.restoreGuestCart();
           if (!['partnerRegistration', 'activateRestaurant', 'legal'].includes(this.view)) this.loadRoleLanding();
+          else if (this.isCustomer || this.isRestaurantUser) {
+            this.syncOrderStatusStream();
+            this.loadNotifications(1, 6);
+          }
         },
         error: () => {
           localStorage.removeItem(this.tokenKey);
@@ -825,6 +871,139 @@ export class AppComponent implements OnInit, OnDestroy {
     return this.user?.role === 'ADMIN' || this.user?.role === 'SUPER_ADMIN';
   }
 
+  get whatsappRegistrationPinValid(): boolean {
+    return /^\d{6}$/.test(this.whatsappRegistrationPin);
+  }
+
+  get whatsappTestRecipientValid(): boolean {
+    const recipient = this.whatsappTestRecipient.trim().replace(/[().\s-]/g, '');
+    return /^\+?[1-9]\d{7,14}$/.test(recipient) || /^00[1-9]\d{7,14}$/.test(recipient);
+  }
+
+  private maybeOpenWhatsAppTestPopup(): void {
+    if (!this.isAdminUser || this.whatsappPopupCheckStarted) return;
+    this.whatsappPopupCheckStarted = true;
+    this.http.get<{ enabled: boolean }>(`${this.api}/whatsapp/test-popup-config`, { headers: this.headers() }).subscribe({
+      next: ({ enabled }) => {
+        if (!this.isAdminUser || !enabled) return;
+        this.whatsappTestPopupOpen = true;
+        this.refreshWhatsAppSetup();
+      },
+      error: (error) => {
+        if (!this.isAdminUser) return;
+        this.whatsappSetupError = this.whatsappErrorMessage(error);
+      }
+    });
+  }
+
+  closeWhatsAppTestPopup(): void {
+    this.whatsappTestPopupOpen = false;
+    this.whatsappRegistrationPin = '';
+  }
+
+  refreshWhatsAppSetup(): void {
+    if (!this.isAdminUser || this.whatsappSetupLoading) return;
+    this.whatsappSetupLoading = true;
+    this.whatsappSetupError = '';
+    this.http.post<{ setup: WhatsAppSetup }>(`${this.api}/whatsapp/setup`, {}, { headers: this.headers() }).pipe(finalize(() => {
+      this.whatsappSetupLoading = false;
+    })).subscribe({
+      next: ({ setup }) => {
+        if (!this.isAdminUser) return;
+        this.whatsappSetup = setup;
+      },
+      error: (error) => {
+        if (!this.isAdminUser) return;
+        this.whatsappSetupError = this.whatsappErrorMessage(error);
+      }
+    });
+  }
+
+  registerWhatsAppPhoneNumber(): void {
+    if (!this.isAdminUser || this.whatsappRegistrationLoading || !this.whatsappRegistrationPinValid) return;
+    this.whatsappRegistrationLoading = true;
+    this.whatsappSetupError = '';
+    this.whatsappRegistrationResponse = '';
+    this.http.post<{
+      alreadyConnected: boolean;
+      registrationResponse: unknown;
+      setup: WhatsAppSetup;
+    }>(`${this.api}/whatsapp/register`, { pin: this.whatsappRegistrationPin }, { headers: this.headers() }).pipe(finalize(() => {
+      this.whatsappRegistrationLoading = false;
+      this.whatsappRegistrationPin = '';
+    })).subscribe({
+      next: (result) => {
+        if (!this.isAdminUser) return;
+        this.whatsappSetup = result.setup;
+        this.whatsappRegistrationResponse = JSON.stringify({
+          alreadyConnected: result.alreadyConnected,
+          registrationResponse: result.registrationResponse,
+          verification: result.setup
+        }, null, 2);
+      },
+      error: (error) => {
+        if (!this.isAdminUser) return;
+        this.whatsappSetupError = this.whatsappErrorMessage(error);
+        const providerError = error instanceof HttpErrorResponse ? error.error?.providerError : null;
+        this.whatsappRegistrationResponse = providerError ? JSON.stringify(providerError, null, 2) : '';
+      }
+    });
+  }
+
+  sendWhatsAppTestMessage(): void {
+    if (!this.isAdminUser || this.whatsappTestSending || !this.whatsappTestRecipientValid) return;
+    this.whatsappTestSending = true;
+    this.whatsappTestError = '';
+    this.whatsappTestProviderError = '';
+    this.whatsappTestResult = null;
+    this.whatsappTestTimestamp = new Date().toISOString();
+    this.http.post<WhatsAppTestMessageResult>(`${this.api}/whatsapp/send-test-message`, {
+      recipient: this.whatsappTestRecipient,
+      message: this.whatsappTestMessage,
+      messageType: this.whatsappTestMessageType
+    }, { headers: this.headers() }).pipe(finalize(() => {
+      this.whatsappTestSending = false;
+    })).subscribe({
+      next: (result) => {
+        if (!this.isAdminUser) return;
+        this.whatsappTestResult = result;
+        this.whatsappTestTimestamp = result.timestamp;
+      },
+      error: (error) => {
+        if (!this.isAdminUser) return;
+        this.whatsappTestError = this.whatsappErrorMessage(error);
+        const response = error instanceof HttpErrorResponse ? error.error : null;
+        this.whatsappTestTimestamp = response?.timestamp || this.whatsappTestTimestamp;
+        this.whatsappTestProviderError = response?.providerError
+          ? JSON.stringify(response.providerError, null, 2)
+          : '';
+      }
+    });
+  }
+
+  private whatsappErrorMessage(error: unknown): string {
+    if (error instanceof HttpErrorResponse) {
+      return error.error?.error || 'The WhatsApp Cloud API request failed.';
+    }
+    return error instanceof Error ? error.message : 'The WhatsApp Cloud API request failed.';
+  }
+
+  private resetWhatsAppTestState(): void {
+    this.whatsappTestPopupOpen = false;
+    this.whatsappTestRecipient = '+974';
+    this.whatsappTestMessage = 'Hello! This is a test WhatsApp message from KABHI.\n\nYour WhatsApp Cloud API integration is working successfully.\n\nThank you,\nKABHI Team';
+    this.whatsappTestMessageType = 'text';
+    this.whatsappTestResult = null;
+    this.whatsappTestError = '';
+    this.whatsappTestProviderError = '';
+    this.whatsappTestTimestamp = '';
+    this.whatsappSetup = null;
+    this.whatsappSetupError = '';
+    this.whatsappRegistrationPin = '';
+    this.whatsappRegistrationResponse = '';
+    this.whatsappPopupCheckStarted = false;
+  }
+
   private roleMatchesLoginPortal(user: User): boolean {
     if (this.loginPortal === 'CUSTOMER') return user.role === 'CUSTOMER';
     if (this.loginPortal === 'RESTAURANT') return user.role.startsWith('RESTAURANT_');
@@ -909,6 +1088,16 @@ export class AppComponent implements OnInit, OnDestroy {
     this.http.get<{ logoData: string }>(`${this.api}/brand`).subscribe({
       next: ({ logoData }) => {
         this.brandLogoData = logoData || '';
+        this.changeDetector.markForCheck();
+      },
+      error: (error) => this.showError(error)
+    });
+  }
+
+  private loadCustomerOtpConfiguration(): void {
+    this.http.get<{ customerOtpEnabled: boolean }>(`${this.api}/config`).subscribe({
+      next: ({ customerOtpEnabled }) => {
+        this.customerOtpEnabled = customerOtpEnabled !== false;
         this.changeDetector.markForCheck();
       },
       error: (error) => this.showError(error)
@@ -1255,6 +1444,10 @@ export class AppComponent implements OnInit, OnDestroy {
     } else {
       this.view = 'home';
       this.loadRestaurants();
+    }
+    if (this.isCustomer || this.isRestaurantUser) {
+      this.syncOrderStatusStream();
+      this.loadNotifications(1, 6);
     }
   }
 
@@ -2564,6 +2757,7 @@ export class AppComponent implements OnInit, OnDestroy {
         }
         localStorage.setItem(this.tokenKey, token);
         this.user = user;
+        this.maybeOpenWhatsAppTestPopup();
         this.error = '';
         this.notice = `Welcome, ${user.name}.`;
         this.loadRoleLanding();
@@ -2741,6 +2935,34 @@ export class AppComponent implements OnInit, OnDestroy {
     }
   }
 
+  async loginCustomerWithoutOtp(): Promise<void> {
+    if (this.customerOtpEnabled) return;
+    this.loading = true;
+    this.error = '';
+    this.customerFirebaseIdToken = '';
+    this.firebasePhoneAuth.clearFlow('customer-login');
+    this.customerOtpChallengeId = '';
+    this.customerOtpCode = '';
+    try {
+      const phone = this.phoneWithCountryCode(this.customerAuthPhone, this.customerAuthCountryCode);
+      const { token, user } = await firstValueFrom(this.http.post<{
+        token: string;
+        user: User;
+        purpose: 'LOGIN';
+      }>(`${this.api}/auth/customer-phone/verify`, { phone, purpose: 'LOGIN' }));
+      localStorage.setItem(this.tokenKey, token);
+      this.user = user;
+      this.notice = 'Temporary testing sign-in: phone ownership was not verified.';
+      this.authModalOpen = false;
+      this.loadRoleLanding();
+    } catch (error) {
+      this.showError(error instanceof Error ? error : new Error('Could not sign in with that phone number.'));
+    } finally {
+      this.loading = false;
+      this.changeDetector.markForCheck();
+    }
+  }
+
   async verifyCustomerOtp(purpose: 'LOGIN' | 'ORDER'): Promise<void> {
     this.loading = true;
     this.error = '';
@@ -2819,8 +3041,15 @@ export class AppComponent implements OnInit, OnDestroy {
 
   logout(): void {
     localStorage.removeItem(this.tokenKey);
+    this.stopOrderStatusStream();
     this.user = null;
+    this.resetWhatsAppTestState();
     this.orders = [];
+    this.notifications = [];
+    this.notificationUnreadCount = 0;
+    this.notificationPanelOpen = false;
+    this.notificationsLoading = false;
+    this.focusedNotificationOrder = null;
     this.orderQuote = null;
     this.view = 'home';
     this.loginPortal = 'CUSTOMER';
@@ -2838,6 +3067,94 @@ export class AppComponent implements OnInit, OnDestroy {
     this.loadFeedbackOrders(true);
   }
 
+  toggleNotificationPanel(): void {
+    this.notificationPanelOpen = !this.notificationPanelOpen;
+    if (this.notificationPanelOpen) this.loadNotifications(1, 6);
+  }
+
+  viewAllNotifications(): void {
+    this.notificationPanelOpen = false;
+    this.view = 'notifications';
+    this.loadNotifications(1, 20);
+  }
+
+  loadNotifications(page = 1, limit = 20, append = false): void {
+    if (!this.user || (!this.isCustomer && !this.isRestaurantUser)) return;
+    const userId = this.user.id;
+    const role = this.user.role;
+    this.notificationsLoading = true;
+    this.http.get<{
+      notifications: AppNotification[];
+      unreadCount: number;
+      page: number;
+      totalPages: number;
+    }>(`${this.api}/notifications?page=${page}&limit=${limit}`, { headers: this.headers() }).subscribe({
+      next: (result) => {
+        if (this.user?.id !== userId || this.user.role !== role) return;
+        this.notifications = append ? [...this.notifications, ...result.notifications] : result.notifications;
+        this.notificationUnreadCount = result.unreadCount;
+        this.notificationPage = result.page;
+        this.notificationTotalPages = result.totalPages;
+        this.notificationsLoading = false;
+        this.changeDetector.markForCheck();
+      },
+      error: (error) => {
+        if (this.user?.id !== userId || this.user.role !== role) return;
+        this.notificationsLoading = false;
+        this.showError(error);
+      }
+    });
+  }
+
+  loadMoreNotifications(): void {
+    if (this.notificationsLoading || this.notificationPage >= this.notificationTotalPages) return;
+    this.loadNotifications(this.notificationPage + 1, 20, true);
+  }
+
+  markAllNotificationsRead(): void {
+    this.http.patch<{ success: boolean }>(`${this.api}/notifications/read-all`, {}, { headers: this.headers() }).subscribe({
+      next: () => {
+        this.notifications = this.notifications.map((notification) => ({ ...notification, isRead: true }));
+        this.notificationUnreadCount = 0;
+        this.changeDetector.markForCheck();
+      },
+      error: (error) => this.showError(error)
+    });
+  }
+
+  openNotification(notification: AppNotification): void {
+    this.notificationPanelOpen = false;
+    this.http.patch<{ unreadCount: number }>(`${this.api}/notifications/${notification.id}/read`, {}, { headers: this.headers() }).subscribe({
+      next: ({ unreadCount }) => {
+        this.notifications = this.notifications.map((entry) => entry.id === notification.id
+          ? { ...entry, isRead: true }
+          : entry);
+        this.notificationUnreadCount = unreadCount;
+        this.http.get<{ order: Order }>(`${this.api}/orders/${notification.orderId}`, { headers: this.headers() }).subscribe({
+          next: ({ order }) => {
+            if (this.isCustomer) {
+              this.trackedOrder = order;
+              this.trackReference = order.reference;
+              this.trackPhone = this.user?.phone || '';
+              this.view = 'track';
+              this.syncOrderStatusStream();
+            } else if (this.isRestaurantUser) {
+              this.focusedNotificationOrder = order;
+              this.loadRestaurantPortal();
+            }
+            this.changeDetector.markForCheck();
+          },
+          error: (error) => this.showError(error)
+        });
+      },
+      error: (error) => this.showError(error)
+    });
+  }
+
+  closeFocusedNotificationOrder(): void {
+    this.focusedNotificationOrder = null;
+  }
+
   private handleOrderStatusVisibilityChange = (): void => {
     if (document.visibilityState === 'hidden' && this.orderStatusStreamController) {
       this.orderStatusStreamNeedsReconcile = true;
@@ -2847,14 +3164,16 @@ export class AppComponent implements OnInit, OnDestroy {
       this.orderStatusStreamNeedsReconcile = false;
       this.reconcileOrderStatusView();
     }
+    if (document.visibilityState !== 'hidden' && (this.isCustomer || this.isRestaurantUser)) {
+      this.loadNotifications(this.view === 'notifications' ? this.notificationPage : 1, this.view === 'notifications' ? 20 : 6);
+    }
   };
 
   private syncOrderStatusStream(): void {
     let streamKey = '';
-    if (document.visibilityState !== 'hidden' && this.view === 'restaurantPortal' && this.isRestaurantUser) {
+    if (document.visibilityState !== 'hidden' && this.isRestaurantUser) {
       streamKey = 'restaurant';
-    } else if (document.visibilityState !== 'hidden' && this.isCustomer &&
-        (this.view === 'orders' || (['track', 'confirmation'].includes(this.view) && !!this.trackedOrder))) {
+    } else if (document.visibilityState !== 'hidden' && this.isCustomer) {
       streamKey = 'customer';
     } else if (document.visibilityState !== 'hidden' && !this.user && this.trackedOrder &&
         ['track', 'confirmation'].includes(this.view)) {
@@ -2903,7 +3222,10 @@ export class AppComponent implements OnInit, OnDestroy {
         if (!response.headers.get('content-type')?.includes('text/event-stream')) {
           throw new Error('The server returned an invalid order status stream.');
         }
-        if (hasConnected) this.reconcileOrderStatusView();
+        if (hasConnected) {
+          this.reconcileOrderStatusView();
+          this.loadNotifications(this.view === 'notifications' ? this.notificationPage : 1, this.view === 'notifications' ? 20 : 6);
+        }
         hasConnected = true;
         connectedAt = Date.now();
         await this.readOrderStatusStream(response, controller.signal);
@@ -2980,6 +3302,7 @@ export class AppComponent implements OnInit, OnDestroy {
           .trim();
         if (eventType === 'sync-required') {
           this.reconcileOrderStatusView();
+          this.loadNotifications(this.view === 'notifications' ? this.notificationPage : 1, this.view === 'notifications' ? 20 : 6);
           boundary = buffer.indexOf('\n\n');
           continue;
         }
@@ -3008,7 +3331,12 @@ export class AppComponent implements OnInit, OnDestroy {
     await reader.cancel();
   }
 
-  private applyOrderStatusEvent(event: OrderStatusEvent): void {
+  private applyOrderStatusEvent(event: OrderStatusEvent | NotificationEvent): void {
+    if (event.type === 'NOTIFICATION_CREATED') {
+      this.loadNotifications(this.view === 'notifications' ? this.notificationPage : 1, this.view === 'notifications' ? 20 : 6);
+      this.changeDetector.markForCheck();
+      return;
+    }
     if (!event.orderId || !event.status) return;
     const updateOrder = (order: Order): Order => {
       if (order._id !== event.orderId || order.status === event.status) return order;
@@ -4270,5 +4598,11 @@ export class AppComponent implements OnInit, OnDestroy {
 
   money(value: number, currency = 'QAR'): string {
     return new Intl.NumberFormat('en-QA', { style: 'currency', currency, maximumFractionDigits: 2 }).format(value);
+  }
+
+  notificationItemsSummary(order: NotificationOrderSummary): string {
+    const items = order.items.slice(0, 3).map((item) => `${item.quantity} × ${item.name}`);
+    if (order.items.length > 3) items.push(`+ ${order.items.length - 3} more`);
+    return items.join(', ');
   }
 }

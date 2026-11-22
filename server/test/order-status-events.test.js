@@ -1,6 +1,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
+  publishNotificationEvent,
   publishOrderStatusEvent,
   subscribeToOrderStatus
 } = require("../src/order-status-events");
@@ -52,6 +53,35 @@ test("unsubscribing removes a status event listener", () => {
   }, "PREPARING");
 
   assert.deepEqual(received, []);
+});
+
+test("notification events are routed only to the authenticated recipient scope", () => {
+  const received = { customer: [], restaurant: [], unrelated: [] };
+  const unsubscribers = [
+    subscribeToOrderStatus("customer", "customer-notification", (event) => received.customer.push(event)),
+    subscribeToOrderStatus("restaurant", "restaurant-notification", (event) => received.restaurant.push(event)),
+    subscribeToOrderStatus("restaurant", "other-restaurant", (event) => received.unrelated.push(event))
+  ];
+
+  try {
+    publishNotificationEvent({
+      notificationId: "notification-1",
+      recipientId: "restaurant-notification",
+      recipientRole: "RESTAURANT",
+      createdAt: "2026-11-06T09:00:00.000Z"
+    });
+
+    assert.equal(received.restaurant.length, 1);
+    assert.equal(received.restaurant[0].notificationId, "notification-1");
+    assert.equal(received.restaurant[0].recipientRole, "RESTAURANT");
+    assert.deepEqual(Object.keys(received.restaurant[0]).sort(), [
+      "changedAt", "id", "notificationId", "recipientId", "recipientRole", "type"
+    ]);
+    assert.equal(received.customer.length, 0);
+    assert.equal(received.unrelated.length, 0);
+  } finally {
+    for (const unsubscribe of unsubscribers) unsubscribe();
+  }
 });
 
 test("publishing to one customer does not scan or notify 10,000 unrelated customer scopes", () => {

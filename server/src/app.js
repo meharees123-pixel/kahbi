@@ -39,14 +39,45 @@ const {
 } = require("./whatsapp");
 const { recoveryOtpTtlMs, validNewPassword, restaurantRecoveryStatus } = require("./restaurant-recovery");
 const { verifyFirebasePhoneToken } = require("./firebase-auth");
+const {
+  customerAuthMethodAllowed,
+  createCustomerPhoneBypassService,
+  customerOtpConfiguration
+} = require("./customer-auth");
 const { createMenuExtractor } = require("./menu-extractor");
 const { publishOrderStatusEvent, subscribeToOrderStatus } = require("./order-status-events");
+const { createRestaurantOrderOutboxEntry, notificationService } = require("./notifications");
+const {
+  whatsappConfiguration,
+  requireWhatsAppEnabled,
+  getPhoneNumberSetup,
+  registerPhoneNumber,
+  buildTestMessagePayload,
+  sendTestMessage
+} = require("./whatsapp-cloud");
 
 const app = express();
 const secret = process.env.JWT_SECRET || "local-development-secret-change-before-deploy";
 const currency = process.env.CURRENCY || "QAR";
 const apiOrigin = process.env.CLIENT_ORIGIN || "http://localhost:4200";
+const apiOrigins = apiOrigin.split(",").map((origin) => origin.trim()).filter(Boolean);
+if (process.env.NODE_ENV !== "production") {
+  for (const origin of [...apiOrigins]) {
+    try {
+      const parsed = new URL(origin);
+      if (parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1") {
+        const alternateHost = parsed.hostname === "localhost" ? "127.0.0.1" : "localhost";
+        parsed.hostname = alternateHost;
+        const alternateOrigin = parsed.origin;
+        if (!apiOrigins.includes(alternateOrigin)) apiOrigins.push(alternateOrigin);
+      }
+    } catch {
+      // Invalid configured origins are left unmatched by the CORS allowlist.
+    }
+  }
+}
 const partnerTermsVersion = "2026-10-v1";
+const restaurantRoles = ["RESTAURANT_OWNER", "RESTAURANT_MANAGER", "RESTAURANT_STAFF"];
 const adminNotificationEmail = () => process.env.ADMIN_NOTIFICATION_EMAIL || "kabhioffical92@gmail.com";
 
 const RESTAURANT_FIELD_LABELS = {
@@ -84,7 +115,7 @@ const MENU_FIELD_LABELS = {
 };
 
 app.use(helmet());
-app.use(cors({ origin: apiOrigin }));
+app.use(cors({ origin: apiOrigins }));
 app.use(express.json({ limit: "4mb" }));
 app.use("/api/auth", rateLimit({ windowMs: 15 * 60 * 1000, limit: 100, standardHeaders: true, legacyHeaders: false }));
 const customerPhoneAuthRateLimit = rateLimit({ windowMs: 15 * 60 * 1000, limit: 10, standardHeaders: true, legacyHeaders: false });
@@ -96,7 +127,15 @@ const menuImportRateLimit = rateLimit({ windowMs: 60 * 60 * 1000, limit: 12, sta
 const menuFileUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 2 * 1024 * 1024, files: 1 } });
 const menuExtractionUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024, files: 1 } });
 const menuImageArchiveUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024, files: 1 } });
+const whatsappSetupRateLimit = rateLimit({ windowMs: 15 * 60 * 1000, limit: 10, standardHeaders: true, legacyHeaders: false });
+const whatsappTestMessageRateLimit = rateLimit({ windowMs: 15 * 60 * 1000, limit: 5, standardHeaders: true, legacyHeaders: false });
+const whatsappRegistrationRateLimit = rateLimit({ windowMs: 60 * 60 * 1000, limit: 3, standardHeaders: true, legacyHeaders: false });
 const extractMenu = createMenuExtractor();
+const loginCustomerWithPhoneOnly = createCustomerPhoneBypassService({
+  UserModel: User,
+  issueToken,
+  writeAudit
+});
 
 async function currentCustomerTerms() {
   const setting = await PlatformSetting.findOne({ key: "customerTerms" }).select("value").lean();
@@ -161,7 +200,7 @@ function auth(required = true) {
     if (user.passwordChangedAt && decoded.pwd !== user.passwordChangedAt.getTime()) {
       return res.status(401).json({ error: "Your session is invalid or expired. Sign in again." });
     }
-    if (user.role === "CUSTOMER" && decoded.amr !== "firebase_phone") {
+    if (user.role === "CUSTOMER" && !customerAuthMethodAllowed(decoded.amr)) {
       return res.status(401).json({ error: "Customer sessions must be verified with Firebase phone authentication. Sign in again." });
     }
     req.user = user;
@@ -304,8 +343,10 @@ async function ordersWithRestaurantDetails(orders) {
     ].filter(Boolean) : [];
     const completeAddress = [...new Map(addressParts.map((part) => [String(part).trim().toLowerCase(), String(part).trim()])).values()]
       .join(", ");
+    const orderData = typeof order.toObject === "function" ? order.toObject() : { ...order };
+    delete orderData.notificationOutbox;
     return {
-      ...(typeof order.toObject === "function" ? order.toObject() : order),
+      ...orderData,
       restaurant: restaurant ? {
         name: restaurant.name,
         address: completeAddress,
@@ -509,6 +550,28 @@ function requestedPage(value) {
   return Number.isInteger(page) && page > 0 ? page : 1;
 }
 
+async function notificationRecipient(user) {
+  if (user.role === "CUSTOMER") {
+    return { recipientRole: "CUSTOMER", recipientId: user._id };
+  }
+  if (restaurantRoles.includes(user.role)) {
+    const restaurant = await restaurantForUser(user);
+    return { recipientRole: "RESTAURANT", recipientId: restaurant._id };
+  }
+  const error = new Error("Notifications are available to customers and restaurant accounts.");
+  error.status = 403;
+  throw error;
+}
+
+async function notificationList(req, res) {
+  const scope = await notificationRecipient(req.user);
+  const page = requestedPage(req.query.page);
+  const requestedLimit = Number.parseInt(String(req.query.limit || "20"), 10);
+  const limit = Number.isInteger(requestedLimit) ? Math.min(50, Math.max(1, requestedLimit)) : 20;
+  res.set("Cache-Control", "no-store");
+  res.json(await notificationService.getUserNotifications({ ...scope, page, limit }));
+}
+
 app.get("/api/health", (_req, res) => res.json({ status: "ok", service: "kahbi-api", currency }));
 
 const activeOrderStatusStreams = new Set();
@@ -563,7 +626,10 @@ app.get("/api/events/order-status", auth(), asyncRoute(async (req, res) => {
 
 app.get("/api/config", (_req, res) => {
   res.set("Cache-Control", "no-store");
-  res.json({ googleMapsApiKey: process.env.GOOGLE_MAPS_API_KEY || "" });
+  res.json({
+    googleMapsApiKey: process.env.GOOGLE_MAPS_API_KEY || "",
+    customerOtpEnabled: customerOtpConfiguration().otpEnabled
+  });
 });
 
 app.get("/api/customer-terms", auth(false), asyncRoute(async (req, res) => {
@@ -757,14 +823,25 @@ app.post("/api/auth/activate-restaurant", asyncRoute(async (req, res) => {
 }));
 
 app.post("/api/auth/customer-phone/verify", customerPhoneAuthRateLimit, asyncRoute(async (req, res) => {
+  const purpose = String(req.body.purpose || "LOGIN").toUpperCase();
+  const otpConfiguration = customerOtpConfiguration();
+  if (!["LOGIN", "ORDER"].includes(purpose)) return res.status(400).json({ error: "Choose a valid phone verification purpose." });
+  if (purpose === "LOGIN" && !otpConfiguration.otpEnabled) {
+    const phone = req.body.phone;
+    const result = await loginCustomerWithPhoneOnly(phone);
+    return res.json({
+      token: result.token,
+      user: publicUser(result.user),
+      purpose
+    });
+  }
+
   const firebaseIdentity = await verifyFirebasePhoneToken(req.body.idToken);
   const phone = normalizeWhatsappPhone(firebaseIdentity.phone);
-  const purpose = String(req.body.purpose || "LOGIN").toUpperCase();
   if (!phone) return res.status(401).json({ error: "Firebase did not return a valid verified phone number." });
   if (firebaseIdentity.authTime * 1000 < Date.now() - 5 * 60 * 1000) {
     return res.status(401).json({ error: "Your Firebase phone verification has expired. Request a new SMS code." });
   }
-  if (!["LOGIN", "ORDER"].includes(purpose)) return res.status(400).json({ error: "Choose a valid phone verification purpose." });
   let user = await User.findOne({ role: "CUSTOMER", phone: customerPhoneQuery(phone) });
   if (user && user.status !== "ACTIVE") return res.status(403).json({ error: "This customer account is unavailable." });
   if (!user) {
@@ -1294,6 +1371,47 @@ app.get("/api/orders/mine", auth(), roles("CUSTOMER"), asyncRoute(async (req, re
   res.json({ orders: responses });
 }));
 
+app.get("/api/orders/:id", auth(), roles("CUSTOMER", ...restaurantRoles), asyncRoute(async (req, res) => {
+  if (!mongoose.isValidObjectId(req.params.id)) return res.status(404).json({ error: "Order not found." });
+  const filter = req.user.role === "CUSTOMER"
+    ? { _id: req.params.id, customerId: req.user._id }
+    : { _id: req.params.id, restaurantId: (await restaurantForUser(req.user))._id };
+  const order = await Order.findOne(filter).lean();
+  if (!order) return res.status(404).json({ error: "Order not found." });
+  res.set("Cache-Control", "no-store");
+  res.json({ order: await orderWithRestaurantDetails(order) });
+}));
+
+app.get("/api/notifications", auth(), roles("CUSTOMER", ...restaurantRoles), asyncRoute(notificationList));
+
+app.get("/api/notifications/unread-count", auth(), roles("CUSTOMER", ...restaurantRoles), asyncRoute(async (req, res) => {
+  const scope = await notificationRecipient(req.user);
+  const unreadCount = await notificationService.getUnreadNotificationCount(scope);
+  res.set("Cache-Control", "no-store");
+  res.json({ unreadCount });
+}));
+
+app.patch("/api/notifications/:id/read", auth(), roles("CUSTOMER", ...restaurantRoles), asyncRoute(async (req, res) => {
+  if (!mongoose.isValidObjectId(req.params.id)) return res.status(404).json({ error: "Notification not found." });
+  const scope = await notificationRecipient(req.user);
+  const notification = await notificationService.markNotificationAsRead(req.params.id, scope);
+  if (!notification) return res.status(404).json({ error: "Notification not found." });
+  res.set("Cache-Control", "no-store");
+  res.json({
+    success: true,
+    id: String(notification._id),
+    isRead: notification.isRead,
+    unreadCount: await notificationService.getUnreadNotificationCount(scope)
+  });
+}));
+
+app.patch("/api/notifications/read-all", auth(), roles("CUSTOMER", ...restaurantRoles), asyncRoute(async (req, res) => {
+  const scope = await notificationRecipient(req.user);
+  const result = await notificationService.markAllNotificationsAsRead(scope);
+  res.set("Cache-Control", "no-store");
+  res.json({ success: true, modifiedCount: result.modifiedCount });
+}));
+
 app.post("/api/orders/track", asyncRoute(async (req, res) => {
   const reference = String(req.body.reference || "").trim().toUpperCase();
   const phone = String(req.body.phone || "").replace(/[^\d+]/g, "");
@@ -1670,8 +1788,10 @@ app.post("/api/orders", auth(false), asyncRoute(async (req, res) => {
     estimatedPreparationMinutes: restaurant.preparationMinutes,
     customerTermsVersion: customerTerms.version,
     customerTermsAcceptedAt,
+    notificationOutbox: [createRestaurantOrderOutboxEntry(`${idempotencyKey}:NEW_ORDER`, restaurant._id)],
     statusHistory: [{ previousStatus: "", status: "RESTAURANT_PENDING", changedBy: "SYSTEM", role: "SYSTEM" }]
   });
+  await notificationService.attemptOrderNotifications(order._id);
   await CustomerCart.deleteOne({ customerId: signedCustomer._id });
   if (customerTermsAcceptanceRequired) {
     await User.findByIdAndUpdate(signedCustomer._id, {
@@ -1763,7 +1883,6 @@ app.post("/api/orders/:id/feedback", auth(), roles("CUSTOMER"), asyncRoute(async
   res.status(201).json({ feedback });
 }));
 
-const restaurantRoles = ["RESTAURANT_OWNER", "RESTAURANT_MANAGER", "RESTAURANT_STAFF"];
 app.get("/api/restaurant/me", auth(), roles(...restaurantRoles), asyncRoute(async (req, res) => {
   const restaurant = await restaurantForUser(req.user);
   const registration = await RestaurantRegistration.findOne({
@@ -3103,6 +3222,170 @@ app.get("/api/admin/messages", auth(), roles("ADMIN", "SUPER_ADMIN"), asyncRoute
   const messages = await MessageLog.find().sort({ createdAt: -1 }).limit(100).lean();
   res.json({ messages });
 }));
+
+async function configuredWhatsAppPhoneNumberId() {
+  if (process.env.WHATSAPP_PHONE_NUMBER_ID) return process.env.WHATSAPP_PHONE_NUMBER_ID;
+  const setting = await PlatformSetting.findOne({ key: "whatsappPhoneNumberId" }).select("value").lean();
+  return setting?.value || "";
+}
+
+async function saveWhatsAppPhoneNumberId(phoneNumberId, user) {
+  await PlatformSetting.findOneAndUpdate(
+    { key: "whatsappPhoneNumberId" },
+    { value: String(phoneNumberId), updatedBy: user._id },
+    { upsert: true, new: true, setDefaultsOnInsert: true }
+  );
+  process.env.WHATSAPP_PHONE_NUMBER_ID = String(phoneNumberId);
+}
+
+function whatsappFailureResponse(res, error, timestamp = new Date(), loggingWarning = false) {
+  const status = Number(error.status) || 502;
+  return res.status(status).json({
+    success: false,
+    error: error.message || "WhatsApp Cloud API request failed.",
+    timestamp: timestamp.toISOString(),
+    ...(error.providerResponse ? { providerError: error.providerResponse } : {}),
+    ...(loggingWarning ? { loggingWarning: "Message attempt could not be recorded." } : {})
+  });
+}
+
+app.get("/api/whatsapp/test-popup-config", auth(), roles("ADMIN", "SUPER_ADMIN"), (req, res) => {
+  const configuration = whatsappConfiguration();
+  res.set("Cache-Control", "no-store");
+  res.json({
+    enabled: configuration.enabled && configuration.testMode && configuration.popupEnabled
+  });
+});
+
+app.post(
+  "/api/whatsapp/setup",
+  auth(),
+  roles("ADMIN", "SUPER_ADMIN"),
+  whatsappSetupRateLimit,
+  asyncRoute(async (req, res) => {
+    const configuration = whatsappConfiguration();
+    try {
+      const setup = await getPhoneNumberSetup(configuration);
+      if (setup.phoneNumberId) await saveWhatsAppPhoneNumberId(setup.phoneNumberId, req.user);
+      res.set("Cache-Control", "no-store");
+      res.json({ setup, phoneNumberIdSaved: Boolean(setup.phoneNumberId) });
+    } catch (error) {
+      whatsappFailureResponse(res, error);
+    }
+  })
+);
+
+app.post(
+  "/api/whatsapp/register",
+  auth(),
+  roles("ADMIN", "SUPER_ADMIN"),
+  whatsappRegistrationRateLimit,
+  asyncRoute(async (req, res) => {
+    const configuration = whatsappConfiguration();
+    try {
+      const setup = await getPhoneNumberSetup(configuration);
+      if (!setup.phoneNumberId) {
+        return res.status(409).json({
+          error: "The configured business number was not found in the WABA phone-number list.",
+          setup
+        });
+      }
+      await saveWhatsAppPhoneNumberId(setup.phoneNumberId, req.user);
+      const result = await registerPhoneNumber(configuration, setup, req.body?.pin);
+      await writeAudit({
+        user: req.user,
+        action: result.alreadyConnected ? "WHATSAPP_REGISTRATION_ALREADY_CONNECTED" : "WHATSAPP_PHONE_NUMBER_REGISTRATION",
+        entity: "WhatsAppPhoneNumber",
+        entityId: setup.phoneNumberId,
+        details: { status: result.setup.status, registrationComplete: result.setup.registrationComplete }
+      });
+      res.json(result);
+    } catch (error) {
+      whatsappFailureResponse(res, error);
+    }
+  })
+);
+
+app.post(
+  "/api/whatsapp/send-test-message",
+  auth(),
+  roles("ADMIN", "SUPER_ADMIN"),
+  whatsappTestMessageRateLimit,
+  asyncRoute(async (req, res) => {
+    const timestamp = new Date();
+    const submittedRecipient = typeof req.body?.recipient === "string" ? req.body.recipient.trim().slice(0, 40) : "";
+    let message;
+    try {
+      message = buildTestMessagePayload({
+        recipient: req.body?.recipient,
+        message: req.body?.message,
+        messageType: req.body?.messageType || "text"
+      });
+    } catch (error) {
+      return res.status(Number(error.status) || 400).json({
+        success: false,
+        error: error.message,
+        recipient: submittedRecipient,
+        timestamp: timestamp.toISOString()
+      });
+    }
+
+    const configuration = whatsappConfiguration();
+    let result;
+    try {
+      requireWhatsAppEnabled(configuration, { testMessage: true });
+      const phoneNumberId = await configuredWhatsAppPhoneNumberId();
+      result = await sendTestMessage(configuration, phoneNumberId, {
+        recipient: req.body.recipient,
+        message: req.body.message,
+        messageType: req.body.messageType || "text"
+      });
+    } catch (error) {
+      const loggingWarning = await recordWhatsAppTestAttempt({
+        recipient: `+${message.to}`,
+        template: message.templateName,
+        status: "FAILED",
+        error: error.message
+      });
+      return whatsappFailureResponse(res, error, timestamp, loggingWarning);
+    }
+
+    const loggingWarning = await recordWhatsAppTestAttempt({
+      recipient: result.recipient,
+      template: result.templateName,
+      status: "SENT",
+      providerMessageId: result.messageId,
+      error: ""
+    });
+    res.json({
+      success: true,
+      status: "accepted",
+      messageId: result.messageId,
+      recipient: result.recipient,
+      timestamp: timestamp.toISOString(),
+      providerResponse: result.providerResponse,
+      ...(loggingWarning ? { loggingWarning: "Meta accepted the message, but the message log could not be updated." } : {})
+    });
+  })
+);
+
+async function recordWhatsAppTestAttempt({ recipient, template, status, providerMessageId = "", error }) {
+  try {
+    await MessageLog.create({
+      orderId: null,
+      recipient,
+      direction: "OUTBOUND",
+      template,
+      status,
+      providerMessageId: providerMessageId || "",
+      error: String(error || "").slice(0, 1000)
+    });
+    return false;
+  } catch (logError) {
+    console.error("WhatsApp test message attempt could not be recorded.");
+    return true;
+  }
+}
 
 app.get("/api/admin/billing", auth(), roles("ADMIN", "SUPER_ADMIN"), asyncRoute(async (_req, res) => {
   const transactions = await BillingTransaction.find().sort({ createdAt: -1 }).limit(100).lean();
