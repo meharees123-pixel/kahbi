@@ -292,7 +292,8 @@ const MessageLogSchema = new Schema({
   recipient: { type: String, required: true },
   direction: { type: String, default: "OUTBOUND" },
   template: { type: String, required: true },
-  status: { type: String, enum: ["NOT_CONFIGURED", "QUEUED", "SENT", "DELIVERED", "FAILED"], default: "NOT_CONFIGURED" },
+  status: { type: String, enum: ["NOT_CONFIGURED", "QUEUED", "SENT", "DELIVERED", "READ", "FAILED"], default: "NOT_CONFIGURED" },
+  providerMessageId: { type: String, default: "", index: true },
   error: { type: String, default: "WhatsApp provider is not configured; demo mode only." }
 }, { timestamps: true });
 

@@ -47,11 +47,35 @@ const {
 const { createMenuExtractor } = require("./menu-extractor");
 const { publishOrderStatusEvent, subscribeToOrderStatus } = require("./order-status-events");
 const { createRestaurantOrderOutboxEntry, notificationService } = require("./notifications");
+const {
+  whatsappConfiguration,
+  requireWhatsAppEnabled,
+  getPhoneNumberSetup,
+  registerPhoneNumber,
+  buildTestMessagePayload,
+  sendTestMessage
+} = require("./whatsapp-cloud");
 
 const app = express();
 const secret = process.env.JWT_SECRET || "local-development-secret-change-before-deploy";
 const currency = process.env.CURRENCY || "QAR";
 const apiOrigin = process.env.CLIENT_ORIGIN || "http://localhost:4200";
+const apiOrigins = apiOrigin.split(",").map((origin) => origin.trim()).filter(Boolean);
+if (process.env.NODE_ENV !== "production") {
+  for (const origin of [...apiOrigins]) {
+    try {
+      const parsed = new URL(origin);
+      if (parsed.hostname === "localhost" || parsed.hostname === "127.0.0.1") {
+        const alternateHost = parsed.hostname === "localhost" ? "127.0.0.1" : "localhost";
+        parsed.hostname = alternateHost;
+        const alternateOrigin = parsed.origin;
+        if (!apiOrigins.includes(alternateOrigin)) apiOrigins.push(alternateOrigin);
+      }
+    } catch {
+      // Invalid configured origins are left unmatched by the CORS allowlist.
+    }
+  }
+}
 const partnerTermsVersion = "2026-10-v1";
 const restaurantRoles = ["RESTAURANT_OWNER", "RESTAURANT_MANAGER", "RESTAURANT_STAFF"];
 const adminNotificationEmail = () => process.env.ADMIN_NOTIFICATION_EMAIL || "kabhioffical92@gmail.com";
@@ -91,7 +115,7 @@ const MENU_FIELD_LABELS = {
 };
 
 app.use(helmet());
-app.use(cors({ origin: apiOrigin }));
+app.use(cors({ origin: apiOrigins }));
 app.use(express.json({ limit: "4mb" }));
 app.use("/api/auth", rateLimit({ windowMs: 15 * 60 * 1000, limit: 100, standardHeaders: true, legacyHeaders: false }));
 const customerPhoneAuthRateLimit = rateLimit({ windowMs: 15 * 60 * 1000, limit: 10, standardHeaders: true, legacyHeaders: false });
@@ -103,6 +127,9 @@ const menuImportRateLimit = rateLimit({ windowMs: 60 * 60 * 1000, limit: 12, sta
 const menuFileUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 2 * 1024 * 1024, files: 1 } });
 const menuExtractionUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024, files: 1 } });
 const menuImageArchiveUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024, files: 1 } });
+const whatsappSetupRateLimit = rateLimit({ windowMs: 15 * 60 * 1000, limit: 10, standardHeaders: true, legacyHeaders: false });
+const whatsappTestMessageRateLimit = rateLimit({ windowMs: 15 * 60 * 1000, limit: 5, standardHeaders: true, legacyHeaders: false });
+const whatsappRegistrationRateLimit = rateLimit({ windowMs: 60 * 60 * 1000, limit: 3, standardHeaders: true, legacyHeaders: false });
 const extractMenu = createMenuExtractor();
 const loginCustomerWithPhoneOnly = createCustomerPhoneBypassService({
   UserModel: User,
@@ -3195,6 +3222,170 @@ app.get("/api/admin/messages", auth(), roles("ADMIN", "SUPER_ADMIN"), asyncRoute
   const messages = await MessageLog.find().sort({ createdAt: -1 }).limit(100).lean();
   res.json({ messages });
 }));
+
+async function configuredWhatsAppPhoneNumberId() {
+  if (process.env.WHATSAPP_PHONE_NUMBER_ID) return process.env.WHATSAPP_PHONE_NUMBER_ID;
+  const setting = await PlatformSetting.findOne({ key: "whatsappPhoneNumberId" }).select("value").lean();
+  return setting?.value || "";
+}
+
+async function saveWhatsAppPhoneNumberId(phoneNumberId, user) {
+  await PlatformSetting.findOneAndUpdate(
+    { key: "whatsappPhoneNumberId" },
+    { value: String(phoneNumberId), updatedBy: user._id },
+    { upsert: true, new: true, setDefaultsOnInsert: true }
+  );
+  process.env.WHATSAPP_PHONE_NUMBER_ID = String(phoneNumberId);
+}
+
+function whatsappFailureResponse(res, error, timestamp = new Date(), loggingWarning = false) {
+  const status = Number(error.status) || 502;
+  return res.status(status).json({
+    success: false,
+    error: error.message || "WhatsApp Cloud API request failed.",
+    timestamp: timestamp.toISOString(),
+    ...(error.providerResponse ? { providerError: error.providerResponse } : {}),
+    ...(loggingWarning ? { loggingWarning: "Message attempt could not be recorded." } : {})
+  });
+}
+
+app.get("/api/whatsapp/test-popup-config", auth(), roles("ADMIN", "SUPER_ADMIN"), (req, res) => {
+  const configuration = whatsappConfiguration();
+  res.set("Cache-Control", "no-store");
+  res.json({
+    enabled: configuration.enabled && configuration.testMode && configuration.popupEnabled
+  });
+});
+
+app.post(
+  "/api/whatsapp/setup",
+  auth(),
+  roles("ADMIN", "SUPER_ADMIN"),
+  whatsappSetupRateLimit,
+  asyncRoute(async (req, res) => {
+    const configuration = whatsappConfiguration();
+    try {
+      const setup = await getPhoneNumberSetup(configuration);
+      if (setup.phoneNumberId) await saveWhatsAppPhoneNumberId(setup.phoneNumberId, req.user);
+      res.set("Cache-Control", "no-store");
+      res.json({ setup, phoneNumberIdSaved: Boolean(setup.phoneNumberId) });
+    } catch (error) {
+      whatsappFailureResponse(res, error);
+    }
+  })
+);
+
+app.post(
+  "/api/whatsapp/register",
+  auth(),
+  roles("ADMIN", "SUPER_ADMIN"),
+  whatsappRegistrationRateLimit,
+  asyncRoute(async (req, res) => {
+    const configuration = whatsappConfiguration();
+    try {
+      const setup = await getPhoneNumberSetup(configuration);
+      if (!setup.phoneNumberId) {
+        return res.status(409).json({
+          error: "The configured business number was not found in the WABA phone-number list.",
+          setup
+        });
+      }
+      await saveWhatsAppPhoneNumberId(setup.phoneNumberId, req.user);
+      const result = await registerPhoneNumber(configuration, setup, req.body?.pin);
+      await writeAudit({
+        user: req.user,
+        action: result.alreadyConnected ? "WHATSAPP_REGISTRATION_ALREADY_CONNECTED" : "WHATSAPP_PHONE_NUMBER_REGISTRATION",
+        entity: "WhatsAppPhoneNumber",
+        entityId: setup.phoneNumberId,
+        details: { status: result.setup.status, registrationComplete: result.setup.registrationComplete }
+      });
+      res.json(result);
+    } catch (error) {
+      whatsappFailureResponse(res, error);
+    }
+  })
+);
+
+app.post(
+  "/api/whatsapp/send-test-message",
+  auth(),
+  roles("ADMIN", "SUPER_ADMIN"),
+  whatsappTestMessageRateLimit,
+  asyncRoute(async (req, res) => {
+    const timestamp = new Date();
+    const submittedRecipient = typeof req.body?.recipient === "string" ? req.body.recipient.trim().slice(0, 40) : "";
+    let message;
+    try {
+      message = buildTestMessagePayload({
+        recipient: req.body?.recipient,
+        message: req.body?.message,
+        messageType: req.body?.messageType || "text"
+      });
+    } catch (error) {
+      return res.status(Number(error.status) || 400).json({
+        success: false,
+        error: error.message,
+        recipient: submittedRecipient,
+        timestamp: timestamp.toISOString()
+      });
+    }
+
+    const configuration = whatsappConfiguration();
+    let result;
+    try {
+      requireWhatsAppEnabled(configuration, { testMessage: true });
+      const phoneNumberId = await configuredWhatsAppPhoneNumberId();
+      result = await sendTestMessage(configuration, phoneNumberId, {
+        recipient: req.body.recipient,
+        message: req.body.message,
+        messageType: req.body.messageType || "text"
+      });
+    } catch (error) {
+      const loggingWarning = await recordWhatsAppTestAttempt({
+        recipient: `+${message.to}`,
+        template: message.templateName,
+        status: "FAILED",
+        error: error.message
+      });
+      return whatsappFailureResponse(res, error, timestamp, loggingWarning);
+    }
+
+    const loggingWarning = await recordWhatsAppTestAttempt({
+      recipient: result.recipient,
+      template: result.templateName,
+      status: "SENT",
+      providerMessageId: result.messageId,
+      error: ""
+    });
+    res.json({
+      success: true,
+      status: "accepted",
+      messageId: result.messageId,
+      recipient: result.recipient,
+      timestamp: timestamp.toISOString(),
+      providerResponse: result.providerResponse,
+      ...(loggingWarning ? { loggingWarning: "Meta accepted the message, but the message log could not be updated." } : {})
+    });
+  })
+);
+
+async function recordWhatsAppTestAttempt({ recipient, template, status, providerMessageId = "", error }) {
+  try {
+    await MessageLog.create({
+      orderId: null,
+      recipient,
+      direction: "OUTBOUND",
+      template,
+      status,
+      providerMessageId: providerMessageId || "",
+      error: String(error || "").slice(0, 1000)
+    });
+    return false;
+  } catch (logError) {
+    console.error("WhatsApp test message attempt could not be recorded.");
+    return true;
+  }
+}
 
 app.get("/api/admin/billing", auth(), roles("ADMIN", "SUPER_ADMIN"), asyncRoute(async (_req, res) => {
   const transactions = await BillingTransaction.find().sort({ createdAt: -1 }).limit(100).lean();

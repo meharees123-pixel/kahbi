@@ -425,6 +425,47 @@ h1 em, h2 em { color: #cde08e; font-weight: 500; }
 .demo-login-buttons button:hover { border-color: #abc49f; background: #f8fbf3; }
 .signed-track-note { justify-content: end; min-height: 53px; }
 .signed-track-note span { color: var(--muted); font-size: 10px; }
+
+.whatsapp-test-backdrop { position: fixed; inset: 0; z-index: 1250; display: grid; place-items: center; overflow-y: auto; padding: 20px; background: #10251f99; }
+.whatsapp-test-dialog { width: min(620px, 100%); max-height: calc(100vh - 40px); overflow-y: auto; padding: 25px; border: 1px solid var(--line); border-radius: 18px; background: var(--paper); box-shadow: 0 20px 70px #001a1240; }
+.whatsapp-test-heading, .whatsapp-test-setup-heading, .whatsapp-test-actions { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
+.whatsapp-test-heading h2 { margin: 5px 0 0; color: var(--green); font-size: 24px; }
+.whatsapp-test-close-icon { display: grid; width: 36px; height: 36px; flex: 0 0 36px; place-items: center; border: 1px solid var(--line); border-radius: 50%; color: var(--green); background: white; font-size: 24px; line-height: 1; }
+.whatsapp-test-description { margin: 12px 0 17px; color: var(--muted); font-size: 12px; line-height: 1.6; }
+.whatsapp-test-setup { margin-bottom: 16px; padding: 14px; border: 1px solid var(--line); border-radius: 11px; background: #f8faf5; }
+.whatsapp-test-setup-heading > div { display: grid; gap: 4px; }
+.whatsapp-test-setup-heading strong { color: var(--green); font-size: 12px; }
+.whatsapp-test-setup-heading small, .whatsapp-test-register > small, .whatsapp-test-fields .form-field small { color: var(--muted); font-size: 10px; line-height: 1.5; }
+.whatsapp-test-status { display: flex; flex-wrap: wrap; gap: 7px 14px; margin: 12px 0 0; color: var(--muted); font-size: 10px; }
+.whatsapp-test-status strong { color: var(--green); }
+.whatsapp-test-inline-error { margin: 10px 0 0; color: #a34132; font-size: 11px; }
+.whatsapp-test-register { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 10px; margin-top: 13px; padding-top: 12px; border-top: 1px solid var(--line); }
+.whatsapp-test-register .form-field { margin: 0; }
+.whatsapp-test-register > small { grid-column: 1 / -1; }
+.whatsapp-test-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 0 13px; }
+.whatsapp-test-message-field { grid-column: 1 / -1; }
+.whatsapp-test-message-field textarea { min-height: 125px; resize: vertical; }
+.whatsapp-test-actions { justify-content: flex-end; margin-top: 17px; }
+.whatsapp-test-actions .button { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 42px; }
+.whatsapp-test-spinner { width: 15px; height: 15px; border: 2px solid #ffffff80; border-top-color: white; border-radius: 50%; animation: whatsapp-test-spin .8s linear infinite; }
+.whatsapp-test-result { display: grid; gap: 6px; margin-top: 12px; padding: 13px; border-radius: 10px; font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
+.whatsapp-test-result-success { border: 1px solid #c9dfc5; color: var(--green); background: #f1f7ed; }
+.whatsapp-test-result-error { border: 1px solid #f0c9bd; color: #8f392d; background: #fff5f1; }
+.whatsapp-test-result details { margin-top: 5px; }
+.whatsapp-test-result summary { cursor: pointer; font-weight: 700; }
+.whatsapp-test-result pre, .whatsapp-test-provider-response { max-height: 170px; overflow: auto; margin: 5px 0 0; padding: 9px; border-radius: 7px; color: #33423a; background: #eef1e9; font-size: 9px; white-space: pre-wrap; overflow-wrap: anywhere; }
+@keyframes whatsapp-test-spin { to { transform: rotate(360deg); } }
+@media (max-width: 560px) {
+  .whatsapp-test-backdrop { place-items: end center; padding: 8px; }
+  .whatsapp-test-dialog { max-height: calc(100vh - 16px); padding: 18px; border-radius: 15px; }
+  .whatsapp-test-heading h2 { font-size: 20px; }
+  .whatsapp-test-fields { grid-template-columns: 1fr; }
+  .whatsapp-test-message-field { grid-column: auto; }
+  .whatsapp-test-register { grid-template-columns: 1fr; }
+  .whatsapp-test-register > small { grid-column: auto; }
+  .whatsapp-test-actions { display: grid; grid-template-columns: 1fr 1fr; }
+  .whatsapp-test-actions .button { padding-inline: 8px; font-size: 11px; }
+}
 .portal { padding-top: 42px; }
 .portal-heading { display: flex; align-items: center; justify-content: space-between; margin-bottom: 23px; }
 .portal-heading h1 { margin: 6px 0 0; font-size: 39px; }

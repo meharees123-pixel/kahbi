@@ -27,6 +27,26 @@ interface User {
   primaryAddressId?: string | null;
 }
 
+interface WhatsAppSetup {
+  phoneNumberId: string | null;
+  phoneNumber: string | null;
+  verifiedName?: string;
+  status: string;
+  platformType: string | null;
+  codeVerificationStatus?: string | null;
+  registrationComplete: boolean;
+}
+
+interface WhatsAppTestMessageResult {
+  success: true;
+  status: 'accepted';
+  messageId: string | null;
+  recipient: string;
+  timestamp: string;
+  providerResponse: unknown;
+  loggingWarning?: string;
+}
+
 interface CustomerAddress {
   id: string;
   labelType: 'HOME' | 'OFFICE' | 'OTHER';
@@ -393,6 +413,22 @@ export class AppComponent implements OnInit, OnDestroy {
   authModalView: 'login' | 'signup' = 'login';
   loginPortal: LoginPortal = 'CUSTOMER';
   user: User | null = null;
+  whatsappTestPopupOpen = false;
+  whatsappTestRecipient = '+974';
+  whatsappTestMessage = 'Hello! This is a test WhatsApp message from KABHI.\n\nYour WhatsApp Cloud API integration is working successfully.\n\nThank you,\nKABHI Team';
+  whatsappTestMessageType: 'text' | 'template' = 'text';
+  whatsappTestSending = false;
+  whatsappTestResult: WhatsAppTestMessageResult | null = null;
+  whatsappTestError = '';
+  whatsappTestProviderError = '';
+  whatsappTestTimestamp = '';
+  whatsappSetup: WhatsAppSetup | null = null;
+  whatsappSetupLoading = false;
+  whatsappSetupError = '';
+  whatsappRegistrationPin = '';
+  whatsappRegistrationLoading = false;
+  whatsappRegistrationResponse = '';
+  private whatsappPopupCheckStarted = false;
   restaurants: Restaurant[] = [];
   expandedRestaurantPhoneId = '';
   menu: MenuItem[] = [];
@@ -739,6 +775,7 @@ export class AppComponent implements OnInit, OnDestroy {
       this.http.get<{ user: User }>(`${this.api}/auth/me`, { headers: this.headers() }).subscribe({
         next: ({ user }) => {
           this.user = user;
+          this.maybeOpenWhatsAppTestPopup();
           if (user.role !== 'CUSTOMER') this.restoreGuestCart();
           if (!['partnerRegistration', 'activateRestaurant', 'legal'].includes(this.view)) this.loadRoleLanding();
           else if (this.isCustomer || this.isRestaurantUser) {
@@ -832,6 +869,139 @@ export class AppComponent implements OnInit, OnDestroy {
 
   get isAdminUser(): boolean {
     return this.user?.role === 'ADMIN' || this.user?.role === 'SUPER_ADMIN';
+  }
+
+  get whatsappRegistrationPinValid(): boolean {
+    return /^\d{6}$/.test(this.whatsappRegistrationPin);
+  }
+
+  get whatsappTestRecipientValid(): boolean {
+    const recipient = this.whatsappTestRecipient.trim().replace(/[().\s-]/g, '');
+    return /^\+?[1-9]\d{7,14}$/.test(recipient) || /^00[1-9]\d{7,14}$/.test(recipient);
+  }
+
+  private maybeOpenWhatsAppTestPopup(): void {
+    if (!this.isAdminUser || this.whatsappPopupCheckStarted) return;
+    this.whatsappPopupCheckStarted = true;
+    this.http.get<{ enabled: boolean }>(`${this.api}/whatsapp/test-popup-config`, { headers: this.headers() }).subscribe({
+      next: ({ enabled }) => {
+        if (!this.isAdminUser || !enabled) return;
+        this.whatsappTestPopupOpen = true;
+        this.refreshWhatsAppSetup();
+      },
+      error: (error) => {
+        if (!this.isAdminUser) return;
+        this.whatsappSetupError = this.whatsappErrorMessage(error);
+      }
+    });
+  }
+
+  closeWhatsAppTestPopup(): void {
+    this.whatsappTestPopupOpen = false;
+    this.whatsappRegistrationPin = '';
+  }
+
+  refreshWhatsAppSetup(): void {
+    if (!this.isAdminUser || this.whatsappSetupLoading) return;
+    this.whatsappSetupLoading = true;
+    this.whatsappSetupError = '';
+    this.http.post<{ setup: WhatsAppSetup }>(`${this.api}/whatsapp/setup`, {}, { headers: this.headers() }).pipe(finalize(() => {
+      this.whatsappSetupLoading = false;
+    })).subscribe({
+      next: ({ setup }) => {
+        if (!this.isAdminUser) return;
+        this.whatsappSetup = setup;
+      },
+      error: (error) => {
+        if (!this.isAdminUser) return;
+        this.whatsappSetupError = this.whatsappErrorMessage(error);
+      }
+    });
+  }
+
+  registerWhatsAppPhoneNumber(): void {
+    if (!this.isAdminUser || this.whatsappRegistrationLoading || !this.whatsappRegistrationPinValid) return;
+    this.whatsappRegistrationLoading = true;
+    this.whatsappSetupError = '';
+    this.whatsappRegistrationResponse = '';
+    this.http.post<{
+      alreadyConnected: boolean;
+      registrationResponse: unknown;
+      setup: WhatsAppSetup;
+    }>(`${this.api}/whatsapp/register`, { pin: this.whatsappRegistrationPin }, { headers: this.headers() }).pipe(finalize(() => {
+      this.whatsappRegistrationLoading = false;
+      this.whatsappRegistrationPin = '';
+    })).subscribe({
+      next: (result) => {
+        if (!this.isAdminUser) return;
+        this.whatsappSetup = result.setup;
+        this.whatsappRegistrationResponse = JSON.stringify({
+          alreadyConnected: result.alreadyConnected,
+          registrationResponse: result.registrationResponse,
+          verification: result.setup
+        }, null, 2);
+      },
+      error: (error) => {
+        if (!this.isAdminUser) return;
+        this.whatsappSetupError = this.whatsappErrorMessage(error);
+        const providerError = error instanceof HttpErrorResponse ? error.error?.providerError : null;
+        this.whatsappRegistrationResponse = providerError ? JSON.stringify(providerError, null, 2) : '';
+      }
+    });
+  }
+
+  sendWhatsAppTestMessage(): void {
+    if (!this.isAdminUser || this.whatsappTestSending || !this.whatsappTestRecipientValid) return;
+    this.whatsappTestSending = true;
+    this.whatsappTestError = '';
+    this.whatsappTestProviderError = '';
+    this.whatsappTestResult = null;
+    this.whatsappTestTimestamp = new Date().toISOString();
+    this.http.post<WhatsAppTestMessageResult>(`${this.api}/whatsapp/send-test-message`, {
+      recipient: this.whatsappTestRecipient,
+      message: this.whatsappTestMessage,
+      messageType: this.whatsappTestMessageType
+    }, { headers: this.headers() }).pipe(finalize(() => {
+      this.whatsappTestSending = false;
+    })).subscribe({
+      next: (result) => {
+        if (!this.isAdminUser) return;
+        this.whatsappTestResult = result;
+        this.whatsappTestTimestamp = result.timestamp;
+      },
+      error: (error) => {
+        if (!this.isAdminUser) return;
+        this.whatsappTestError = this.whatsappErrorMessage(error);
+        const response = error instanceof HttpErrorResponse ? error.error : null;
+        this.whatsappTestTimestamp = response?.timestamp || this.whatsappTestTimestamp;
+        this.whatsappTestProviderError = response?.providerError
+          ? JSON.stringify(response.providerError, null, 2)
+          : '';
+      }
+    });
+  }
+
+  private whatsappErrorMessage(error: unknown): string {
+    if (error instanceof HttpErrorResponse) {
+      return error.error?.error || 'The WhatsApp Cloud API request failed.';
+    }
+    return error instanceof Error ? error.message : 'The WhatsApp Cloud API request failed.';
+  }
+
+  private resetWhatsAppTestState(): void {
+    this.whatsappTestPopupOpen = false;
+    this.whatsappTestRecipient = '+974';
+    this.whatsappTestMessage = 'Hello! This is a test WhatsApp message from KABHI.\n\nYour WhatsApp Cloud API integration is working successfully.\n\nThank you,\nKABHI Team';
+    this.whatsappTestMessageType = 'text';
+    this.whatsappTestResult = null;
+    this.whatsappTestError = '';
+    this.whatsappTestProviderError = '';
+    this.whatsappTestTimestamp = '';
+    this.whatsappSetup = null;
+    this.whatsappSetupError = '';
+    this.whatsappRegistrationPin = '';
+    this.whatsappRegistrationResponse = '';
+    this.whatsappPopupCheckStarted = false;
   }
 
   private roleMatchesLoginPortal(user: User): boolean {
@@ -2587,6 +2757,7 @@ export class AppComponent implements OnInit, OnDestroy {
         }
         localStorage.setItem(this.tokenKey, token);
         this.user = user;
+        this.maybeOpenWhatsAppTestPopup();
         this.error = '';
         this.notice = `Welcome, ${user.name}.`;
         this.loadRoleLanding();
@@ -2872,6 +3043,7 @@ export class AppComponent implements OnInit, OnDestroy {
     localStorage.removeItem(this.tokenKey);
     this.stopOrderStatusStream();
     this.user = null;
+    this.resetWhatsAppTestState();
     this.orders = [];
     this.notifications = [];
     this.notificationUnreadCount = 0;

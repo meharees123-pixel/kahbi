@@ -1,4 +1,84 @@
 <div class="app-shell">
+  <div class="whatsapp-test-backdrop" *ngIf="whatsappTestPopupOpen && isAdminUser" (click)="closeWhatsAppTestPopup()">
+    <section class="whatsapp-test-dialog" role="dialog" aria-modal="true" aria-labelledby="whatsapp-test-title" (click)="$event.stopPropagation()">
+      <div class="whatsapp-test-heading">
+        <div><span class="eyebrow">ADMIN TEST TOOL</span><h2 id="whatsapp-test-title">WhatsApp Cloud API Test</h2></div>
+        <button type="button" class="whatsapp-test-close-icon" aria-label="Close WhatsApp test" (click)="closeWhatsAppTestPopup()">×</button>
+      </div>
+      <p class="whatsapp-test-description">Test your KABHI WhatsApp Business integration by sending a message to your WhatsApp number.</p>
+
+      <div class="whatsapp-test-setup">
+        <div class="whatsapp-test-setup-heading">
+          <div><strong>Business number registration</strong><small>Check the configured Qatar business number before sending.</small></div>
+          <button type="button" class="text-button" [disabled]="whatsappSetupLoading" (click)="refreshWhatsAppSetup()">
+            {{ whatsappSetupLoading ? 'Checking…' : 'Check status' }}
+          </button>
+        </div>
+        <p class="whatsapp-test-status" *ngIf="whatsappSetup">
+          <span>Status: <strong>{{ whatsappSetup.status }}</strong></span>
+          <span *ngIf="whatsappSetup.platformType">Platform: {{ whatsappSetup.platformType }}</span>
+          <span *ngIf="whatsappSetup.phoneNumberId">Phone Number ID: {{ whatsappSetup.phoneNumberId }}</span>
+          <span *ngIf="whatsappSetup.registrationComplete">Registration is complete; it will not be repeated.</span>
+        </p>
+        <p class="whatsapp-test-inline-error" *ngIf="whatsappSetupError" role="alert">{{ whatsappSetupError }}</p>
+        <div class="whatsapp-test-register" *ngIf="whatsappSetup && whatsappSetup.phoneNumberId && !whatsappSetup.registrationComplete">
+          <label class="form-field">
+            <span>Two-step verification PIN <b>*</b></span>
+            <input [(ngModel)]="whatsappRegistrationPin" type="password" inputmode="numeric" autocomplete="off" maxlength="6" placeholder="Enter the six-digit PIN">
+          </label>
+          <button type="button" class="button button-outline" [disabled]="whatsappRegistrationLoading || !whatsappRegistrationPinValid" (click)="registerWhatsAppPhoneNumber()">
+            {{ whatsappRegistrationLoading ? 'Registering…' : 'Register business number' }}
+          </button>
+          <small>Registration is manual and only runs when the current status is not CONNECTED. The PIN is sent to Meta and is not stored.</small>
+        </div>
+        <pre class="whatsapp-test-provider-response" *ngIf="whatsappRegistrationResponse">{{ whatsappRegistrationResponse }}</pre>
+      </div>
+
+      <div class="whatsapp-test-fields">
+        <label class="form-field">
+          <span>Recipient WhatsApp number <b>*</b></span>
+          <input [(ngModel)]="whatsappTestRecipient" type="tel" autocomplete="tel" placeholder="+974 5XXX XXXX">
+          <small>Include the country code. The default country code is +974.</small>
+        </label>
+        <label class="form-field">
+          <span>Message type</span>
+          <select [(ngModel)]="whatsappTestMessageType">
+            <option value="text">Free-form text (24-hour customer service window)</option>
+            <option value="template">Approved hello_world template</option>
+          </select>
+        </label>
+        <label class="form-field whatsapp-test-message-field">
+          <span>Message</span>
+          <textarea [(ngModel)]="whatsappTestMessage" rows="5" maxlength="4096" [disabled]="whatsappTestMessageType === 'template'"></textarea>
+          <small *ngIf="whatsappTestMessageType === 'template'">The approved hello_world template is sent instead of this text.</small>
+        </label>
+      </div>
+
+      <div class="whatsapp-test-result whatsapp-test-result-success" *ngIf="whatsappTestResult" role="status" aria-live="polite">
+        <strong>Accepted by Meta — delivery is not confirmed.</strong>
+        <span>Message ID: {{ whatsappTestResult.messageId || 'No message ID returned' }}</span>
+        <span>Recipient: {{ whatsappTestResult.recipient }}</span>
+        <span>Timestamp: {{ whatsappTestResult.timestamp | date:'medium' }}</span>
+        <small *ngIf="whatsappTestResult.loggingWarning">{{ whatsappTestResult.loggingWarning }}</small>
+        <details><summary>Meta API response</summary><pre>{{ whatsappTestResult.providerResponse | json }}</pre></details>
+      </div>
+      <div class="whatsapp-test-result whatsapp-test-result-error" *ngIf="whatsappTestError" role="alert" aria-live="assertive">
+        <strong>Message was not accepted.</strong>
+        <span>{{ whatsappTestError }}</span>
+        <span>Recipient: {{ whatsappTestRecipient }}</span>
+        <span>Timestamp: {{ whatsappTestTimestamp | date:'medium' }}</span>
+        <pre *ngIf="whatsappTestProviderError">{{ whatsappTestProviderError }}</pre>
+      </div>
+
+      <div class="whatsapp-test-actions">
+        <button type="button" class="button button-outline" [disabled]="whatsappTestSending" (click)="closeWhatsAppTestPopup()">Close</button>
+        <button type="button" class="button button-dark" [disabled]="whatsappTestSending || !whatsappTestRecipientValid || (whatsappTestMessageType === 'text' && !whatsappTestMessage.trim())" (click)="sendWhatsAppTestMessage()">
+          <span class="whatsapp-test-spinner" *ngIf="whatsappTestSending" aria-hidden="true"></span>
+          {{ whatsappTestSending ? 'Sending…' : 'Send Test Message' }}
+        </button>
+      </div>
+    </section>
+  </div>
   <header class="topbar">
     <a class="brand" href="/" (click)="$event.preventDefault(); navigateHome()">
       <img *ngIf="brandLogoData; else textBrand" class="brand-logo" [src]="brandLogoData" alt="KABHI">
@@ -960,7 +1040,7 @@
           <div class="portal-panel"><div class="panel-heading"><div><span class="eyebrow">PROMOTIONS</span><h2>Manage offers</h2></div></div><div class="review-row" *ngFor="let promotion of promotions"><div><strong>{{ promotion.title }} · {{ promotion.code }}</strong><small>{{ statusLabel(promotion.active ? 'ACTIVE' : 'SUSPENDED') }}</small></div><button class="button button-quiet button-small" *ngIf="promotion._id" (click)="togglePromotion(promotion)">{{ promotion.active ? 'Pause' : 'Activate' }}</button></div><div class="add-menu-form"><input [(ngModel)]="newPromotionCode" placeholder="Promotion code"><input [(ngModel)]="newPromotionTitle" placeholder="Offer title"><input [(ngModel)]="newPromotionDiscount" type="number" min="1" max="100" placeholder="Discount percent"><input [(ngModel)]="newPromotionMinimum" type="number" min="0" placeholder="Minimum order (QAR)"><button class="button button-accent" (click)="createPromotion()">Create promotion</button></div></div>
           <div class="portal-panel"><div class="panel-heading"><div><span class="eyebrow">ADVERTISEMENTS</span><h2>Home banners</h2></div></div><div class="review-row" *ngFor="let advertisement of advertisements"><div><strong>{{ advertisement.title }}</strong><small>{{ statusLabel(advertisement.active ? 'ACTIVE' : 'SUSPENDED') }} · {{ advertisement.demo ? 'Demo' : 'Managed' }}</small></div><button class="button button-quiet button-small" (click)="toggleAdvertisement(advertisement)">{{ advertisement.active ? 'Pause' : 'Activate' }}</button></div><div class="add-menu-form"><input [(ngModel)]="newAdvertisementTitle" placeholder="Banner title"><input [(ngModel)]="newAdvertisementDescription" placeholder="Banner description"><button class="button button-accent" (click)="createAdvertisement()">Create sponsored banner</button></div><p class="fine-print">Impressions count actual banner records served; click tracking is not enabled in this MVP.</p></div>
         </div>
-        <div class="portal-panel"><div class="panel-heading"><div><span class="eyebrow">OPERATIONS</span><h2>Communication log</h2></div></div><p class="demo-callout">DEMO MODE · WhatsApp messages are logged, not sent.</p>
+        <div class="portal-panel"><div class="panel-heading"><div><span class="eyebrow">OPERATIONS</span><h2>Communication log</h2></div></div><p class="demo-callout">Manual WhatsApp test attempts are logged here; order notifications are still demo-only.</p>
           <div class="log-row" *ngFor="let log of messageLogs"><span>{{ log.template }}</span><small>{{ log.status }} · {{ log.recipient }}</small></div>
           <p class="muted" *ngIf="!messageLogs.length">No messages recorded.</p>
         </div>
