@@ -38,9 +38,20 @@
         },
         "serve": {
           "builder": "@angular-devkit/build-angular:dev-server",
+          "options": {
+            "host": "0.0.0.0",
+            "allowedHosts": [
+              "kabhiofficial.com",
+              "www.kabhiofficial.com"
+            ]
+          },
           "configurations": {
-            "production": { "buildTarget": "kahbi:build:production" },
-            "development": { "buildTarget": "kahbi:build:development" }
+            "production": {
+              "buildTarget": "kahbi:build:production"
+            },
+            "development": {
+              "buildTarget": "kahbi:build:development"
+            }
           },
           "defaultConfiguration": "development"
         }
