@@ -587,8 +587,8 @@
           <div class="form-field"><label>Promotion code <span class="optional">optional</span></label><input [(ngModel)]="promotionCode" (ngModelChange)="invalidateOrderQuote()" placeholder="e.g. KABHI10"><button class="text-button" type="button" *ngIf="!orderQuote && !orderQuoteLoading" (click)="refreshOrderQuote()">Update order total</button></div>
           <div class="form-field" *ngIf="selectedRestaurant?.paymentMethods?.length">
             <label>Payment method</label>
-            <label class="partner-toggle" *ngIf="selectedRestaurant?.paymentMethods?.includes('CASH_TO_RESTAURANT')"><input type="radio" name="orderPaymentMethod" [(ngModel)]="orderPaymentMethod" value="CASH_TO_RESTAURANT"><span>Cash on delivery</span></label>
-            <label class="partner-toggle" *ngIf="selectedRestaurant?.paymentMethods?.includes('POS_MACHINE')"><input type="radio" name="orderPaymentMethod" [(ngModel)]="orderPaymentMethod" value="POS_MACHINE"><span>Request a POS machine</span></label>
+            <label class="partner-toggle" *ngIf="selectedRestaurant.paymentMethods.includes('CASH_TO_RESTAURANT')"><input type="radio" name="orderPaymentMethod" [(ngModel)]="orderPaymentMethod" value="CASH_TO_RESTAURANT"><span>Cash on delivery</span></label>
+            <label class="partner-toggle" *ngIf="selectedRestaurant.paymentMethods.includes('POS_MACHINE')"><input type="radio" name="orderPaymentMethod" [(ngModel)]="orderPaymentMethod" value="POS_MACHINE"><span>Request a POS machine</span></label>
             <small>The restaurant accepts only the payment methods listed here.</small>
           </div>
           <div class="quote-loading" *ngIf="orderQuoteLoading"><span class="global-loader-spinner"></span><span>Calculating your order total…</span></div>
