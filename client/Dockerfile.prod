@@ -8,5 +8,6 @@ RUN npm run build
 FROM nginx:stable-alpine
 COPY nginx/default.conf.template /etc/nginx/templates/default.conf.template
 COPY --from=build /app/dist/kahbi/browser /usr/share/nginx/html
+
 ENV PORT=8080
 EXPOSE 8080
