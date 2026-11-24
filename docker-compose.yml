@@ -16,7 +16,7 @@ services:
     environment:
       PORT: 3000
       NODE_ENV: ${NODE_ENV:-production}
-      REDIS_URL: ${REDIS_URL}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379}
       MONGODB_URI: ${MONGODB_URI:?Set MONGODB_URI in root .env}
       JWT_SECRET: ${JWT_SECRET}
       CLIENT_ORIGIN: ${CLIENT_ORIGIN}
@@ -74,7 +74,6 @@ services:
     image: kahbi-api
     command: ["npm", "run", "seed"]
     environment:
-      REDIS_URL: ${REDIS_URL}
       MONGODB_URI: ${MONGODB_URI:?Set MONGODB_URI in root .env}
 
   web:
@@ -83,6 +82,9 @@ services:
       dockerfile: Dockerfile.prod
 
     restart: unless-stopped
+
+    environment:
+      API_UPSTREAM: http://api:3000
 
     ports:
       - "127.0.0.1:4200:8080"
